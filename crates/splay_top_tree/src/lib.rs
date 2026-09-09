@@ -3,7 +3,7 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use crate::{index::Index, tree::EdgeKey};
+use crate::{index::Index, tree::EdgeKey, util::TaggedPtr};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15,20 +15,49 @@ bitflags::bitflags! {
     }
 }
 
+impl NodeFlags {
+    fn num_boundary(&self) -> usize {
+        let mut count = 0;
+        count += usize::from(self.contains(NodeFlags::BOUNDARY_LOW));
+        count += 2 * usize::from(self.contains(NodeFlags::BOUNDARY_HIGH));
+        count
+    }
+}
+
+unsafe impl util::Tag for NodeFlags {
+    const BITS: u32 = 4;
+
+    fn into_usize(self) -> usize {
+        self.bits() as usize
+    }
+
+    unsafe fn from_usize(tag: usize) -> Self {
+        Self::from_bits_truncate(tag as u8)
+    }
+}
+
+fn boundary_bits(num: usize) -> NodeFlags {
+    debug_assert!(num <= 2);
+    let mut flags = NodeFlags::empty();
+    flags.set(NodeFlags::BOUNDARY_LOW, num & 1 != 0);
+    flags.set(NodeFlags::BOUNDARY_HIGH, num & 2 != 0);
+    flags
+}
+
 #[repr(C, align(16))]
 struct Node<W> {
-    parent: *mut Node<W>,
+    parent: TaggedPtr<InternalNode<W>, NodeFlags>,
     weight: W,
 }
 
 impl<W> Node<W> {
-    unsafe fn dealloc(this: NonNull<Self>) {
-        use LeafOrInternal::*;
-        unsafe {
-            match this.as_ref().force() {
-                Leaf(_) => _ = Box::<LeafNode<W>>::from_non_null(this.cast()),
-                Internal(_) => _ = Box::<InternalNode<W>>::from_non_null(this.cast()),
-            }
+    unsafe fn dealloc(this: NonNull<Node<W>>) {
+        let leaf = unsafe { this.as_ref() }.is_leaf();
+        let ptr = this.as_ptr();
+        if leaf {
+            drop(unsafe { Box::from_raw(ptr as *mut LeafNode<W>) });
+        } else {
+            drop(unsafe { Box::from_raw(ptr as *mut InternalNode<W>) });
         }
     }
 }
@@ -43,14 +72,12 @@ impl<W> LeafNode<W> {
     fn alloc(weight: W, edge: EdgeKey, num_boundary: usize) -> NonNull<Self> {
         let mut node = Box::new(LeafNode {
             node: Node {
-                parent: std::ptr::null_mut(),
+                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
                 weight,
             },
             edge,
         });
-        node.set_flags(NodeFlags::LEAF);
-        node.set_num_boundary(num_boundary);
-
+        node.node.set_num_boundary(num_boundary);
         Box::into_non_null(node)
     }
 }
@@ -70,14 +97,16 @@ impl<W> InternalNode<W> {
     ) -> NonNull<Self> {
         let mut node = Box::new(InternalNode {
             node: Node {
-                parent: std::ptr::null_mut(),
+                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
                 weight,
             },
             children: [left, right],
         });
-        node.set_flags(NodeFlags::empty());
-        node.set_num_boundary(num_boundary);
-
+        node.node.set_num_boundary(num_boundary);
+        unsafe {
+            (&mut *left.as_ptr()).set_parent(Some(NonNull::from(&mut *node)));
+            (&mut *right.as_ptr()).set_parent(Some(NonNull::from(&mut *node)));
+        }
         Box::into_non_null(node)
     }
 }
@@ -112,13 +141,8 @@ impl<W> core::ops::DerefMut for InternalNode<W> {
 
 impl<W> Node<W> {
     fn flags(&self) -> NodeFlags {
-        NodeFlags::from_bits_truncate((self.parent.addr() >> 60) as u8)
+        self.parent.tag()
     }
-    fn set_flags(&mut self, flags: NodeFlags) {
-        let bits = (flags.bits() as usize) << 60;
-        self.parent = self.parent.map_addr(|addr| bits | ((addr >> 4) << 4));
-    }
-
     fn is_leaf(&self) -> bool {
         self.flags().contains(NodeFlags::LEAF)
     }
@@ -127,24 +151,42 @@ impl<W> Node<W> {
         self.flags().contains(NodeFlags::FLIPPED)
     }
 
+    fn set_flipped(&mut self, flipped: bool) {
+        self.parent.update_tag(|flags| {
+            flags.set(NodeFlags::FLIPPED, flipped);
+        });
+    }
+
+    fn toggle_flipped(&mut self) {
+        self.parent.update_tag(|flags| {
+            flags.toggle(NodeFlags::FLIPPED);
+        });
+    }
+
     fn num_boundary(&self) -> usize {
-        let flags = self.flags();
-        (flags.contains(NodeFlags::BOUNDARY_LOW) as usize)
-            + (2 * flags.contains(NodeFlags::BOUNDARY_HIGH) as usize)
+        self.parent.tag().num_boundary()
     }
 
     fn set_num_boundary(&mut self, num: usize) {
-        let mut flags = self.flags();
-        flags.set(NodeFlags::BOUNDARY_LOW, num & 1 != 0);
-        flags.set(NodeFlags::BOUNDARY_HIGH, num & 2 != 0);
-        self.set_flags(flags);
+        assert!(num <= 2, "num_boundary must be <= 2");
+        self.parent.update_tag(|flags| {
+            flags.remove(NodeFlags::BOUNDARY_LOW | NodeFlags::BOUNDARY_HIGH);
+            flags.insert(boundary_bits(num));
+        });
     }
 
-    fn update_num_boundary(&mut self, f: impl FnOnce(usize) -> usize) {
-        let num = self.num_boundary();
-        let new_num = f(num);
-        assert!(new_num <= 2, "num_boundary must be <= 2");
-        self.set_num_boundary(new_num);
+    fn inc_num_boundary(&mut self) {
+        let new = self.num_boundary() + 1;
+        assert!(new <= 2, "num_boundary must be <= 2");
+        self.set_num_boundary(new);
+    }
+
+    fn dec_num_boundary(&mut self) {
+        let new = self
+            .num_boundary()
+            .checked_sub(1)
+            .expect("num_boundary must be >= 0");
+        self.set_num_boundary(new);
     }
 
     fn is_path(&self) -> bool {
@@ -155,80 +197,22 @@ impl<W> Node<W> {
         self.num_boundary() < 2
     }
 
-    fn update_flipped(&mut self, f: impl FnOnce(bool) -> bool) {
-        self.set_flags(self.flags().union(if f(self.is_flipped()) {
-            NodeFlags::FLIPPED
-        } else {
-            NodeFlags::empty()
-        }));
-    }
-
-    fn push_flip(&mut self) {
-        if !self.is_leaf() {
-            let internal_node = unsafe { &mut *(self as *mut Node<W> as *mut InternalNode<W>) };
-            internal_node.push_flip();
-        }
-    }
-
-    unsafe fn as_leaf_unchecked(&self) -> &LeafNode<W> {
-        assert!(self.is_leaf());
-        unsafe { &*(self as *const Node<W> as *const LeafNode<W>) }
-    }
-
-    unsafe fn as_internal_unchecked(&self) -> &InternalNode<W> {
-        assert!(!self.is_leaf());
-        unsafe { &*(self as *const Node<W> as *const InternalNode<W>) }
-    }
-
-    unsafe fn as_leaf_mut_unchecked(&mut self) -> &mut LeafNode<W> {
-        assert!(self.is_leaf());
-        unsafe { &mut *(self as *mut Node<W> as *mut LeafNode<W>) }
-    }
-
-    unsafe fn as_internal_mut_unchecked(&mut self) -> &mut InternalNode<W> {
-        assert!(!self.is_leaf());
-        unsafe { &mut *(self as *mut Node<W> as *mut InternalNode<W>) }
-    }
-
-    fn force(&self) -> LeafOrInternal<&LeafNode<W>, &InternalNode<W>> {
-        if self.is_leaf() {
-            LeafOrInternal::Leaf(unsafe { self.as_leaf_unchecked() })
-        } else {
-            LeafOrInternal::Internal(unsafe { self.as_internal_unchecked() })
-        }
-    }
-
-    fn force_mut(&mut self) -> LeafOrInternal<&mut LeafNode<W>, &mut InternalNode<W>> {
-        if self.is_leaf() {
-            LeafOrInternal::Leaf(unsafe { self.as_leaf_mut_unchecked() })
-        } else {
-            LeafOrInternal::Internal(unsafe { self.as_internal_mut_unchecked() })
-        }
-    }
-
     fn parent(&self) -> Option<NonNull<InternalNode<W>>> {
-        NonNull::new(self.parent.map_addr(|addr| addr >> 4).cast())
+        self.parent.as_non_null()
     }
 
-    unsafe fn parent_ref(&self) -> Option<&InternalNode<W>> {
-        self.parent().map(|p| unsafe { p.as_ref() })
+    fn set_parent(&mut self, parent: Option<NonNull<InternalNode<W>>>) {
+        self.parent
+            .set_ptr(parent.map_or(ptr::null_mut(), NonNull::as_ptr));
     }
 
-    unsafe fn parent_mut<'a>(&mut self) -> Option<&'a mut InternalNode<W>> {
-        self.parent().map(|mut p| unsafe { p.as_mut() })
+    fn parent_node(&self) -> Option<NonNull<Node<W>>> {
+        self.parent().map(NonNull::cast)
     }
 
     fn grandparent(&self) -> Option<NonNull<InternalNode<W>>> {
         self.parent()
             .and_then(|p| unsafe { p.as_ref().node.parent() })
-    }
-
-    unsafe fn grandparent_ref(&self) -> Option<&InternalNode<W>> {
-        self.grandparent().map(|gp| unsafe { gp.as_ref() })
-    }
-
-    unsafe fn grandparent_mut(&mut self) -> Option<&mut InternalNode<W>> {
-        self.grandparent().map(|mut gp| unsafe { gp.as_mut() })
     }
 
     fn ggp(&self) -> Option<NonNull<InternalNode<W>>> {
@@ -237,38 +221,21 @@ impl<W> Node<W> {
             .and_then(|gp| unsafe { gp.as_ref().node.parent() })
     }
 
-    unsafe fn ggp_ref(&self) -> Option<&InternalNode<W>> {
-        self.ggp().map(|gp| unsafe { gp.as_ref() })
-    }
-
-    unsafe fn ggp_mut(&mut self) -> Option<&mut InternalNode<W>> {
-        self.ggp().map(|mut gp| unsafe { gp.as_mut() })
-    }
-
-    fn set_parent(&mut self, parent: Option<NonNull<InternalNode<W>>>) {
-        let flags = (self.flags().bits() as usize) << 60;
-        self.parent = parent
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
-            .cast::<Node<W>>()
-            .map_addr(|addr| flags | (addr >> 4));
-    }
-
     fn sibling(&self) -> Option<NonNull<Node<W>>> {
-        self.parent().map(|parent| {
-            let internal_node = unsafe { parent.as_ref() };
-            let index = if internal_node.children[0] == NonNull::from(self) {
-                1
+        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
+            let self_ptr = NonNull::from(self);
+            if p.children[0] == self_ptr {
+                p.children[1]
             } else {
-                0
-            };
-            internal_node.children[index]
+                p.children[0]
+            }
         })
     }
 
     fn is_left_child(&self) -> Option<bool> {
-        self.parent().map(|parent| {
-            let internal_node = unsafe { parent.as_ref() };
-            internal_node.children[0] == NonNull::from(self)
+        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
+            let self_ptr = NonNull::from(self);
+            p.children[0] == self_ptr
         })
     }
 }
@@ -1056,8 +1023,19 @@ mod util {
             self.packed = Self::pack(ptr, tag);
         }
 
+        pub fn update_tag<F: FnOnce(&mut T)>(&mut self, f: F) {
+            let mut tag = self.tag();
+            f(&mut tag);
+            self.set_tag(tag);
+        }
+
         pub fn as_ptr(&self) -> *mut P {
             self.packed.map_addr(|addr| addr << T::BITS)
+        }
+
+        pub fn set_ptr(&mut self, ptr: *mut P) {
+            let tag = self.tag();
+            self.packed = Self::pack(ptr, tag);
         }
 
         pub fn as_non_null(&self) -> Option<NonNull<P>> {
