@@ -6,6 +6,7 @@ use std::{
 use crate::{index::Index, tree::EdgeKey};
 
 bitflags::bitflags! {
+    #[derive(Clone, Copy, PartialEq, Eq)]
     struct NodeFlags: u8 {
         const LEAF = 1 << 0;
         const FLIPPED = 1 << 1;
@@ -742,6 +743,7 @@ mod tree {
         pub endpoints: [Index; 2],
     }
 
+    #[derive(Debug)]
     pub struct EdgeEndpoints {
         pub left: Index,
         pub right: Index,
@@ -914,7 +916,7 @@ pub mod index {
 }
 
 mod util {
-    use std::mem::ManuallyDrop;
+    use std::{mem::ManuallyDrop, num::NonZero, ptr::NonNull};
 
     pub struct WithDrop<F: FnOnce(&mut T), T> {
         t: T,
@@ -971,8 +973,102 @@ mod util {
             f(&mut self.t);
         }
     }
+
+    pub unsafe trait Tag: Copy {
+        const BITS: u32;
+        fn into_usize(self) -> usize;
+        unsafe fn from_usize(tag: usize) -> Self;
+    }
+
+    const fn align_of<T: ?Sized + Aligned>() -> usize {
+        T::ALIGN
+    }
+
+    pub unsafe trait Aligned {
+        /// Alignment of `Self`.
+        const ALIGN: usize;
+    }
+
+    unsafe impl<T> Aligned for T {
+        const ALIGN: usize = core::mem::align_of::<Self>();
+    }
+
+    unsafe impl<T> Aligned for [T] {
+        const ALIGN: usize = core::mem::align_of::<T>();
+    }
+
+    const fn bits_for<T: ?Sized + Aligned>() -> u32 {
+        let align = align_of::<T>();
+        align.trailing_zeros()
+    }
+
+    const fn bits_for_tags(mut tags: &[usize]) -> u32 {
+        let mut bits = 0;
+        while let &[tag, ref rest @ ..] = tags {
+            tags = rest;
+            let b = usize::BITS - tag.leading_zeros();
+            if b > bits {
+                bits = b;
+            }
+        }
+
+        bits
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct TaggedPtr<P: Aligned + ?Sized, T> {
+        packed: *mut P,
+        _marker: core::marker::PhantomData<T>,
+    }
+
+    impl<P, T> TaggedPtr<P, T>
+    where
+        T: Tag,
+        P: Aligned + ?Sized,
+    {
+        pub fn new(ptr: *mut P, tag: T) -> Self {
+            Self {
+                packed: Self::pack(ptr, tag),
+                _marker: core::marker::PhantomData,
+            }
+        }
+
+        const ASSERTION: () =
+            { assert!(T::BITS <= bits_for::<P>(), "Not enough bits to store tag") };
+        const TAG_BIT_SHIFT: u32 = usize::BITS - T::BITS;
+
+        pub fn pack(ptr: *mut P, tag: T) -> *mut P {
+            let () = Self::ASSERTION;
+
+            let packed_tag = tag.into_usize() << Self::TAG_BIT_SHIFT;
+
+            ptr.map_addr(|addr| addr | packed_tag)
+        }
+
+        pub fn tag(&self) -> T {
+            let packed_addr = self.packed.addr();
+            let tag_bits = packed_addr >> Self::TAG_BIT_SHIFT;
+            unsafe { T::from_usize(tag_bits) }
+        }
+
+        pub fn set_tag(&mut self, tag: T) {
+            let ptr = self.as_ptr();
+            self.packed = Self::pack(ptr, tag);
+        }
+
+        pub fn as_ptr(&self) -> *mut P {
+            self.packed.map_addr(|addr| addr << T::BITS)
+        }
+
+        pub fn as_non_null(&self) -> Option<NonNull<P>> {
+            NonNull::new(self.as_ptr())
+        }
+    }
 }
 
 trait Reduce {
     fn reduce(&self, other: &Self) -> Self;
 }
+
+#[cfg(test)]
+mod tests;
