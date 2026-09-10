@@ -1,9 +1,12 @@
-use std::{
-    ops::Not as _,
-    ptr::{self, NonNull},
-};
+#![feature(ptr_as_uninit, cast_maybe_uninit)]
 
-use crate::{index::Index, tree::EdgeKey, util::TaggedPtr};
+use std::ptr::{self, NonNull};
+
+use crate::{
+    index::Index,
+    tree::{EdgeKey, OwningEdgeKey, Tree},
+    util::TaggedPtr,
+};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,11 +68,11 @@ impl<W> Node<W> {
 #[repr(C)]
 struct LeafNode<W> {
     node: Node<W>,
-    edge: EdgeKey,
+    edge: OwningEdgeKey,
 }
 
 impl<W> LeafNode<W> {
-    fn alloc(weight: W, edge: EdgeKey, num_boundary: usize) -> NonNull<Self> {
+    fn alloc(weight: W, edge: OwningEdgeKey, num_boundary: usize) -> NonNull<Self> {
         let mut node = Box::new(LeafNode {
             node: Node {
                 parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
@@ -79,6 +82,21 @@ impl<W> LeafNode<W> {
         });
         node.node.set_num_boundary(num_boundary);
         Box::into_non_null(node)
+    }
+
+    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: OwningEdgeKey, num_boundary: usize) {
+        unsafe {
+            let uninit = node.as_uninit_mut();
+            uninit.write(LeafNode {
+                node: Node {
+                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
+                    weight,
+                },
+                edge,
+            });
+
+            uninit.assume_init_mut().node.set_num_boundary(num_boundary)
+        };
     }
 }
 
@@ -103,11 +121,15 @@ impl<W> InternalNode<W> {
             children: [left, right],
         });
         node.node.set_num_boundary(num_boundary);
+
+        let node = Box::into_non_null(node);
+
         unsafe {
-            (&mut *left.as_ptr()).set_parent(Some(NonNull::from(&mut *node)));
-            (&mut *right.as_ptr()).set_parent(Some(NonNull::from(&mut *node)));
+            (&mut *left.as_ptr()).set_parent(Some(node));
+            (&mut *right.as_ptr()).set_parent(Some(node));
         }
-        Box::into_non_null(node)
+
+        node
     }
 }
 
@@ -137,6 +159,15 @@ impl<W> core::ops::DerefMut for InternalNode<W> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.node
     }
+}
+
+mod marker {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Leaf;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Internal;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Either;
 }
 
 impl<W> Node<W> {
@@ -221,7 +252,9 @@ impl<W> Node<W> {
             .and_then(|gp| unsafe { gp.as_ref().node.parent() })
     }
 
-    fn sibling(&self) -> Option<NonNull<Node<W>>> {
+    /// # Safety
+    /// Creates a reference to the parent of this node.
+    unsafe fn sibling(&self) -> Option<NonNull<Node<W>>> {
         self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
             let self_ptr = NonNull::from(self);
             if p.children[0] == self_ptr {
@@ -232,100 +265,169 @@ impl<W> Node<W> {
         })
     }
 
-    fn is_left_child(&self) -> Option<bool> {
+    unsafe fn is_left_child(&self) -> Option<bool> {
         self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
             let self_ptr = NonNull::from(self);
             p.children[0] == self_ptr
         })
     }
+
+    fn force_ptr(
+        this: NonNull<Self>,
+    ) -> LeafOrInternal<NonNull<LeafNode<W>>, NonNull<InternalNode<W>>> {
+        if unsafe { (&*this.as_ptr()).is_leaf() } {
+            LeafOrInternal::Leaf(this.cast())
+        } else {
+            LeafOrInternal::Internal(this.cast())
+        }
+    }
 }
 
 impl<W> InternalNode<W> {
-    fn push_flip(&mut self) {
+    /// # Safety
+    /// Creates mutable references to the children of this node.
+    unsafe fn push_flip(&mut self) {
         if self.node.is_flipped() {
-            self.node.update_flipped(|_| false);
+            self.node.set_flipped(false);
             self.children.swap(0, 1);
-            for child in self.children.iter_mut() {
-                unsafe { child.as_mut().update_flipped(|f| !f) };
+            for mut child in self.children {
+                unsafe {
+                    child.as_mut().toggle_flipped();
+                }
             }
         }
     }
 }
 
-struct TopTreeCtx<'a, W> {
-    tree: &'a mut tree::Tree<NonNull<LeafNode<W>>>,
+#[derive(Debug, Clone, Copy)]
+struct Handle<W, NodeType> {
+    node: NonNull<Node<W>>,
+    _marker: core::marker::PhantomData<NodeType>,
 }
 
-impl<'a, W> TopTreeCtx<'a, W> {
-    fn node_has_left_boundary(&self, node: &Node<W>) -> bool {
-        match node.force() {
-            LeafOrInternal::Leaf(leaf) => {
-                let edge = leaf.edge;
-                let v =
-                    self.tree.endpoints(&edge).expect("edge must exist in tree")[node.is_flipped()];
+impl<W, NodeType> PartialEq for Handle<W, NodeType> {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+    }
+}
 
-                self.tree
-                    .vertices
-                    .get(&v)
-                    .expect("vertex must exist in tree")
-                    .exposed
-                    || self.tree.degree(v).expect("vertex must exist in tree") <= 1
-            }
-            LeafOrInternal::Internal(internal) => {
-                let child = unsafe { internal.children[node.is_flipped() as usize].as_ref() };
+impl<W, NodeType> Eq for Handle<W, NodeType> {}
 
-                child.is_path()
-            }
+impl<W> Handle<W, marker::Either> {
+    fn new_either(node: NonNull<Node<W>>) -> Handle<W, marker::Either> {
+        Handle {
+            node,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<W> Handle<W, marker::Leaf> {
+    fn new_leaf(node: NonNull<Node<W>>) -> Handle<W, marker::Leaf> {
+        Handle {
+            node,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<W, NodeType> Handle<W, NodeType> {
+    fn new(node: NonNull<Node<W>>) -> Self {
+        Self {
+            node,
+            _marker: core::marker::PhantomData,
         }
     }
 
-    fn node_has_right_boundary(&self, node: &Node<W>) -> bool {
-        match node.force() {
-            LeafOrInternal::Leaf(leaf) => {
-                let edge = leaf.edge;
-                let v = self.tree.endpoints(&edge).expect("edge must exist in tree")
-                    [!node.is_flipped()];
-
-                self.tree
-                    .vertices
-                    .get(&v)
-                    .expect("vertex must exist in tree")
-                    .exposed
-                    || self.tree.degree(v).expect("vertex must exist in tree") <= 1
-            }
-            LeafOrInternal::Internal(internal) => {
-                let child = unsafe { internal.children[!node.is_flipped() as usize].as_ref() };
-
-                child.is_path()
-            }
+    unsafe fn new_internal(node: NonNull<InternalNode<W>>) -> Self {
+        Self {
+            node: node.cast(),
+            _marker: core::marker::PhantomData,
         }
     }
 
-    fn node_has_middle_boundary(&self, node: &Node<W>) -> bool {
-        if node.is_leaf() || node.num_boundary() == 0 {
+    fn force(&self) -> LeafOrInternal<Handle<W, marker::Leaf>, Handle<W, marker::Internal>> {
+        if unsafe { self.node.as_ref().is_leaf() } {
+            LeafOrInternal::Leaf(Handle::new(self.node))
+        } else {
+            LeafOrInternal::Internal(Handle::new(self.node))
+        }
+    }
+
+    fn parent(&self) -> Option<Handle<W, marker::Internal>> {
+        unsafe { self.node.as_ref().parent().map(|p| Handle::new_internal(p)) }
+    }
+
+    fn is_left_child(&self) -> Option<bool> {
+        unsafe { self.node.as_ref().is_left_child() }
+    }
+
+    fn sibling(&self) -> Option<Handle<W, NodeType>> {
+        let parent = self.parent()?;
+        let [left, right] = parent.children();
+        if left.node == self.node {
+            Some(Self::new(right.node))
+        } else {
+            Some(Self::new(left.node))
+        }
+    }
+
+    fn num_boundary(&self) -> usize {
+        unsafe { self.node.as_ref().num_boundary() }
+    }
+
+    fn set_num_boundary(&mut self, num: usize) {
+        unsafe { self.node.as_mut().set_num_boundary(num) }
+    }
+
+    fn inc_num_boundary(&mut self) {
+        unsafe { self.node.as_mut().inc_num_boundary() }
+    }
+
+    fn dec_num_boundary(&mut self) {
+        unsafe { self.node.as_mut().dec_num_boundary() }
+    }
+
+    fn has_middle_boundary(&self) -> bool {
+        use LeafOrInternal::*;
+        if self.num_boundary() == 0 {
             return false;
         }
-
-        let internal = unsafe { node.as_internal_unchecked() };
-
-        0 != node.num_boundary()
-            - internal
-                .children
-                .iter()
-                .map(|child| unsafe { child.as_ref() })
-                .map(|child| child.is_path() as usize)
-                .sum::<usize>()
+        match self.force() {
+            Leaf(_) => false,
+            Internal(internal) => internal.num_boundary() != internal.num_path_children(),
+        }
     }
 
-    /// # Safety
-    /// creats mutable references to the parent, grandparent, sibling and uncle
-    /// of the given node, which must not alias with any other references to
-    /// those nodes.
-    unsafe fn rotate_up(&self, node: &mut Node<W>) -> Option<()> {
-        let parent = unsafe { node.parent()?.as_mut() };
-        let gp = unsafe { parent.node.parent()?.as_mut() };
-        let sibling = unsafe { node.sibling()?.as_mut() };
-        let uncle = unsafe { parent.node.sibling()?.as_mut() };
+    fn is_path(&self) -> bool {
+        unsafe { self.node.as_ref().is_path() }
+    }
+
+    fn is_point(&self) -> bool {
+        unsafe { self.node.as_ref().is_point() }
+    }
+
+    fn is_flipped(&self) -> bool {
+        unsafe { self.node.as_ref().is_flipped() }
+    }
+
+    fn set_flipped(&mut self, flipped: bool) {
+        unsafe { self.node.as_mut().set_flipped(flipped) }
+    }
+
+    fn toggle_flipped(&mut self) {
+        unsafe { self.node.as_mut().toggle_flipped() }
+    }
+
+    /// returns `None` if the node has no grandparent (i.e. is a child of/or the root)
+    fn rotate_up(&mut self) -> Option<()>
+    where
+        W: Reduce,
+    {
+        let mut sibling = self.sibling()?;
+        let mut parent = self.parent()?;
+        let uncle = parent.sibling()?;
+        let mut gp = parent.parent()?;
 
         gp.push_flip();
         parent.push_flip();
@@ -335,19 +437,19 @@ impl<'a, W> TopTreeCtx<'a, W> {
         let same_sides = uncle_is_left == sibling_is_left;
         let sibling_is_path = sibling.is_path();
         let uncle_is_path = uncle.is_path();
-        let gp_is_path = gp.node.is_path();
+        let gp_is_path = gp.is_path();
 
         let new_parent_is_path: bool;
         let flip_new_parent: bool;
         let flip_gp: bool;
         if same_sides && sibling_is_path {
             // path
-            let gp_has_middle = self.node_has_middle_boundary(&gp.node);
+            let gp_has_middle = gp.has_middle_boundary();
             new_parent_is_path = gp_has_middle || uncle_is_path;
             flip_new_parent = false;
             if gp_has_middle
                 && !gp_is_path
-                && let Some(gp_is_left) = gp.node.is_left_child()
+                && let Some(gp_is_left) = gp.is_left_child()
             {
                 flip_gp = gp_is_left == uncle_is_left;
             } else {
@@ -359,316 +461,499 @@ impl<'a, W> TopTreeCtx<'a, W> {
                 new_parent_is_path = sibling_is_path || uncle_is_path;
                 flip_new_parent = sibling_is_path;
                 flip_gp = sibling_is_path;
-                node.update_flipped(|f| f ^ true);
+                self.toggle_flipped();
             } else {
                 new_parent_is_path = uncle_is_path;
                 flip_new_parent = false;
                 flip_gp = false;
-                sibling.update_flipped(|f| f ^ true);
+                sibling.toggle_flipped();
             }
         }
 
-        parent.children[uncle_is_left as usize] = NonNull::from(sibling);
-        parent.children[uncle_is_left.not() as usize] = NonNull::from(&mut *uncle);
-        parent.node.update_flipped(|_| flip_new_parent);
-        parent
-            .node
-            .set_num_boundary(if new_parent_is_path { 2 } else { 1 });
+        parent.set_child(sibling.node, uncle_is_left);
+        parent.set_child(uncle.node, !uncle_is_left);
+        parent.set_flipped(flip_new_parent);
+        parent.set_num_boundary(if new_parent_is_path { 2 } else { 1 });
 
-        gp.children[uncle_is_left as usize] = NonNull::from(&mut *node);
-        gp.children[uncle_is_left.not() as usize] = NonNull::from(&parent.node);
-        gp.node.update_flipped(|_| flip_gp);
+        gp.set_child(self.node, uncle_is_left);
+        gp.set_child(parent.node, !uncle_is_left);
+        gp.set_flipped(flip_gp);
 
         // recompute W for parent and gp
+        parent.recompute_weight();
+        gp.recompute_weight();
 
-        node.set_parent(Some(NonNull::from(gp)));
-        uncle.set_parent(Some(NonNull::from(parent)));
-
-        todo!()
+        Some(())
     }
 
-    fn splay_step<'n>(&self, mut node: &'n mut Node<W>) -> Option<&'n mut Node<W>> {
-        loop {
-            let mut p = node.parent()?;
-            let mut gp = node.grandparent()?;
-
-            if node.is_point() && unsafe { gp.as_mut().is_point() } {
-                unsafe {
-                    self.rotate_up(node).expect("rotate_up should succeed");
-                    return Some(&mut gp.as_mut().node);
-                };
-            }
-
-            let mut ggp = node.ggp()?;
-
-            if unsafe {
-                p.as_ref().node.is_point()
-                    && (gp.as_ref().node.is_point() || ggp.as_ref().node.is_point())
-            } {
-                unsafe {
-                    gp.as_mut().push_flip();
-                    p.as_mut().push_flip();
-
-                    let node_is_left = node.is_left_child().expect("node must have a parent");
-                    let p_is_left = p
-                        .as_ref()
-                        .node
-                        .is_left_child()
-                        .expect("p must have a parent");
-                    let gp_is_left = gp
-                        .as_ref()
-                        .node
-                        .is_left_child()
-                        .expect("gp must have a parent");
-
-                    if node_is_left == p_is_left {
-                        self.rotate_up(node).expect("rotate_up should succeed");
-                        return Some(&mut gp.as_mut().node);
-                    }
-
-                    if p_is_left == gp_is_left {
-                        self.rotate_up(&mut p.as_mut().node)
-                            .expect("rotate_up should succeed");
-                        return Some(&mut ggp.as_mut().node);
-                    }
-
-                    assert_eq!(node_is_left, gp_is_left);
-                    self.rotate_up(node.sibling().expect("node must have a sibling").as_mut())
-                        .expect("rotate_up should succeed");
-                    self.rotate_up(&mut p.as_mut().node)
-                        .expect("rotate_up should succeed");
-
-                    return Some(&mut ggp.as_mut().node);
-                }
-            }
-
-            node = unsafe { &mut p.as_mut().node };
+    fn forget_type(self) -> Handle<W, marker::Either> {
+        Handle {
+            node: self.node,
+            _marker: core::marker::PhantomData,
         }
     }
 
-    fn semi_splay(&self, node: &mut Node<W>) {
-        let mut node = Some(node);
-        while let Some(next_node) = node {
-            node = self.splay_step(next_node);
-        }
-    }
-
-    fn splay(&self, node: &mut Node<W>) {
-        while let Some(next_node) = self.splay_step(node) {
-            self.splay_step(next_node);
-        }
-    }
-
-    fn find_consuming_node(&self, vert: Index) -> Option<NonNull<Node<W>>> {
-        let edge = self.tree.incident_edges(vert).next()?;
-        let mut node = edge.weight;
-
-        self.semi_splay(unsafe { &mut node.as_mut().node });
-        if self.tree.has_at_most_one_incident_edge(vert) {
-            return Some(node.cast());
-        }
-
-        let node_ref = unsafe { node.as_ref() };
-        let mut node = node.cast::<Node<W>>();
-
-        // Determine if the vertex is the left or right boundary of the edge-node
-        let endpoints = self.tree.endpoints(&node_ref.edge)?;
-        let flip = node_ref.is_flipped();
-        let mut is_left = (endpoints.left == vert) != flip;
-        let mut is_right = (endpoints.right == vert) != flip;
-        let mut is_middle = false;
-
-        let mut last_middle_node = None;
-        while let Some(parent) = unsafe { node.as_ref().parent() } {
-            let node_ref = unsafe { node.as_ref() };
-            let parent_ref = unsafe { parent.as_ref() };
-            let is_left_child = node_ref.is_left_child().unwrap();
-
-            is_middle = if is_left_child {
-                is_right || (is_middle && !self.node_has_right_boundary(node_ref))
-            } else {
-                is_left || (is_middle && !self.node_has_left_boundary(node_ref))
-            };
-            is_left = (is_left_child != parent_ref.is_flipped()) && !is_middle;
-            is_right = (is_left_child == parent_ref.is_flipped()) && !is_middle;
-
-            node = parent.cast();
-
-            if is_middle {
-                if !self.node_has_middle_boundary(&parent_ref.node) {
-                    return Some(node);
-                }
-                last_middle_node = Some(node);
-            }
-        }
-
-        last_middle_node
-    }
-}
-
-impl<'a, W> TopTreeCtx<'a, W> {
-    pub fn expose(&mut self, vert: Index) -> Option<&'a mut InternalNode<W>> {
-        let Some(mut node) = self.find_consuming_node(vert) else {
-            if let Some(vert) = self.tree.vertices.get_mut(&vert) {
-                vert.exposed = true;
-            }
-            return None;
-        };
-
-        let mut node_ref = unsafe { node.as_mut().as_internal_mut_unchecked() };
-        while node_ref.is_path() {
-            let mut parent = node_ref.parent().unwrap();
-            node_ref.push_flip();
-            let is_right = !node_ref.is_left_child().unwrap();
-            let child = unsafe { node_ref.children[is_right as usize].as_mut() };
-            unsafe { self.rotate_up(child).expect("rotate_up should succeed") };
-            node_ref = unsafe { parent.as_mut() };
-        }
-
-        self.splay(node_ref);
-
-        let mut node = Some(node_ref);
-        let mut root = None;
-        while let Some(node_ref) = node {
-            node_ref.update_num_boundary(|n| n + 1);
-            let parent = unsafe { node_ref.parent_mut() };
-            root = Some(node_ref);
-            node = parent;
-        }
-
-        if let Some(vert) = self.tree.vertices.get_mut(&vert) {
-            vert.exposed = true;
-        }
-
-        root
-    }
-
-    pub fn deexpose(&mut self, vert: Index) -> &'a mut InternalNode<W> {
-        let mut root = None;
-        let node = self.find_consuming_node(vert);
-
-        while let Some(mut node) = node {
-            let node_ref = unsafe { node.as_mut() };
-            node_ref.update_num_boundary(|n| n - 1);
-            root = Some(node_ref);
-        }
-
-        if let Some(vert) = self.tree.vertices.get_mut(&vert) {
-            vert.exposed = false;
-        }
-
-        unsafe { root.unwrap().as_internal_mut_unchecked() }
-    }
-
-    pub fn link(&mut self, u: Index, v: Index, weight: W) -> &'a mut Node<W>
+    fn splay_step(self) -> Option<Handle<W, marker::Either>>
     where
         W: Reduce,
     {
-        let mut root_u = self.expose(u);
-        if let Some(ref mut root) = root_u
-            && self.node_has_left_boundary(root)
-        {
-            root.update_flipped(|f| !f);
+        let mut node = self.forget_type();
+        loop {
+            let mut p = node.parent()?;
+            let gp = p.parent()?;
+
+            if node.is_point() && gp.is_point() {
+                node.rotate_up().expect("rotate_up should succeed");
+                return Some(Handle::new(gp.node));
+            }
+
+            let ggp = gp.parent()?;
+
+            if p.is_point() && (gp.is_point() || ggp.is_point()) {
+                gp.push_flip();
+                p.push_flip();
+
+                let node_is_left = node.is_left_child().expect("node must have a parent");
+                let p_is_left = p.is_left_child().expect("p must have a parent");
+                let gp_is_left = gp.is_left_child().expect("gp must have a parent");
+
+                if node_is_left == p_is_left {
+                    node.rotate_up().expect("rotate_up should succeed");
+                    return Some(Handle::new(gp.node));
+                }
+
+                if p_is_left == gp_is_left {
+                    p.rotate_up().expect("rotate_up should succeed");
+                    return Some(Handle::new(ggp.node));
+                }
+
+                debug_assert_eq!(node_is_left, gp_is_left);
+                let mut sibling = node.sibling().expect("node must have a sibling");
+                sibling.rotate_up().expect("rotate_up should succeed");
+                p.rotate_up().expect("rotate_up should succeed");
+                return Some(Handle::new(ggp.node));
+            }
+
+            node = p.forget_type();
         }
-        self.tree
-            .vertices
-            .get_mut(&u)
-            .expect("vertex must exist in tree")
-            .exposed = true;
-
-        let mut root_v = self.expose(v);
-        if let Some(ref mut root) = root_v
-            && self.node_has_right_boundary(root)
-        {
-            root.update_flipped(|f| !f);
-        }
-        self.tree
-            .vertices
-            .get_mut(&v)
-            .expect("vertex must exist in tree")
-            .exposed = true;
-
-        let edge_key = EdgeKey::from((u, v));
-        let node = LeafNode::alloc(
-            weight,
-            edge_key,
-            root_u.is_some() as usize + root_v.is_some() as usize,
-        );
-        self.tree.add_edge(u, v, node);
-
-        let mut node = node.cast::<Node<W>>();
-        if let Some(root) = root_u {
-            node = InternalNode::alloc(
-                W::reduce(unsafe { &node.as_ref().weight }, &root.weight),
-                node,
-                NonNull::from(root).cast(),
-                root_v.is_some() as usize,
-            )
-            .cast::<Node<W>>();
-        }
-
-        if let Some(root) = root_v {
-            node = InternalNode::alloc(
-                W::reduce(&root.weight, unsafe { &node.as_ref().weight }),
-                NonNull::from(root).cast(),
-                node,
-                1,
-            )
-            .cast::<Node<W>>();
-        }
-
-        unsafe { node.as_mut() }
     }
 
-    fn delete_all_ancestors(&mut self, node: NonNull<Node<W>>) {
-        let node_ref = unsafe { node.as_ref() };
-        while let Some(parent) = node_ref.parent() {
-            let mut sibling = node_ref.sibling().expect("node must have a sibling");
-            self.delete_all_ancestors(parent.cast::<Node<W>>());
-            unsafe { sibling.as_mut().set_parent(None) };
+    fn semi_splay(self)
+    where
+        W: Reduce,
+    {
+        let mut node = self.forget_type();
+        while let Some(next_node) = node.splay_step() {
+            node = next_node;
+        }
+    }
+
+    fn full_splay(self)
+    where
+        W: Reduce,
+    {
+        while let Some(next_node) = unsafe { ptr::read(&self) }.splay_step() {
+            next_node.splay_step();
+        }
+    }
+
+    fn has_left_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
+        use LeafOrInternal::*;
+        match self.force() {
+            Leaf(leaf) => {
+                let v = root.endpoints(leaf.edge())[self.is_flipped()];
+
+                root.is_boundary_vertex(v)
+            }
+            Internal(internal) => internal.child(!self.is_flipped()).is_path(),
+        }
+    }
+
+    fn has_right_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
+        use LeafOrInternal::*;
+        match self.force() {
+            Leaf(leaf) => {
+                let v = root.endpoints(leaf.edge())[!self.is_flipped()];
+
+                root.is_boundary_vertex(v)
+            }
+            Internal(internal) => internal.child(self.is_flipped()).is_path(),
+        }
+    }
+
+    fn is_internal(&self) -> bool {
+        !unsafe { self.node.as_ref().is_leaf() }
+    }
+
+    unsafe fn into_internal(self) -> Handle<W, marker::Internal> {
+        debug_assert!(self.is_internal());
+        unsafe { Handle::new_internal(self.node.cast()) }
+    }
+
+    unsafe fn into_leaf(self) -> Handle<W, marker::Leaf> {
+        debug_assert!(!self.is_internal());
+        Handle::new_leaf(self.node.cast())
+    }
+
+    fn delete_all_ancestors(self) {
+        if let Some(parent) = self.parent() {
+            let mut sibling = self.sibling().expect("node must have a sibling");
+            parent.delete_all_ancestors();
+            unsafe {
+                sibling.node.as_mut().set_parent(None);
+            }
         }
 
         unsafe {
-            Node::dealloc(node);
+            Node::dealloc(self.node);
+        }
+    }
+}
+
+impl<W> Handle<W, marker::Leaf> {
+    fn edge(&self) -> &OwningEdgeKey {
+        unsafe { &self.node.cast::<LeafNode<W>>().as_ref().edge }
+    }
+}
+
+impl<W> Handle<W, marker::Internal> {
+    fn push_flip(&self) {
+        if self.is_flipped() {
+            unsafe {
+                let node = self.node.cast::<InternalNode<W>>().as_mut();
+
+                node.set_flipped(false);
+                node.children.swap(0, 1);
+
+                for mut child in node.children {
+                    child.as_mut().toggle_flipped();
+                }
+            }
         }
     }
 
-    pub fn cut(
-        &mut self,
-        u: Index,
-        v: Index,
-    ) -> (
-        Option<&'a mut InternalNode<W>>,
-        Option<&'a mut InternalNode<W>>,
-    ) {
-        let edge = EdgeKey::from((u, v));
-        let edge = self
-            .tree
-            .edges
-            .get(&edge)
-            .expect("edge must exist in tree")
-            .weight;
-
-        self.splay(unsafe { edge.cast::<Node<W>>().as_mut() });
-        self.delete_all_ancestors(edge.cast::<Node<W>>());
-        self.tree.remove_edge(u, v);
-
-        self.tree
-            .vertices
-            .get_mut(&u)
-            .expect("vertex must exist in tree")
-            .exposed = true;
-        self.tree
-            .vertices
-            .get_mut(&v)
-            .expect("vertex must exist in tree")
-            .exposed = true;
-
-        let ru = self.expose(u);
-        let rv = self.expose(v);
-
-        (ru, rv)
+    fn num_path_children(&self) -> usize {
+        self.children()
+            .iter()
+            .filter(|child| child.is_path())
+            .count()
     }
+
+    fn children(&self) -> [Handle<W, marker::Internal>; 2] {
+        unsafe {
+            let internal = self.node.cast::<InternalNode<W>>().as_ref();
+            [
+                Handle::new(internal.children[0]),
+                Handle::new(internal.children[1]),
+            ]
+        }
+    }
+
+    fn flipped_children(&self) -> [Handle<W, marker::Internal>; 2] {
+        unsafe {
+            let internal = self.node.cast::<InternalNode<W>>().as_ref();
+            if self.is_flipped() {
+                [
+                    Handle::new(internal.children[1]),
+                    Handle::new(internal.children[0]),
+                ]
+            } else {
+                [
+                    Handle::new(internal.children[0]),
+                    Handle::new(internal.children[1]),
+                ]
+            }
+        }
+    }
+
+    fn child(&self, left: bool) -> Handle<W, marker::Internal> {
+        unsafe {
+            let internal = self.node.cast::<InternalNode<W>>().as_ref();
+            Handle::new(internal.children[(!left) as usize])
+        }
+    }
+
+    fn set_child(&mut self, mut child: NonNull<Node<W>>, left: bool) {
+        unsafe {
+            let internal = self.node.cast::<InternalNode<W>>().as_mut();
+            internal.children[(!left) as usize] = child;
+            child
+                .as_mut()
+                .set_parent(Some(self.node.cast::<InternalNode<W>>()));
+        }
+    }
+
+    fn recompute_weight(&mut self)
+    where
+        W: Reduce,
+    {
+        let [left, right] = self.flipped_children();
+        unsafe {
+            let lw = &left.node.as_ref().weight;
+            let rw = &right.node.as_ref().weight;
+            let new_weight = W::reduce(lw, rw);
+            self.node.as_mut().weight = new_weight;
+        }
+    }
+}
+
+pub fn find_consuming_node<W>(
+    root: &Tree<NonNull<LeafNode<W>>>,
+    v: Index,
+) -> Option<Handle<W, marker::Either>>
+where
+    W: Reduce,
+{
+    let edge = root.incident_edges(v).next()?;
+    let node = Handle::new_leaf(edge.weight.cast());
+    unsafe { ptr::read(&node) }.semi_splay();
+
+    if root.has_at_most_one_incident_edge(v) {
+        return Some(node.forget_type());
+    }
+
+    let endpoints = root.endpoints(node.edge());
+
+    let flip = node.is_flipped();
+    let mut is_left = (endpoints.left == v) != flip;
+    let mut is_right = (endpoints.right == v) != flip;
+    let mut is_middle = false;
+
+    let mut last_middle_node = None;
+    let mut node = node.forget_type();
+    while let Some(parent) = node.parent() {
+        let is_left_child = node.is_left_child().expect("node must have a parent");
+
+        is_middle = if is_left_child {
+            is_right || (is_middle && !node.has_right_boundary(root))
+        } else {
+            is_left || (is_middle && !node.has_left_boundary(root))
+        };
+        is_left = (is_left_child != parent.is_flipped()) && !is_middle;
+        is_right = (is_left_child == parent.is_flipped()) && !is_middle;
+
+        node = parent.forget_type();
+
+        if is_middle {
+            if !node.has_middle_boundary() {
+                return Some(node);
+            }
+            last_middle_node = Some(unsafe { ptr::read(&node) });
+        }
+    }
+
+    last_middle_node
+}
+
+pub fn expose<W>(
+    v: Index,
+    root: &mut Tree<NonNull<LeafNode<W>>>,
+) -> Option<Handle<W, marker::Either>>
+where
+    W: Reduce,
+{
+    fn expose_prepared<W>(mut node: Handle<W, marker::Either>) -> Handle<W, marker::Either>
+    where
+        W: Reduce,
+    {
+        let mut left = false;
+        let mut right = false;
+
+        loop {
+            node.inc_num_boundary();
+
+            let Some(parent) = node.parent() else {
+                return node;
+            };
+
+            let is_left_child = node.is_left_child().expect("node must have a parent");
+            let is_right_child = !is_left_child;
+
+            if (is_left_child && right) || (is_right_child && left) {
+                node.toggle_flipped();
+            }
+
+            left = is_left_child != parent.is_flipped();
+            right = is_right_child != parent.is_flipped();
+            node = parent.forget_type();
+        }
+    }
+
+    fn prepare_expose<W>(mut consuming_node: Handle<W, marker::Either>) -> Handle<W, marker::Either>
+    where
+        W: Reduce,
+    {
+        let mut node = unsafe { ptr::read(&consuming_node) };
+        while let Some(parent) = node.parent() {
+            if node.is_point() {
+                node = parent.forget_type();
+            } else {
+                assert!(node.is_internal(), "node must be internal");
+                let internal = unsafe { ptr::read(&node).into_internal() };
+                parent.push_flip();
+                internal.push_flip();
+
+                let mut sibling = internal.sibling().expect("node must have a sibling");
+
+                let sibling_is_left = sibling.is_left_child().expect("sibling must have a parent");
+                let same_side_child = internal.child(sibling_is_left);
+
+                if same_side_child.is_path() || sibling.is_point() {
+                    let mut other_side_child = internal.child(!sibling_is_left);
+                    other_side_child
+                        .rotate_up()
+                        .expect("rotate_up should succeed");
+
+                    if node == consuming_node {
+                        consuming_node = unsafe { ptr::read(&parent).forget_type() };
+                    }
+                    node = parent.forget_type();
+                } else {
+                    let uncle = parent.sibling().expect("parent must have a sibling");
+                    let uncle_is_left = uncle.is_left_child().expect("uncle must have a parent");
+
+                    if sibling_is_left == uncle_is_left {
+                        node.rotate_up().expect("rotate_up should succeed");
+                    } else {
+                        sibling.rotate_up().expect("rotate_up should succeed");
+                    }
+                }
+            }
+        }
+
+        consuming_node
+    }
+
+    match find_consuming_node(root, v) {
+        Some(consuming_node) => {
+            let consuming_node = prepare_expose(consuming_node);
+
+            let node = expose_prepared(consuming_node);
+            root.expose_vertex(v);
+
+            Some(node)
+        }
+        None => {
+            root.expose_vertex(v);
+            None
+        }
+    }
+}
+
+pub fn deexpose<W>(
+    v: Index,
+    tree: &mut Tree<NonNull<LeafNode<W>>>,
+) -> Option<Handle<W, marker::Either>>
+where
+    W: Reduce,
+{
+    let mut node = find_consuming_node(tree, v);
+    let mut root = None;
+
+    while let Some(mut some_node) = node {
+        some_node.dec_num_boundary();
+        node = some_node.parent().map(Handle::forget_type);
+        root = Some(some_node);
+    }
+
+    if let Some(vert) = tree.vertices.get_mut(&v) {
+        vert.exposed = false;
+    }
+
+    root
+}
+
+pub fn link<W>(
+    u: Index,
+    v: Index,
+    weight: W,
+    tree: &mut Tree<NonNull<LeafNode<W>>>,
+) -> NonNull<Node<W>>
+where
+    W: Reduce,
+{
+    let mut ru = expose(u, tree);
+    if let Some(ref mut tu) = ru
+        && Handle::has_left_boundary(tu, tree)
+    {
+        tu.toggle_flipped();
+    }
+    tree.set_vertex_exposed(u, false);
+
+    let mut rv = expose(v, tree);
+    if let Some(ref mut tv) = rv
+        && Handle::has_right_boundary(tv, tree)
+    {
+        tv.toggle_flipped();
+    }
+    tree.set_vertex_exposed(v, false);
+
+    let node = Box::into_non_null(Box::new_uninit()).cast_init();
+    let edge = tree.add_edge(u, v, node);
+    LeafNode::init(
+        node,
+        weight,
+        edge,
+        ru.is_some() as usize + rv.is_some() as usize,
+    );
+
+    let mut node = node.cast::<Node<W>>();
+    if let Some(ru) = ru {
+        let left = ru;
+        let right = node.cast::<Node<W>>();
+        let weight = unsafe {
+            let wl = &left.node.as_ref().weight;
+            let wr = &right.as_ref().weight;
+            W::reduce(wl, wr)
+        };
+        node = InternalNode::alloc(weight, left.node, right, rv.is_some() as usize).cast();
+    }
+
+    if let Some(rv) = rv {
+        let left = node.cast::<Node<W>>();
+        let right = rv;
+        let weight = unsafe {
+            let wl = &left.as_ref().weight;
+            let wr = &right.node.as_ref().weight;
+            W::reduce(wl, wr)
+        };
+        node = InternalNode::alloc(weight, left, right.node, 1).cast();
+    }
+
+    node
+}
+
+pub fn cut<W>(
+    u: Index,
+    v: Index,
+    tree: &mut Tree<NonNull<LeafNode<W>>>,
+) -> (
+    Option<Handle<W, marker::Either>>,
+    Option<Handle<W, marker::Either>>,
+)
+where
+    W: Reduce,
+{
+    let edge = EdgeKey::<()>::new(u, v);
+    let Some(edge) = tree.try_edge(&edge) else {
+        return (None, None);
+    };
+
+    let edge = Handle::new_leaf(edge.weight.cast::<Node<W>>());
+
+    let key = unsafe { ptr::read(edge.edge()) };
+    unsafe { ptr::read(&edge) }.full_splay();
+    edge.delete_all_ancestors();
+
+    _ = tree.remove_edge(key);
+
+    tree.expose_vertex(u);
+    tree.expose_vertex(v);
+
+    let ru = deexpose(u, tree);
+    let rv = deexpose(v, tree);
+
+    (ru, rv)
 }
 
 enum LeafOrInternal<T, U> {
@@ -677,7 +962,7 @@ enum LeafOrInternal<T, U> {
 }
 
 mod tree {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, marker::PhantomData, ptr};
 
     use crate::{index::Index, util::WithDropExt};
 
@@ -686,22 +971,47 @@ mod tree {
     pub struct Tree<W> {
         index_allocator: IndexAllocator,
         pub vertices: BTreeMap<Index, Vertex>,
-        pub edges: BTreeMap<EdgeKey, Edge<W>>,
+        pub edges: BTreeMap<EdgeKey<Private>, Edge<W>>,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct EdgeKey(pub [Index; 2]);
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Private(pub(self) ());
 
-    impl From<(Index, Index)> for EdgeKey {
-        fn from((a, b): (Index, Index)) -> Self {
-            let mut inner = [a, b];
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct EdgeKey<T = ()>(pub [Index; 2], PhantomData<T>);
+
+    pub type OwningEdgeKey = EdgeKey<Private>;
+
+    impl<T> EdgeKey<T> {
+        pub fn new(u: Index, v: Index) -> EdgeKey<T> {
+            let mut inner = [u, v];
             inner.sort();
-            Self(inner)
+            Self(inner, unsafe { std::mem::zeroed() })
+        }
+
+        unsafe fn transmute<U>(self) -> EdgeKey<U> {
+            EdgeKey(self.0, PhantomData)
+        }
+
+        unsafe fn transmute_ref<U>(&self) -> &EdgeKey<U> {
+            unsafe { &*(self as *const EdgeKey<T> as *const EdgeKey<U>) }
+        }
+    }
+
+    impl EdgeKey<Private> {
+        fn new_private(u: Index, v: Index) -> EdgeKey<Private> {
+            let mut inner = [u, v];
+            inner.sort();
+            Self(inner, PhantomData)
+        }
+
+        pub fn downcast(&self) -> EdgeKey<()> {
+            unsafe { *self.transmute_ref() }
         }
     }
 
     pub struct Vertex {
-        edges: Vec<EdgeKey>,
+        edges: Vec<EdgeKey<Private>>,
         pub(crate) exposed: bool,
     }
 
@@ -733,15 +1043,43 @@ mod tree {
             }
         }
 
-        pub fn endpoints(&self, edge: &EdgeKey) -> Option<EdgeEndpoints> {
-            self.edges.get(edge).map(|e| EdgeEndpoints {
-                left: e.endpoints[0],
-                right: e.endpoints[1],
-            })
+        pub fn endpoints(&self, edge: &EdgeKey<Private>) -> EdgeEndpoints {
+            self.edges
+                .get(edge)
+                .map(|e| EdgeEndpoints {
+                    left: e.endpoints[0],
+                    right: e.endpoints[1],
+                })
+                .unwrap()
+        }
+
+        pub fn edge(&self, edge: &EdgeKey<Private>) -> &Edge<W> {
+            self.edges.get(edge).expect("edge must exist in tree")
+        }
+
+        pub fn try_edge<T>(&self, edge: &EdgeKey<T>) -> Option<&Edge<W>> {
+            self.edges.get(unsafe { edge.transmute_ref::<Private>() })
+        }
+
+        pub fn is_boundary_vertex(&self, index: Index) -> bool {
+            self.vertices.get(&index).is_some_and(|v| v.exposed)
+                || self.degree(index).is_some_and(|d| d >= 2)
         }
 
         pub fn degree(&self, index: Index) -> Option<usize> {
             self.vertices.get(&index).map(|v| v.edges.len())
+        }
+
+        pub fn expose_vertex(&mut self, index: Index) {
+            if let Some(vertex) = self.vertices.get_mut(&index) {
+                vertex.exposed = true;
+            }
+        }
+
+        pub fn set_vertex_exposed(&mut self, index: Index, exposed: bool) {
+            if let Some(vertex) = self.vertices.get_mut(&index) {
+                vertex.exposed = exposed;
+            }
         }
 
         pub fn incident_edges(&self, index: Index) -> impl Iterator<Item = &Edge<W>> {
@@ -802,14 +1140,14 @@ mod tree {
             })
         }
 
-        pub fn add_edge(&mut self, left: Index, right: Index, weight: W) {
-            let key = EdgeKey::from((left, right));
+        pub fn add_edge(&mut self, left: Index, right: Index, weight: W) -> EdgeKey<Private> {
+            let key = EdgeKey::new_private(left, right);
             let edge = Edge {
                 weight,
                 endpoints: [left, right],
             };
 
-            self.edges.insert(key, edge);
+            self.edges.insert(unsafe { ptr::read(&key) }, edge);
 
             self.vertices
                 .entry(left)
@@ -818,7 +1156,7 @@ mod tree {
                     exposed: false,
                 })
                 .edges
-                .push(key);
+                .push(unsafe { ptr::read(&key) });
 
             self.vertices
                 .entry(right)
@@ -827,17 +1165,27 @@ mod tree {
                     exposed: false,
                 })
                 .edges
-                .push(key);
+                .push(unsafe { ptr::read(&key) });
+
+            key
         }
 
-        pub fn remove_edge(&mut self, left: Index, right: Index) {
-            let key = EdgeKey::from((left, right));
+        pub fn remove_edge(&mut self, key: OwningEdgeKey) -> Edge<W> {
+            unsafe { self.remove_edge_unchecked(key).unwrap() }
+        }
+
+        unsafe fn remove_edge_unchecked<T>(&mut self, key: EdgeKey<T>) -> Option<Edge<W>> {
+            let key = unsafe { key.transmute::<Private>() };
             if let Some(edge) = self.edges.remove(&key) {
                 for endpoint in edge.endpoints.iter() {
                     if let Some(vertex) = self.vertices.get_mut(endpoint) {
                         vertex.edges.retain(|e| e != &key);
                     }
                 }
+
+                Some(edge)
+            } else {
+                None
             }
         }
     }
@@ -1009,7 +1357,7 @@ mod util {
 
             let packed_tag = tag.into_usize() << Self::TAG_BIT_SHIFT;
 
-            ptr.map_addr(|addr| addr | packed_tag)
+            ptr.map_addr(|addr| (addr >> T::BITS) | packed_tag)
         }
 
         pub fn tag(&self) -> T {
@@ -1040,6 +1388,58 @@ mod util {
 
         pub fn as_non_null(&self) -> Option<NonNull<P>> {
             NonNull::new(self.as_ptr())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_tagged_ptr() {
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum MyTag {
+                A,
+                B,
+                C,
+            }
+
+            unsafe impl Tag for MyTag {
+                const BITS: u32 = 2;
+
+                fn into_usize(self) -> usize {
+                    match self {
+                        MyTag::A => 0,
+                        MyTag::B => 1,
+                        MyTag::C => 2,
+                    }
+                }
+
+                unsafe fn from_usize(tag: usize) -> Self {
+                    match tag {
+                        0 => MyTag::A,
+                        1 => MyTag::B,
+                        2 => MyTag::C,
+                        _ => panic!("Invalid tag value"),
+                    }
+                }
+            }
+
+            let mut x = 42;
+            let mut tagged_ptr = TaggedPtr::<i32, MyTag>::new(&mut x as *mut i32, MyTag::A);
+
+            assert_eq!(tagged_ptr.tag(), MyTag::A);
+            assert_eq!(unsafe { *tagged_ptr.as_ptr() }, 42);
+
+            tagged_ptr.set_tag(MyTag::B);
+            assert_eq!(tagged_ptr.tag(), MyTag::B);
+
+            tagged_ptr.update_tag(|tag| {
+                if let MyTag::B = tag {
+                    *tag = MyTag::C;
+                }
+            });
+            assert_eq!(tagged_ptr.tag(), MyTag::C);
         }
     }
 }

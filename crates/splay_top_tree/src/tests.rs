@@ -44,40 +44,28 @@ impl Harness {
 
     fn link(&mut self, u: Index, v: Index, w: u64) {
         debug_assert_ne!(u, v);
-        let mut ctx = TopTreeCtx {
-            tree: &mut self.tree,
-        };
-        ctx.link(u, v, Xor(w));
+        link(u, v, Xor(w), &mut self.tree);
         self.adj.get_mut(&u).unwrap().insert(v, w);
         self.adj.get_mut(&v).unwrap().insert(u, w);
     }
 
     fn cut(&mut self, u: Index, v: Index) {
-        let mut ctx = TopTreeCtx {
-            tree: &mut self.tree,
-        };
-        ctx.cut(u, v);
+        cut(u, v, &mut self.tree);
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
 
     fn expose(&mut self, v: Index) {
-        let mut ctx = TopTreeCtx {
-            tree: &mut self.tree,
-        };
-        let returned = ctx.expose(v);
+        let returned = expose(v, &mut self.tree);
         if let Some(root) = returned {
             let root_of_component = self.edge_leaves_of(v).next().map(climb).unwrap();
-            assert_eq!(root, root_of_component, "expose must return the root");
+            assert_eq!(root.node, root_of_component, "expose must return the root");
         }
         self.exposed.insert(v);
     }
 
     fn deexpose(&mut self, v: Index) {
-        let mut ctx = TopTreeCtx {
-            tree: &mut self.tree,
-        };
-        ctx.deexpose(v);
+        deexpose(v, &mut self.tree);
         self.exposed.remove(&v);
     }
 
@@ -170,90 +158,95 @@ impl Cii {
 }
 
 fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<EdgeKey> {
-    let node_ref = unsafe { &*node.as_ptr() };
-    if node_ref.is_leaf() {
-        let leaf = unsafe { node_ref.as_leaf() };
-        vec![leaf.edge]
-    } else {
-        let internal = unsafe { node_ref.as_internal() };
-        let mut out = cluster_keys(h, internal.children[0]);
-        out.extend(cluster_keys(h, internal.children[1]));
-        out
+    match Node::force_ptr(node) {
+        LeafOrInternal::Leaf(leaf) => unsafe { vec![leaf.as_ref().edge.downcast()] },
+        LeafOrInternal::Internal(internal) => {
+            let internal = unsafe { internal.as_ref() };
+            let mut out = cluster_keys(h, internal.children[0]);
+            out.extend(cluster_keys(h, internal.children[1]));
+            out
+        }
     }
 }
 
 fn count_leaves_with(h: &tree::Tree<NonNullLeaf>, node: NN, v: Index) -> usize {
-    let node_ref = unsafe { &*node.as_ptr() };
-    if node_ref.is_leaf() {
-        let leaf = unsafe { node_ref.as_leaf() };
-        let endpoints = h.endpoints(&leaf.edge).unwrap();
-        usize::from(endpoints.left == v || endpoints.right == v)
-    } else {
-        let internal = unsafe { node_ref.as_internal() };
-        count_leaves_with(h, internal.children[0], v)
-            + count_leaves_with(h, internal.children[1], v)
+    match Node::force_ptr(node) {
+        LeafOrInternal::Leaf(leaf) => {
+            let leaf = unsafe { leaf.as_ref() };
+            let endpoints = h.endpoints(&leaf.edge);
+            usize::from(endpoints.left == v || endpoints.right == v)
+        }
+        LeafOrInternal::Internal(internal) => {
+            let internal = unsafe { internal.as_ref() };
+            count_leaves_with(h, internal.children[0], v)
+                + count_leaves_with(h, internal.children[1], v)
+        }
     }
 }
 
 fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
-    let mut cii = if node_ref.is_leaf() {
-        let leaf = unsafe { node_ref.as_leaf() };
-        let endpoints = h.endpoints(&leaf.edge).unwrap();
-        let flip = node_ref.is_flipped();
-        let (ep_left, ep_right) = if flip {
-            (endpoints.right, endpoints.left)
-        } else {
-            (endpoints.left, endpoints.right)
-        };
-        let mut c = Cii::default();
-        if is_boundary_vertex(h, ep_left) {
-            c.left = Some(ep_left);
-        }
-        if is_boundary_vertex(h, ep_right) {
-            c.right = Some(ep_right);
-        }
-        c
-    } else {
-        let internal = unsafe { node_ref.as_internal() };
-        let bl = check_node(h, internal.children[0]);
-        let br = check_node(h, internal.children[1]);
 
-        let bl_rightmost = bl.right.or(bl.mid);
-        let bl_leftmost = bl.left.or(bl.mid);
-        let br_rightmost = br.right.or(br.mid);
-        let br_leftmost = br.left.or(br.mid);
+    let cii = match Node::force_ptr(node) {
+        LeafOrInternal::Leaf(leaf) => {
+            let node = unsafe { leaf.as_ref() };
+            let endpoints = h.endpoints(&node.edge);
+            let flip = node_ref.is_flipped();
+            let (ep_left, ep_right) = if flip {
+                (endpoints.right, endpoints.left)
+            } else {
+                (endpoints.left, endpoints.right)
+            };
+            let mut c = Cii::default();
+            if is_boundary_vertex(h, ep_left) {
+                c.left = Some(ep_left);
+            }
+            if is_boundary_vertex(h, ep_right) {
+                c.right = Some(ep_right);
+            }
+            c
+        }
+        LeafOrInternal::Internal(internal) => {
+            let internal = unsafe { internal.as_ref() };
+            let bl = check_node(h, internal.children[0]);
+            let br = check_node(h, internal.children[1]);
 
-        assert!(
-            bl_rightmost.is_some() && br_leftmost.is_some(),
-            "children of an internal node must have a shared boundary vertex; \
+            let bl_rightmost = bl.right.or(bl.mid);
+            let bl_leftmost = bl.left.or(bl.mid);
+            let br_rightmost = br.right.or(br.mid);
+            let br_leftmost = br.left.or(br.mid);
+
+            assert!(
+                bl_rightmost.is_some() && br_leftmost.is_some(),
+                "children of an internal node must have a shared boundary vertex; \
              node cluster = {:?}",
-            cluster_keys(h, node)
-        );
-        assert_eq!(
-            bl_rightmost,
-            br_leftmost,
-            "orientation invariant: rightmost boundary of left child must equal \
+                cluster_keys(h, node)
+            );
+            assert_eq!(
+                bl_rightmost,
+                br_leftmost,
+                "orientation invariant: rightmost boundary of left child must equal \
              leftmost boundary of right child (the central vertex); node cluster = {:?}",
-            cluster_keys(h, node)
-        );
-        let central = bl_rightmost.unwrap();
+                cluster_keys(h, node)
+            );
+            let central = bl_rightmost.unwrap();
 
-        let mut c = Cii::default();
-        let inside = count_leaves_with(h, node, central);
-        if h.vertices.get(&central).is_some_and(|v| v.exposed) || inside < degree(h, central) {
-            c.mid = Some(central);
+            let mut c = Cii::default();
+            let inside = count_leaves_with(h, node, central);
+            if h.vertices.get(&central).is_some_and(|v| v.exposed) || inside < degree(h, central) {
+                c.mid = Some(central);
+            }
+            if bl_leftmost != bl_rightmost {
+                c.left = bl_leftmost;
+            }
+            if br_leftmost != br_rightmost {
+                c.right = br_rightmost;
+            }
+            if node_ref.is_flipped() {
+                std::mem::swap(&mut c.left, &mut c.right);
+            }
+            c
         }
-        if bl_leftmost != bl_rightmost {
-            c.left = bl_leftmost;
-        }
-        if br_leftmost != br_rightmost {
-            c.right = br_rightmost;
-        }
-        if node_ref.is_flipped() {
-            std::mem::swap(&mut c.left, &mut c.right);
-        }
-        c
     };
 
     assert_eq!(
@@ -267,12 +260,12 @@ fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
 }
 
 fn fold_weight(node: NN) -> u64 {
-    let node_ref = unsafe { &*node.as_ptr() };
-    if node_ref.is_leaf() {
-        node_ref.weight.0
-    } else {
-        let internal = unsafe { node_ref.as_internal() };
-        fold_weight(internal.children[0]) ^ fold_weight(internal.children[1])
+    match Node::force_ptr(node) {
+        LeafOrInternal::Leaf(leaf) => unsafe { leaf.as_ref().weight.0 },
+        LeafOrInternal::Internal(internal) => {
+            let internal = unsafe { internal.as_ref() };
+            fold_weight(internal.children[0]) ^ fold_weight(internal.children[1])
+        }
     }
 }
 
@@ -284,26 +277,30 @@ fn check_node_weights_and_edges(
 ) {
     let node_ref = unsafe { &*node.as_ptr() };
     nodes.push(node);
-    if node_ref.is_leaf() {
-        leaves.push(node);
-        return;
+
+    match Node::force_ptr(node) {
+        LeafOrInternal::Leaf(_) => {
+            leaves.push(node);
+        }
+        LeafOrInternal::Internal(internal) => {
+            let internal = unsafe { internal.as_ref() };
+            for child in internal.children {
+                let child_ref = unsafe { &*child.as_ptr() };
+                assert_eq!(
+                    child_ref.parent(),
+                    Some(NonNull::from(internal)),
+                    "child->parent back pointer is inconsistent"
+                );
+                check_node_weights_and_edges(h, child, leaves, nodes);
+            }
+            assert_eq!(
+                node_ref.weight.0,
+                fold_weight(node),
+                "stored weight does not match reduce over leaves in subtree; cluster = {:?}",
+                cluster_keys(h, node)
+            );
+        }
     }
-    let internal = unsafe { node_ref.as_internal() };
-    for child in internal.children {
-        let child_ref = unsafe { &*child.as_ptr() };
-        assert_eq!(
-            child_ref.parent(),
-            Some(NonNull::from(internal)),
-            "child->parent back pointer is inconsistent"
-        );
-        check_node_weights_and_edges(h, child, leaves, nodes);
-    }
-    assert_eq!(
-        node_ref.weight.0,
-        fold_weight(node),
-        "stored weight does not match reduce over leaves in subtree; cluster = {:?}",
-        cluster_keys(h, node)
-    );
 }
 
 fn all_roots(h: &Harness) -> Vec<NN> {
@@ -324,10 +321,9 @@ fn assert_invariants(h: &Harness) {
 
     for (key, edge) in tree.edges.iter() {
         let leaf_nn: NN = edge.weight.cast();
-        let node = unsafe { &*leaf_nn.as_ptr() };
-        let leaf = unsafe { node.as_leaf() };
+        let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
         assert!(node.is_leaf(), "edge must map to a leaf node");
-        assert_eq!(leaf.edge, *key, "leaf edge key must match its map entry");
+        assert_eq!(node.edge, *key, "leaf edge key must match its map entry");
         let stored = node.weight.0;
         let expected = h.adj[&edge.endpoints[0]].get(&edge.endpoints[1]).copied();
         match expected {
@@ -365,7 +361,9 @@ fn assert_invariants(h: &Harness) {
 
         let mut comp_leaves = BTreeSet::new();
         for leaf in leaves {
-            let key = unsafe { (&*leaf.as_ptr()).as_leaf() }.edge;
+            let key = unsafe { &*leaf.cast::<LeafNode<Xor>>().as_ptr() }
+                .edge
+                .downcast();
             assert!(
                 covered.insert(key),
                 "leaf appears in more than one top tree component"
@@ -382,7 +380,7 @@ fn assert_invariants(h: &Harness) {
             .into_iter()
             .find(|c| {
                 c.iter()
-                    .any(|&v| h.adj[&v].keys().any(|&w| EdgeKey::from((v, w)) == *sample))
+                    .any(|&v| h.adj[&v].keys().any(|&w| EdgeKey::new(v, w) == *sample))
             })
             .unwrap()
             .into_iter()
@@ -395,7 +393,7 @@ fn assert_invariants(h: &Harness) {
                 let [a, b] = k.0;
                 comp.contains(&a) || comp.contains(&b)
             })
-            .copied()
+            .map(|k| k.downcast())
             .collect();
         assert_eq!(
             comp_leaves, expected,
