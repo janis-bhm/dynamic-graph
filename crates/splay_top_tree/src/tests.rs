@@ -684,7 +684,6 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
 }
 
 #[test]
-#[ignore = "residual cut/deexpose boundary-count bug under complex shapes (WIP)"]
 fn randomized_small_forest() {
     for seed in 0..40 {
         run_random_ops(seed, 7, 220);
@@ -692,7 +691,6 @@ fn randomized_small_forest() {
 }
 
 #[test]
-#[ignore = "residual cut/deexpose boundary-count bug under complex shapes (WIP)"]
 fn randomized_medium_forest() {
     for seed in 0..10 {
         run_random_ops(seed, 14, 500);

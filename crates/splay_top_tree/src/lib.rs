@@ -470,13 +470,13 @@ impl<W, NodeType> Handle<W, NodeType> {
             }
         }
 
-        parent.set_child(sibling.node, uncle_is_left);
-        parent.set_child(uncle.node, !uncle_is_left);
+        parent.set_child(sibling.node, !uncle_is_left);
+        parent.set_child(uncle.node, uncle_is_left);
         parent.set_flipped(flip_new_parent);
         parent.set_num_boundary(if new_parent_is_path { 2 } else { 1 });
 
-        gp.set_child(self.node, uncle_is_left);
-        gp.set_child(parent.node, !uncle_is_left);
+        gp.set_child(self.node, !uncle_is_left);
+        gp.set_child(parent.node, uncle_is_left);
         gp.set_flipped(flip_gp);
 
         // recompute W for parent and gp
@@ -509,7 +509,7 @@ impl<W, NodeType> Handle<W, NodeType> {
 
             let ggp = gp.parent()?;
 
-            if p.is_point() && (gp.is_point() || ggp.is_point()) {
+            if p.is_path() && (gp.is_path() || ggp.is_point()) {
                 gp.push_flip();
                 p.push_flip();
 
@@ -917,7 +917,7 @@ where
             let wr = &right.node.as_ref().weight;
             W::reduce(wl, wr)
         };
-        node = InternalNode::alloc(weight, left, right.node, 1).cast();
+        node = InternalNode::alloc(weight, left, right.node, 0).cast();
     }
 
     node
