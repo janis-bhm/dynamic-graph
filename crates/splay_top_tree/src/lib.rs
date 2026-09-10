@@ -608,6 +608,14 @@ impl<W, NodeType> Handle<W, NodeType> {
             Node::dealloc(self.node);
         }
     }
+
+    fn root(self) -> Handle<W, marker::Either> {
+        let mut node = self.forget_type();
+        while let Some(parent) = node.parent() {
+            node = parent.forget_type();
+        }
+        node
+    }
 }
 
 impl<W> Handle<W, marker::Leaf> {
@@ -961,6 +969,128 @@ enum LeafOrInternal<T, U> {
     Internal(U),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Entry<'a, W> {
+    handle: Handle<W, marker::Either>,
+    _marker: core::marker::PhantomData<&'a ()>,
+}
+
+impl<'a, W> Entry<'a, W> {
+    pub fn weight(&self) -> &W {
+        unsafe { &self.handle.node.as_ref().weight }
+    }
+
+    pub fn into_root(self) -> Self {
+        Self {
+            handle: self.handle.root(),
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
+pub struct TopTree<W> {
+    tree: Tree<NonNull<LeafNode<W>>>,
+}
+
+impl<W> TopTree<W> {
+    pub fn new() -> Self {
+        Self { tree: Tree::new() }
+    }
+
+    pub fn add_vertex(&mut self) -> Index {
+        self.tree.add_vertex()
+    }
+
+    pub fn remove_vertex(&mut self, index: Index) -> impl Iterator<Item = Index> {
+        self.tree.remove_vertex(index).map(move |edge| {
+            let [left, right] = edge.endpoints;
+            if left == index { right } else { left }
+        })
+    }
+
+    pub fn link(&mut self, u: Index, v: Index, weight: W)
+    where
+        W: Reduce,
+    {
+        link(u, v, weight, &mut self.tree);
+    }
+
+    pub fn cut(&mut self, u: Index, v: Index) -> (Option<Entry<'_, W>>, Option<Entry<'_, W>>)
+    where
+        W: Reduce,
+    {
+        let (ru, rv) = cut(u, v, &mut self.tree);
+        let ru = ru.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        });
+        let rv = rv.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        });
+
+        (ru, rv)
+    }
+
+    pub fn expose(&mut self, v: Index) -> Option<Entry<'_, W>>
+    where
+        W: Reduce,
+    {
+        let node = expose(v, &mut self.tree);
+        node.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        })
+    }
+
+    pub fn expose2(&mut self, u: Index, v: Index) -> (Option<Entry<'_, W>>, Option<Entry<'_, W>>)
+    where
+        W: Reduce,
+    {
+        let ru = expose(u, &mut self.tree);
+        let rv = expose(v, &mut self.tree);
+
+        let ru = ru.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        });
+        let rv = rv.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        });
+
+        (ru, rv)
+    }
+
+    pub fn deexpose(&mut self, v: Index) -> Option<Entry<'_, W>>
+    where
+        W: Reduce,
+    {
+        let node = deexpose(v, &mut self.tree);
+        node.map(|h| Entry {
+            handle: h,
+            _marker: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<W> Default for TopTree<W> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<W> Drop for TopTree<W> {
+    fn drop(&mut self) {
+        self.tree.edges.retain(|_, edge| {
+            Handle::new_leaf(edge.weight.cast::<Node<W>>()).delete_all_ancestors();
+
+            unsafe { Node::<W>::dealloc(edge.weight.cast()) };
+            true
+        });
+    }
+}
+
 mod tree {
     use std::{collections::BTreeMap, marker::PhantomData, ptr};
 
@@ -1231,7 +1361,7 @@ pub mod index {
 }
 
 mod util {
-    use std::{mem::ManuallyDrop, num::NonZero, ptr::NonNull};
+    use std::{mem::ManuallyDrop, ptr::NonNull};
 
     pub struct WithDrop<F: FnOnce(&mut T), T> {
         t: T,
@@ -1289,6 +1419,9 @@ mod util {
         }
     }
 
+    /// # Safety
+    /// `BITS` must not be less than the number of bits required to store the tag.
+    /// That is to say, 2^`BITS` must be greater than any value produced by `into_usize`.
     pub unsafe trait Tag: Copy {
         const BITS: u32;
         fn into_usize(self) -> usize;
@@ -1299,6 +1432,8 @@ mod util {
         T::ALIGN
     }
 
+    /// # Safety
+    /// `ALIGN` must be the alignment of `Self`.
     pub unsafe trait Aligned {
         /// Alignment of `Self`.
         const ALIGN: usize;
@@ -1444,7 +1579,7 @@ mod util {
     }
 }
 
-trait Reduce {
+pub trait Reduce {
     fn reduce(&self, other: &Self) -> Self;
 }
 
