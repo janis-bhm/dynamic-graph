@@ -1,6 +1,9 @@
 #![feature(ptr_as_uninit, cast_maybe_uninit)]
 
-use std::ptr::{self, NonNull};
+use std::{
+    mem,
+    ptr::{self, NonNull},
+};
 
 use crate::{
     index::Index,
@@ -422,10 +425,16 @@ impl<W, NodeType> Handle<W, NodeType> {
         Handle<W, marker::Label>,
         Handle<W, marker::Internal>,
     > {
-        if unsafe { self.node.as_ref().is_edge() } {
-            LeafOrInternal::Edge(Handle::new(self.node))
-        } else {
-            LeafOrInternal::Internal(Handle::new(self.node))
+        match unsafe { self.node.as_ref().flags().kind() } {
+            NodeKind::EdgeLeaf => LeafOrInternal::Edge(Handle::new(self.node)),
+            NodeKind::Cluster => LeafOrInternal::Internal(Handle::new(self.node)),
+            NodeKind::LabelLeaf => LeafOrInternal::Label(Handle::new(self.node)),
+        }
+    }
+
+    fn set_parent(&mut self, parent: Option<Handle<W, marker::Internal>>) {
+        unsafe {
+            self.node.as_mut().set_parent(parent.map(|p| p.node.cast()));
         }
     }
 
@@ -1017,7 +1026,8 @@ where
     node
 }
 
-pub fn cut<W>(
+#[expect(clippy::type_complexity)]
+pub(crate) fn cut<W>(
     u: Index,
     v: Index,
     tree: &mut Tree<NonNull<LeafNode<W>>>,
@@ -1048,6 +1058,39 @@ where
     let rv = deexpose(v, tree);
 
     (ru, rv)
+}
+
+pub(crate) fn cut_label<W>(v: Index, tree: &mut Tree<NonNull<LeafNode<W>>>) {
+    // labels are never path components, so removing them can never disconnect the tree.
+    // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
+    let label = tree.labels.remove(&v).expect("label must exist");
+    let label_handle = Handle::<W, marker::Label>::new(label.cast());
+    if let Some(parent) = label_handle.parent() {
+        let mut sibling = label_handle.sibling().expect("label must have a sibling");
+
+        if let Some(mut gp) = parent.parent() {
+            let parent_is_left = parent.is_left_child().expect("parent has parent");
+            // we need to flip the sibling if it is on the opposite side of the parent.
+            // if the parent was flipped, then flip the sibling (again).
+            let flip_sibling = (sibling.is_left_child().expect("sibling has parent")
+                != parent_is_left)
+                ^ parent.is_flipped();
+
+            if flip_sibling {
+                sibling.toggle_flipped();
+            }
+
+            gp.set_child(sibling.node, parent_is_left);
+        } else {
+            // parent is root, so we just make the sibling the new root.
+            sibling.set_parent(None);
+        }
+
+        unsafe {
+            Node::<W>::dealloc(parent.node);
+            Node::<W>::dealloc(label_handle.node);
+        }
+    }
 }
 
 enum LeafOrInternal<T, V, U> {
@@ -1088,11 +1131,28 @@ impl<W> TopTree<W> {
         self.tree.add_vertex()
     }
 
-    pub fn remove_vertex(&mut self, index: Index) -> impl Iterator<Item = Index> {
-        self.tree.remove_vertex(index).map(move |edge| {
-            let [left, right] = edge.endpoints;
-            if left == index { right } else { left }
-        })
+    pub fn remove_vertex(&mut self, index: Index)
+    where
+        W: Reduce,
+    {
+        use std::collections::btree_map::Entry::Occupied;
+        let Occupied(mut entry) = self.tree.vertices.entry(index) else {
+            return;
+        };
+
+        let edges = mem::take(&mut entry.get_mut().edges);
+        let labels = mem::take(&mut entry.get_mut().labels);
+
+        for edge in edges {
+            let [u, v] = edge.endpoints();
+            cut(u, v, &mut self.tree);
+        }
+
+        for label in labels {
+            cut_label(label, &mut self.tree);
+        }
+
+        self.tree.vertices.remove(&index);
     }
 
     pub fn link(&mut self, u: Index, v: Index, weight: W)
@@ -1107,6 +1167,7 @@ impl<W> TopTree<W> {
         W: Reduce,
     {
         let (ru, rv) = cut(u, v, &mut self.tree);
+
         let ru = ru.map(|h| Entry {
             handle: h,
             _marker: core::marker::PhantomData,
@@ -1189,6 +1250,7 @@ mod tree {
         index_allocator: IndexAllocator,
         pub vertices: BTreeMap<Index, Vertex>,
         pub edges: BTreeMap<EdgeKey<Private>, Edge<W>>,
+        pub labels: BTreeMap<Index, W>,
     }
 
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1213,6 +1275,10 @@ mod tree {
         unsafe fn transmute_ref<U>(&self) -> &EdgeKey<U> {
             unsafe { &*(self as *const EdgeKey<T> as *const EdgeKey<U>) }
         }
+
+        pub fn endpoints(&self) -> [Index; 2] {
+            self.0
+        }
     }
 
     impl EdgeKey<Private> {
@@ -1227,8 +1293,10 @@ mod tree {
         }
     }
 
+    #[derive(Default)]
     pub struct Vertex {
-        edges: Vec<EdgeKey<Private>>,
+        pub(crate) edges: Vec<EdgeKey<Private>>,
+        pub(crate) labels: Vec<Index>,
         pub(crate) exposed: bool,
     }
 
@@ -1241,6 +1309,11 @@ mod tree {
     pub struct EdgeEndpoints {
         pub left: Index,
         pub right: Index,
+    }
+
+    pub enum EdgeOrLabel<W> {
+        Edge(Edge<W>),
+        Label(Index),
     }
 
     impl core::ops::Index<bool> for EdgeEndpoints {
@@ -1257,6 +1330,7 @@ mod tree {
                 index_allocator: IndexAllocator::new(),
                 vertices: BTreeMap::new(),
                 edges: BTreeMap::new(),
+                labels: BTreeMap::new(),
             }
         }
 
@@ -1320,20 +1394,40 @@ mod tree {
                 index,
                 Vertex {
                     edges: Vec::new(),
+                    labels: Vec::new(),
                     exposed: false,
                 },
             );
             index
         }
 
-        pub fn remove_vertex(&mut self, index: Index) -> impl Iterator<Item = Edge<W>> {
+        pub fn add_vertex_label(&mut self, v: Index, label: W) -> Option<Index> {
+            if let Some(v) = self.vertices.get_mut(&v) {
+                let index = self.index_allocator.allocate();
+                self.labels.insert(index, label);
+                v.labels.push(index);
+                Some(index)
+            } else {
+                None
+            }
+        }
+
+        pub fn remove_vertex(&mut self, index: Index) -> impl Iterator<Item = EdgeOrLabel<W>> {
             let edges = &mut self.edges;
-            let edges = self
+            let labels = &mut self.labels;
+            let (vertex_edges, vertex_labels) = self
                 .vertices
                 .remove(&index)
+                .map(|v| (v.edges, v.labels))
+                .unwrap_or_default();
+
+            let edges = vertex_edges
                 .into_iter()
-                .flat_map(|vertex| vertex.edges.into_iter())
                 .filter_map(move |key| edges.remove(&key).map(|e| (key, e)));
+
+            let labels = vertex_labels.into_iter().inspect(move |label_index| {
+                labels.remove(label_index);
+            });
 
             let vertices = &mut self.vertices;
             let edges = edges.map(move |(key, edge)| {
@@ -1350,11 +1444,15 @@ mod tree {
 
             let index_allocator = &mut self.index_allocator;
 
-            edges.with_drop(move |edges| {
+            let edges = edges.with_drop(move |edges| {
                 // drain iter to ensure that all edges are removed from the tree before deallocating the index
                 for _ in edges {}
                 index_allocator.deallocate(index);
-            })
+            });
+
+            edges
+                .map(|edge| EdgeOrLabel::Edge(edge))
+                .chain(labels.map(EdgeOrLabel::Label))
         }
 
         pub fn add_edge(&mut self, left: Index, right: Index, weight: W) -> EdgeKey<Private> {
@@ -1368,19 +1466,13 @@ mod tree {
 
             self.vertices
                 .entry(left)
-                .or_insert_with(|| Vertex {
-                    edges: Vec::new(),
-                    exposed: false,
-                })
+                .or_default()
                 .edges
                 .push(unsafe { ptr::read(&key) });
 
             self.vertices
                 .entry(right)
-                .or_insert_with(|| Vertex {
-                    edges: Vec::new(),
-                    exposed: false,
-                })
+                .or_default()
                 .edges
                 .push(unsafe { ptr::read(&key) });
 
