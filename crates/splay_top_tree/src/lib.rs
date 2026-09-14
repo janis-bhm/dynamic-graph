@@ -913,7 +913,7 @@ where
     last_middle_node
 }
 
-pub fn expose<W>(
+pub(crate) fn expose<W>(
     v: Index,
     root: &mut Tree<NonNull<LeafNode<W>>>,
 ) -> Option<Handle<W, marker::Either>>
@@ -1008,7 +1008,7 @@ where
     }
 }
 
-pub fn deexpose<W>(
+pub(crate) fn deexpose<W>(
     v: Index,
     tree: &mut Tree<NonNull<LeafNode<W>>>,
 ) -> Option<Handle<W, marker::Either>>
@@ -1031,7 +1031,7 @@ where
     root
 }
 
-pub fn link<W>(
+pub(crate) fn link<W>(
     u: Index,
     v: Index,
     weight: W,
