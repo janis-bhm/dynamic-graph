@@ -157,9 +157,18 @@ impl Cii {
     }
 }
 
-fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<EdgeKey> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterKey {
+    Edge(EdgeKey),
+    Label(Index),
+}
+
+fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<ClusterKey> {
     match Node::force_ptr(node) {
-        LeafOrInternal::Leaf(leaf) => unsafe { vec![leaf.as_ref().edge.downcast()] },
+        LeafOrInternal::Edge(leaf) => unsafe {
+            vec![ClusterKey::Edge(leaf.as_ref().edge.downcast())]
+        },
+        LeafOrInternal::Label(label) => vec![ClusterKey::Label(unsafe { label.as_ref().vertex })],
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
             let mut out = cluster_keys(h, internal.children[0]);
@@ -171,11 +180,12 @@ fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<EdgeKey> {
 
 fn count_leaves_with(h: &tree::Tree<NonNullLeaf>, node: NN, v: Index) -> usize {
     match Node::force_ptr(node) {
-        LeafOrInternal::Leaf(leaf) => {
+        LeafOrInternal::Edge(leaf) => {
             let leaf = unsafe { leaf.as_ref() };
             let endpoints = h.endpoints(&leaf.edge);
             usize::from(endpoints.left == v || endpoints.right == v)
         }
+        LeafOrInternal::Label(label) => usize::from(unsafe { label.as_ref().vertex } == v),
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
             count_leaves_with(h, internal.children[0], v)
@@ -188,7 +198,7 @@ fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
 
     let cii = match Node::force_ptr(node) {
-        LeafOrInternal::Leaf(leaf) => {
+        LeafOrInternal::Edge(leaf) => {
             let node = unsafe { leaf.as_ref() };
             let endpoints = h.endpoints(&node.edge);
             let flip = node_ref.is_flipped();
@@ -204,6 +214,16 @@ fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
             if is_boundary_vertex(h, ep_right) {
                 c.right = Some(ep_right);
             }
+            c
+        }
+        LeafOrInternal::Label(label) => {
+            let node = unsafe { label.as_ref() };
+
+            let mut c = Cii::default();
+            if is_boundary_vertex(h, node.vertex) {
+                c.mid = Some(node.vertex);
+            }
+
             c
         }
         LeafOrInternal::Internal(internal) => {
@@ -253,7 +273,7 @@ fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
         cii.count(),
         node_ref.num_boundary(),
         "num_boundary mismatch at node (leaf={}, cluster={:?})",
-        node_ref.is_leaf(),
+        node_ref.is_edge(),
         cluster_keys(h, node)
     );
     cii
@@ -261,7 +281,8 @@ fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
 
 fn fold_weight(node: NN) -> u64 {
     match Node::force_ptr(node) {
-        LeafOrInternal::Leaf(leaf) => unsafe { leaf.as_ref().weight.0 },
+        LeafOrInternal::Edge(leaf) => unsafe { leaf.as_ref().weight.0 },
+        LeafOrInternal::Label(label) => unsafe { label.as_ref().weight.0 },
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
             fold_weight(internal.children[0]) ^ fold_weight(internal.children[1])
@@ -279,7 +300,7 @@ fn check_node_weights_and_edges(
     nodes.push(node);
 
     match Node::force_ptr(node) {
-        LeafOrInternal::Leaf(_) => {
+        LeafOrInternal::Label(_) | LeafOrInternal::Edge(_) => {
             leaves.push(node);
         }
         LeafOrInternal::Internal(internal) => {
@@ -322,7 +343,7 @@ fn assert_invariants(h: &Harness) {
     for (key, edge) in tree.edges.iter() {
         let leaf_nn: NN = edge.weight.cast();
         let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
-        assert!(node.is_leaf(), "edge must map to a leaf node");
+        assert!(node.is_edge(), "edge must map to a leaf node");
         assert_eq!(node.edge, *key, "leaf edge key must match its map entry");
         let stored = node.weight.0;
         let expected = h.adj[&edge.endpoints[0]].get(&edge.endpoints[1]).copied();

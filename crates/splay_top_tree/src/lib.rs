@@ -12,6 +12,13 @@ use crate::{
 mod tests;
 mod util;
 
+#[repr(u8)]
+enum NodeKind {
+    EdgeLeaf,
+    Cluster,
+    LabelLeaf,
+}
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct NodeFlags: u8 {
@@ -19,6 +26,7 @@ bitflags::bitflags! {
         const FLIPPED = 1 << 1;
         const BOUNDARY_LOW = 1 << 2;
         const BOUNDARY_HIGH = 1 << 3;
+        const LABEL = 1 << 2 | 1 << 3;
     }
 }
 
@@ -27,7 +35,45 @@ impl NodeFlags {
         let mut count = 0;
         count += usize::from(self.contains(NodeFlags::BOUNDARY_LOW));
         count += 2 * usize::from(self.contains(NodeFlags::BOUNDARY_HIGH));
-        count
+
+        if count == 3 {
+            usize::from(self.contains(NodeFlags::LEAF))
+        } else {
+            count
+        }
+    }
+
+    fn set_num_boundary(&mut self, num: usize) {
+        if self.is_label() {
+            debug_assert!(num <= 1);
+            self.set(NodeFlags::LEAF, num == 1);
+        } else {
+            debug_assert!(num <= 2);
+            self.set(NodeFlags::BOUNDARY_LOW, num & 1 != 0);
+            self.set(NodeFlags::BOUNDARY_HIGH, num & 2 != 0);
+        }
+    }
+
+    fn is_edge(&self) -> bool {
+        self.contains(NodeFlags::LEAF)
+    }
+
+    fn is_cluster(&self) -> bool {
+        !self.contains(NodeFlags::LEAF) && !self.contains(NodeFlags::LABEL)
+    }
+
+    fn is_label(&self) -> bool {
+        self.contains(NodeFlags::LABEL)
+    }
+
+    fn kind(&self) -> NodeKind {
+        if self.contains(Self::LABEL) {
+            NodeKind::LabelLeaf
+        } else if self.contains(Self::LEAF) {
+            NodeKind::EdgeLeaf
+        } else {
+            NodeKind::Cluster
+        }
     }
 }
 
@@ -43,14 +89,6 @@ unsafe impl util::Tag for NodeFlags {
     }
 }
 
-fn boundary_bits(num: usize) -> NodeFlags {
-    debug_assert!(num <= 2);
-    let mut flags = NodeFlags::empty();
-    flags.set(NodeFlags::BOUNDARY_LOW, num & 1 != 0);
-    flags.set(NodeFlags::BOUNDARY_HIGH, num & 2 != 0);
-    flags
-}
-
 #[repr(C, align(16))]
 struct Node<W> {
     parent: TaggedPtr<InternalNode<W>, NodeFlags>,
@@ -59,13 +97,35 @@ struct Node<W> {
 
 impl<W> Node<W> {
     unsafe fn dealloc(this: NonNull<Node<W>>) {
-        let leaf = unsafe { this.as_ref() }.is_leaf();
+        let leaf = unsafe { this.as_ref() }.is_edge();
         let ptr = this.as_ptr();
         if leaf {
             drop(unsafe { Box::from_raw(ptr as *mut LeafNode<W>) });
         } else {
             drop(unsafe { Box::from_raw(ptr as *mut InternalNode<W>) });
         }
+    }
+}
+
+#[repr(C)]
+struct LabelNode<W> {
+    node: Node<W>,
+    vertex: Index,
+    label: Index,
+}
+
+impl<W> LabelNode<W> {
+    fn alloc(weight: W, vertex: Index, label: Index, num_boundary: usize) -> NonNull<Self> {
+        let mut node = Box::new(LabelNode {
+            node: Node {
+                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
+                weight,
+            },
+            vertex,
+            label,
+        });
+        node.node.set_num_boundary(num_boundary);
+        Box::into_non_null(node)
     }
 }
 
@@ -137,6 +197,20 @@ impl<W> InternalNode<W> {
     }
 }
 
+impl<W> core::ops::Deref for LabelNode<W> {
+    type Target = Node<W>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.node
+    }
+}
+
+impl<W> core::ops::DerefMut for LabelNode<W> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.node
+    }
+}
+
 impl<W> core::ops::Deref for LeafNode<W> {
     type Target = Node<W>;
 
@@ -166,8 +240,15 @@ impl<W> core::ops::DerefMut for InternalNode<W> {
 }
 
 mod marker {
+
+    pub trait Leaf {}
+    impl Leaf for Edge {}
+    impl Leaf for Label {}
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Leaf;
+    pub struct Edge;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Label;
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Internal;
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,8 +259,9 @@ impl<W> Node<W> {
     fn flags(&self) -> NodeFlags {
         self.parent.tag()
     }
-    fn is_leaf(&self) -> bool {
-        self.flags().contains(NodeFlags::LEAF)
+
+    fn is_edge(&self) -> bool {
+        self.flags().is_edge()
     }
 
     fn is_flipped(&self) -> bool {
@@ -205,8 +287,7 @@ impl<W> Node<W> {
     fn set_num_boundary(&mut self, num: usize) {
         assert!(num <= 2, "num_boundary must be <= 2");
         self.parent.update_tag(|flags| {
-            flags.remove(NodeFlags::BOUNDARY_LOW | NodeFlags::BOUNDARY_HIGH);
-            flags.insert(boundary_bits(num));
+            flags.set_num_boundary(num);
         });
     }
 
@@ -278,27 +359,11 @@ impl<W> Node<W> {
 
     fn force_ptr(
         this: NonNull<Self>,
-    ) -> LeafOrInternal<NonNull<LeafNode<W>>, NonNull<InternalNode<W>>> {
-        if unsafe { (&*this.as_ptr()).is_leaf() } {
-            LeafOrInternal::Leaf(this.cast())
-        } else {
-            LeafOrInternal::Internal(this.cast())
-        }
-    }
-}
-
-impl<W> InternalNode<W> {
-    /// # Safety
-    /// Creates mutable references to the children of this node.
-    unsafe fn push_flip(&mut self) {
-        if self.node.is_flipped() {
-            self.node.set_flipped(false);
-            self.children.swap(0, 1);
-            for mut child in self.children {
-                unsafe {
-                    child.as_mut().toggle_flipped();
-                }
-            }
+    ) -> LeafOrInternal<NonNull<LeafNode<W>>, NonNull<LabelNode<W>>, NonNull<InternalNode<W>>> {
+        match unsafe { (&*this.as_ptr()).flags().kind() } {
+            NodeKind::EdgeLeaf => LeafOrInternal::Edge(this.cast()),
+            NodeKind::Cluster => LeafOrInternal::Internal(this.cast()),
+            NodeKind::LabelLeaf => LeafOrInternal::Label(this.cast()),
         }
     }
 }
@@ -326,8 +391,8 @@ impl<W> Handle<W, marker::Either> {
     }
 }
 
-impl<W> Handle<W, marker::Leaf> {
-    fn new_leaf(node: NonNull<Node<W>>) -> Handle<W, marker::Leaf> {
+impl<W> Handle<W, marker::Edge> {
+    fn new_edge(node: NonNull<Node<W>>) -> Handle<W, marker::Edge> {
         Handle {
             node,
             _marker: core::marker::PhantomData,
@@ -350,9 +415,15 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    fn force(&self) -> LeafOrInternal<Handle<W, marker::Leaf>, Handle<W, marker::Internal>> {
-        if unsafe { self.node.as_ref().is_leaf() } {
-            LeafOrInternal::Leaf(Handle::new(self.node))
+    fn force(
+        &self,
+    ) -> LeafOrInternal<
+        Handle<W, marker::Edge>,
+        Handle<W, marker::Label>,
+        Handle<W, marker::Internal>,
+    > {
+        if unsafe { self.node.as_ref().is_edge() } {
+            LeafOrInternal::Edge(Handle::new(self.node))
         } else {
             LeafOrInternal::Internal(Handle::new(self.node))
         }
@@ -398,7 +469,7 @@ impl<W, NodeType> Handle<W, NodeType> {
             return false;
         }
         match self.force() {
-            Leaf(_) => false,
+            Label(_) | Edge(_) => false,
             Internal(internal) => internal.num_boundary() != internal.num_path_children(),
         }
     }
@@ -564,11 +635,12 @@ impl<W, NodeType> Handle<W, NodeType> {
     fn has_left_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
-            Leaf(leaf) => {
+            Edge(leaf) => {
                 let v = root.endpoints(leaf.edge())[self.is_flipped()];
 
                 root.is_boundary_vertex(v)
             }
+            Label(label) => root.is_boundary_vertex(label.vertex()),
             Internal(internal) => internal.child(!self.is_flipped()).is_path(),
         }
     }
@@ -576,17 +648,18 @@ impl<W, NodeType> Handle<W, NodeType> {
     fn has_right_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
-            Leaf(leaf) => {
+            Edge(leaf) => {
                 let v = root.endpoints(leaf.edge())[!self.is_flipped()];
 
                 root.is_boundary_vertex(v)
             }
+            Label(label) => root.is_boundary_vertex(label.vertex()),
             Internal(internal) => internal.child(self.is_flipped()).is_path(),
         }
     }
 
     fn is_internal(&self) -> bool {
-        !unsafe { self.node.as_ref().is_leaf() }
+        !unsafe { self.node.as_ref().is_edge() }
     }
 
     unsafe fn into_internal(self) -> Handle<W, marker::Internal> {
@@ -594,9 +667,9 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { Handle::new_internal(self.node.cast()) }
     }
 
-    unsafe fn into_leaf(self) -> Handle<W, marker::Leaf> {
+    unsafe fn into_leaf(self) -> Handle<W, marker::Edge> {
         debug_assert!(!self.is_internal());
-        Handle::new_leaf(self.node.cast())
+        Handle::new_edge(self.node.cast())
     }
 
     fn delete_all_ancestors(self) {
@@ -622,7 +695,16 @@ impl<W, NodeType> Handle<W, NodeType> {
     }
 }
 
-impl<W> Handle<W, marker::Leaf> {
+impl<W> Handle<W, marker::Label> {
+    fn label(&self) -> Index {
+        unsafe { self.node.cast::<LabelNode<W>>().as_ref().label }
+    }
+    fn vertex(&self) -> Index {
+        unsafe { self.node.cast::<LabelNode<W>>().as_ref().vertex }
+    }
+}
+
+impl<W> Handle<W, marker::Edge> {
     fn edge(&self) -> &OwningEdgeKey {
         unsafe { &self.node.cast::<LeafNode<W>>().as_ref().edge }
     }
@@ -717,7 +799,7 @@ where
     W: Reduce,
 {
     let edge = root.incident_edges(v).next()?;
-    let node = Handle::new_leaf(edge.weight.cast());
+    let node = Handle::new_edge(edge.weight.cast());
     unsafe { ptr::read(&node) }.semi_splay();
 
     if root.has_at_most_one_incident_edge(v) {
@@ -951,7 +1033,7 @@ where
         return (None, None);
     };
 
-    let edge = Handle::new_leaf(edge.weight.cast::<Node<W>>());
+    let edge = Handle::new_edge(edge.weight.cast::<Node<W>>());
 
     let key = unsafe { ptr::read(edge.edge()) };
     unsafe { ptr::read(&edge) }.full_splay();
@@ -968,8 +1050,9 @@ where
     (ru, rv)
 }
 
-enum LeafOrInternal<T, U> {
-    Leaf(T),
+enum LeafOrInternal<T, V, U> {
+    Edge(T),
+    Label(V),
     Internal(U),
 }
 
@@ -1087,7 +1170,7 @@ impl<W> Default for TopTree<W> {
 impl<W> Drop for TopTree<W> {
     fn drop(&mut self) {
         self.tree.edges.retain(|_, edge| {
-            Handle::new_leaf(edge.weight.cast::<Node<W>>()).delete_all_ancestors();
+            Handle::new_edge(edge.weight.cast::<Node<W>>()).delete_all_ancestors();
 
             unsafe { Node::<W>::dealloc(edge.weight.cast()) };
             true

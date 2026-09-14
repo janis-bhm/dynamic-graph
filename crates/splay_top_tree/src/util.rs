@@ -86,7 +86,7 @@ unsafe impl<T> Aligned for [T] {
 
 const fn bits_for<T: ?Sized + Aligned>() -> u32 {
     let align = align_of::<T>();
-    align.trailing_zeros()
+    align.trailing_zeros() + (64 - 56)
 }
 
 const fn bits_for_tags(mut tags: &[usize]) -> u32 {
@@ -213,3 +213,54 @@ mod tests {
         assert_eq!(tagged_ptr.tag(), MyTag::C);
     }
 }
+
+pub trait AssertNumeric {
+    fn assert_eq(self, other: Self) -> Self;
+    fn assert_ne(self, other: Self) -> Self;
+    fn assert_lt(self, other: Self) -> Self;
+    fn assert_le(self, other: Self) -> Self;
+    fn assert_gt(self, other: Self) -> Self;
+    fn assert_ge(self, other: Self) -> Self;
+    fn assert_in(self, range: impl std::ops::RangeBounds<Self>) -> Self;
+}
+
+macro_rules! impl_assert_num {
+    ($($t:ty),*) => {
+        $(
+            impl AssertNumeric for $t {
+                fn assert_eq(self, other: Self) -> Self {
+                    assert_eq!(self, other);
+                    self
+                }
+                fn assert_ne(self, other: Self) -> Self {
+                    assert_ne!(self, other);
+                    self
+                }
+                fn assert_lt(self, other: Self) -> Self {
+                    assert!(self < other);
+                    self
+                }
+                fn assert_le(self, other: Self) -> Self {
+                    assert!(self <= other);
+                    self
+                }
+                fn assert_gt(self, other: Self) -> Self {
+                    assert!(self > other);
+                    self
+                }
+                fn assert_ge(self, other: Self) -> Self {
+                    assert!(self >= other);
+                    self
+                }
+                fn assert_in(self, range: impl std::ops::RangeBounds<Self>) -> Self {
+                    assert!(range.contains(&self));
+                    self
+                }
+            }
+        )*
+    };
+}
+
+impl_assert_num!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+);
