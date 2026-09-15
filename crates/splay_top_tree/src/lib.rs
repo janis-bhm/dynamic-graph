@@ -859,6 +859,7 @@ fn incident_leaves<W>(
     })
 }
 
+/// Finds the least common ancestor of all leaves incident to `v` in the tree rooted at `root`.
 pub(crate) fn find_consuming_node<W>(
     root: &Tree<NonNull<LeafNode<W>>>,
     v: Index,
@@ -869,6 +870,7 @@ where
     let node = incident_leaves(root, v).next()?;
     unsafe { ptr::read(&node) }.semi_splay();
 
+    // if the vertex has exactly one incident edge, then the consuming node is the incident leaf.
     if root.has_at_most_one_incident_element(v) {
         return Some(node.forget_type());
     }
@@ -947,6 +949,7 @@ where
         }
     }
 
+    /// precondition: root of the tree containing the to-be-exposed vertex is a point.
     fn prepare_expose<W>(mut consuming_node: Handle<W, marker::Either>) -> Handle<W, marker::Either>
     where
         W: Reduce,
