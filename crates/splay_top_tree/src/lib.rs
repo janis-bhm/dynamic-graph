@@ -1146,7 +1146,7 @@ where
 
     let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
     let label = tree.add_vertex_label(v, node.cast()).expect("asdf");
-    LabelNode::init(node, weight, v, label, 0);
+    LabelNode::init(node, weight, v, label, usize::from(rv.is_some()));
 
     let root: NonNull<Node<W>> = match rv {
         Some(rv) => {
@@ -1157,7 +1157,7 @@ where
                 let wr = &right.as_ref().weight;
                 W::reduce(wl, wr)
             };
-            InternalNode::alloc(weight, left.node, right, 1).cast()
+            InternalNode::alloc(weight, left.node, right, 0).cast()
         }
         None => node.cast(),
     };
@@ -1308,6 +1308,7 @@ impl<W> TopTree<W> {
         W: Reduce,
     {
         let ru = expose(u, &mut self.tree);
+        _ = ru.as_ref().map(|h| assert!(h.is_point()));
         let rv = expose(v, &mut self.tree);
 
         let ru = ru.map(|h| Entry {
