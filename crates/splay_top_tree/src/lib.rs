@@ -668,7 +668,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    fn has_left_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
+    fn has_left_boundary(&self, root: &Tree<W>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
@@ -681,7 +681,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    fn has_right_boundary(&self, root: &Tree<NonNull<LeafNode<W>>>) -> bool {
+    fn has_right_boundary(&self, root: &Tree<W>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
@@ -842,7 +842,7 @@ impl<W> Handle<W, marker::Internal> {
 }
 
 fn incident_leaves<W>(
-    root: &Tree<NonNull<LeafNode<W>>>,
+    root: &Tree<W>,
     v: Index,
 ) -> impl Iterator<Item = Handle<W, marker::Leaf>> + '_ {
     root.vertices.get(&v).into_iter().flat_map(|v| {
@@ -854,16 +854,13 @@ fn incident_leaves<W>(
         v.edges
             .iter()
             .filter_map(|key| root.edges.get(key))
-            .map(|edge| Handle::<W, marker::Leaf>::new(edge.weight.cast()))
+            .map(|edge| Handle::<W, marker::Leaf>::new(edge.edge_node.cast()))
             .chain(labels)
     })
 }
 
 /// Finds the least common ancestor of all leaves incident to `v` in the tree rooted at `root`.
-pub(crate) fn find_consuming_node<W>(
-    root: &Tree<NonNull<LeafNode<W>>>,
-    v: Index,
-) -> Option<Handle<W, marker::Either>>
+pub(crate) fn find_consuming_node<W>(root: &Tree<W>, v: Index) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
@@ -915,10 +912,7 @@ where
     last_middle_node
 }
 
-pub(crate) fn expose<W>(
-    v: Index,
-    root: &mut Tree<NonNull<LeafNode<W>>>,
-) -> Option<Handle<W, marker::Either>>
+pub(crate) fn expose<W>(v: Index, root: &mut Tree<W>) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
@@ -1011,10 +1005,7 @@ where
     }
 }
 
-pub(crate) fn deexpose<W>(
-    v: Index,
-    tree: &mut Tree<NonNull<LeafNode<W>>>,
-) -> Option<Handle<W, marker::Either>>
+pub(crate) fn deexpose<W>(v: Index, tree: &mut Tree<W>) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
@@ -1034,12 +1025,7 @@ where
     root
 }
 
-pub(crate) fn link<W>(
-    u: Index,
-    v: Index,
-    weight: W,
-    tree: &mut Tree<NonNull<LeafNode<W>>>,
-) -> NonNull<Node<W>>
+pub(crate) fn link<W>(u: Index, v: Index, weight: W, tree: &mut Tree<W>) -> NonNull<Node<W>>
 where
     W: Reduce,
 {
@@ -1098,7 +1084,7 @@ where
 pub(crate) fn cut<W>(
     u: Index,
     v: Index,
-    tree: &mut Tree<NonNull<LeafNode<W>>>,
+    tree: &mut Tree<W>,
 ) -> (
     Option<Handle<W, marker::Either>>,
     Option<Handle<W, marker::Either>>,
@@ -1111,7 +1097,7 @@ where
         return (None, None);
     };
 
-    let edge = Handle::new_edge(edge.weight.cast::<Node<W>>());
+    let edge = Handle::new_edge(edge.edge_node.cast::<Node<W>>());
 
     let key = unsafe { ptr::read(edge.edge()) };
     unsafe { ptr::read(&edge) }.full_splay();
@@ -1128,11 +1114,7 @@ where
     (ru, rv)
 }
 
-pub(crate) fn attach<W>(
-    v: Index,
-    weight: W,
-    tree: &mut Tree<NonNull<LeafNode<W>>>,
-) -> (Index, NonNull<Node<W>>)
+pub(crate) fn attach<W>(v: Index, weight: W, tree: &mut Tree<W>) -> (Index, NonNull<Node<W>>)
 where
     W: Reduce,
 {
@@ -1165,7 +1147,7 @@ where
     (label, root)
 }
 
-pub(crate) fn detach<W>(v: Index, tree: &mut Tree<NonNull<LeafNode<W>>>) {
+pub(crate) fn detach<W>(v: Index, tree: &mut Tree<W>) {
     // labels are never path components, so removing them can never disconnect the tree.
     // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
     let label = tree.labels.remove(&v).expect("label must exist");
@@ -1224,7 +1206,7 @@ impl<'a, W> Entry<'a, W> {
 }
 
 pub struct TopTree<W> {
-    tree: Tree<NonNull<LeafNode<W>>>,
+    tree: Tree<W>,
 }
 
 impl<W> TopTree<W> {
@@ -1344,18 +1326,22 @@ impl<W> Default for TopTree<W> {
 impl<W> Drop for TopTree<W> {
     fn drop(&mut self) {
         self.tree.edges.retain(|_, edge| {
-            Handle::new_edge(edge.weight.cast::<Node<W>>()).delete_all_ancestors();
+            Handle::new_edge(edge.edge_node.cast::<Node<W>>()).delete_all_ancestors();
 
-            unsafe { Node::<W>::dealloc(edge.weight.cast()) };
+            unsafe { Node::<W>::dealloc(edge.edge_node.cast()) };
             true
         });
     }
 }
 
 mod tree {
-    use std::{collections::BTreeMap, marker::PhantomData, ptr};
+    use std::{
+        collections::BTreeMap,
+        marker::PhantomData,
+        ptr::{self, NonNull},
+    };
 
-    use crate::{index::Index, util::WithDropExt};
+    use crate::{LabelNode, LeafNode, index::Index, util::WithDropExt};
 
     use super::index::IndexAllocator;
 
@@ -1363,7 +1349,7 @@ mod tree {
         index_allocator: IndexAllocator,
         pub vertices: BTreeMap<Index, Vertex>,
         pub edges: BTreeMap<EdgeKey<Private>, Edge<W>>,
-        pub labels: BTreeMap<Index, W>,
+        pub labels: BTreeMap<Index, NonNull<LabelNode<W>>>,
     }
 
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1414,7 +1400,7 @@ mod tree {
     }
 
     pub struct Edge<W> {
-        pub weight: W,
+        pub edge_node: NonNull<LeafNode<W>>,
         pub endpoints: [Index; 2],
     }
 
@@ -1527,10 +1513,14 @@ mod tree {
             index
         }
 
-        pub fn add_vertex_label(&mut self, v: Index, label: W) -> Option<Index> {
+        pub fn add_vertex_label(
+            &mut self,
+            v: Index,
+            label_node: NonNull<LabelNode<W>>,
+        ) -> Option<Index> {
             if let Some(v) = self.vertices.get_mut(&v) {
                 let index = self.index_allocator.allocate();
-                self.labels.insert(index, label);
+                self.labels.insert(index, label_node);
                 v.labels.push(index);
                 Some(index)
             } else {
@@ -1581,10 +1571,15 @@ mod tree {
                 .chain(labels.map(EdgeOrLabel::Label))
         }
 
-        pub fn add_edge(&mut self, left: Index, right: Index, weight: W) -> EdgeKey<Private> {
+        pub fn add_edge(
+            &mut self,
+            left: Index,
+            right: Index,
+            edge_node: NonNull<LeafNode<W>>,
+        ) -> EdgeKey<Private> {
             let key = EdgeKey::new_private(left, right);
             let edge = Edge {
-                weight,
+                edge_node,
                 endpoints: [left, right],
             };
 

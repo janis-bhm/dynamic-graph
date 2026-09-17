@@ -14,11 +14,10 @@ impl Reduce for Xor {
     }
 }
 
-type NonNullLeaf = std::ptr::NonNull<LeafNode<Xor>>;
 type NN = std::ptr::NonNull<Node<Xor>>;
 
 struct Harness {
-    tree: tree::Tree<NonNullLeaf>,
+    tree: tree::Tree<Xor>,
     adj: BTreeMap<Index, BTreeMap<Index, u64>>,
     exposed: BTreeSet<Index>,
 }
@@ -83,7 +82,7 @@ impl Harness {
     fn edge_leaves_of<'a>(&'a self, v: Index) -> impl Iterator<Item = NN> + 'a {
         self.tree
             .incident_edges(v)
-            .map(|e| e.weight.cast::<Node<Xor>>())
+            .map(|e| e.edge_node.cast::<Node<Xor>>())
     }
 
     fn components(&self) -> Vec<Vec<Index>> {
@@ -133,11 +132,11 @@ fn climb(mut node: NN) -> NN {
     }
 }
 
-fn degree(h: &tree::Tree<NonNullLeaf>, v: Index) -> usize {
+fn degree(h: &tree::Tree<Xor>, v: Index) -> usize {
     h.degree(v).unwrap_or(0)
 }
 
-fn is_boundary_vertex(h: &tree::Tree<NonNullLeaf>, v: Index) -> bool {
+fn is_boundary_vertex(h: &tree::Tree<Xor>, v: Index) -> bool {
     let exposed = h.vertices.get(&v).is_some_and(|v| v.exposed);
     exposed || degree(h, v) >= 2
 }
@@ -163,7 +162,7 @@ enum ClusterKey {
     Label(Index),
 }
 
-fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<ClusterKey> {
+fn cluster_keys(h: &tree::Tree<Xor>, node: NN) -> Vec<ClusterKey> {
     match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => unsafe {
             vec![ClusterKey::Edge(leaf.as_ref().edge.downcast())]
@@ -178,7 +177,7 @@ fn cluster_keys(h: &tree::Tree<NonNullLeaf>, node: NN) -> Vec<ClusterKey> {
     }
 }
 
-fn count_leaves_with(h: &tree::Tree<NonNullLeaf>, node: NN, v: Index) -> usize {
+fn count_leaves_with(h: &tree::Tree<Xor>, node: NN, v: Index) -> usize {
     match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
             let leaf = unsafe { leaf.as_ref() };
@@ -194,7 +193,7 @@ fn count_leaves_with(h: &tree::Tree<NonNullLeaf>, node: NN, v: Index) -> usize {
     }
 }
 
-fn check_node(h: &tree::Tree<NonNullLeaf>, node: NN) -> Cii {
+fn check_node(h: &tree::Tree<Xor>, node: NN) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
 
     let cii = match Node::force_ptr(node) {
@@ -291,7 +290,7 @@ fn fold_weight(node: NN) -> u64 {
 }
 
 fn check_node_weights_and_edges(
-    h: &tree::Tree<NonNullLeaf>,
+    h: &tree::Tree<Xor>,
     node: NN,
     leaves: &mut Vec<NN>,
     nodes: &mut Vec<NN>,
@@ -329,7 +328,7 @@ fn all_roots(h: &Harness) -> Vec<NN> {
         .tree
         .edges
         .values()
-        .map(|e| climb(e.weight.cast()))
+        .map(|e| climb(e.edge_node.cast()))
         .collect();
     roots.sort_by_key(|r| r.as_ptr() as usize);
     roots.dedup();
@@ -341,7 +340,7 @@ fn assert_invariants(h: &Harness) {
     let mut total_leaves = 0usize;
 
     for (key, edge) in tree.edges.iter() {
-        let leaf_nn: NN = edge.weight.cast();
+        let leaf_nn: NN = edge.edge_node.cast();
         let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
         assert!(node.is_edge(), "edge must map to a leaf node");
         assert_eq!(node.edge, *key, "leaf edge key must match its map entry");
