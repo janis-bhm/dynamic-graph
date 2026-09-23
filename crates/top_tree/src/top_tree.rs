@@ -19,6 +19,90 @@ use crate::{
     summary::{MergeContext, Summary},
 };
 
+/// A slot that either holds an index or is vacant, stored in a single `usize`
+/// by using `usize::MAX` as the vacancy sentinel.
+///
+/// Unlike `Option<usize>`, which is two words wide because `usize` has no
+/// niche, this stays one word. No valid index can be `usize::MAX` (that would
+/// require a `Vec` of `usize::MAX` elements), so the sentinel is unambiguous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OptIdx(usize);
+
+impl OptIdx {
+    /// A vacant slot.
+    const VACANT: Self = Self(usize::MAX);
+
+    /// Wraps an index. `index` must not be `usize::MAX`.
+    fn new(index: usize) -> Self {
+        debug_assert_ne!(index, usize::MAX, "index must fit in an `OptIdx`");
+        Self(index)
+    }
+
+    /// Returns the contained index, or `None` if the slot is vacant.
+    fn get(self) -> Option<usize> {
+        if self.0 == usize::MAX {
+            None
+        } else {
+            Some(self.0)
+        }
+    }
+
+    /// Packs an optional index into a slot.
+    fn from_option(index: Option<usize>) -> Self {
+        match index {
+            Some(index) => Self::new(index),
+            None => Self::VACANT,
+        }
+    }
+}
+
+/// A compact growable bit vector, used to track which vertices are exposed.
+///
+/// Bits are packed into `u64` blocks, so each vertex costs a single bit rather
+/// than the byte a `Vec<bool>` would use.
+#[derive(Default)]
+struct BitVec {
+    blocks: Vec<u64>,
+}
+
+impl BitVec {
+    const BITS: usize = u64::BITS as usize;
+
+    fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    /// Grows the vector to hold at least `len` bits, zero-filling new bits.
+    fn grow_to(&mut self, len: usize) {
+        let blocks = len.div_ceil(Self::BITS);
+        if blocks > self.blocks.len() {
+            self.blocks.resize(blocks, 0);
+        }
+    }
+
+    /// Returns whether the bit at `index` is set; `false` if out of range.
+    fn get(&self, index: usize) -> bool {
+        let block = index / Self::BITS;
+        self.blocks
+            .get(block)
+            .is_some_and(|bits| bits >> (index % Self::BITS) & 1 == 1)
+    }
+
+    /// Sets the bit at `index`, ignoring indices past the end.
+    fn set(&mut self, index: usize, value: bool) {
+        let block = index / Self::BITS;
+        let Some(bits) = self.blocks.get_mut(block) else {
+            return;
+        };
+        let mask = 1u64 << (index % Self::BITS);
+        if value {
+            *bits |= mask;
+        } else {
+            *bits &= !mask;
+        }
+    }
+}
+
 /// What a cluster node represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClusterData {
@@ -32,9 +116,9 @@ enum ClusterData {
 
 /// A node of the top tree.
 struct Cluster<S: Summary<W>, W> {
-    parent: Option<usize>,
-    left: Option<usize>,
-    right: Option<usize>,
+    parent: OptIdx,
+    left: OptIdx,
+    right: OptIdx,
     /// Whether the logical orientation of the cluster is reversed.
     flipped: bool,
     /// The number of boundary vertices of the cluster (0, 1, or 2).
@@ -66,17 +150,17 @@ where
     nodes: Vec<Option<Cluster<S, W>>>,
     free: Vec<usize>,
     /// The top tree leaf of each forest edge, indexed by edge index.
-    edge_leaf: Vec<Option<usize>>,
+    edge_leaf: Vec<OptIdx>,
     /// The top tree leaf of each forest label, indexed by label index.
-    label_leaf: Vec<Option<usize>>,
+    label_leaf: Vec<OptIdx>,
     /// Stable [`LabelId`] of each forest label, indexed by label index.
-    tree_label_ids: Vec<Option<usize>>,
+    tree_label_ids: Vec<OptIdx>,
     /// Forest label index of each stable [`LabelId`].
-    label_ids: Vec<Option<usize>>,
+    label_ids: Vec<OptIdx>,
     /// Free slots in `label_ids`.
     free_label_ids: Vec<usize>,
     /// Whether each vertex is currently exposed, indexed by vertex index.
-    exposed: Vec<bool>,
+    exposed: BitVec,
 }
 
 impl<N, S, W, V> TopTree<N, S, W, V>
@@ -94,7 +178,7 @@ where
             tree_label_ids: Vec::new(),
             label_ids: Vec::new(),
             free_label_ids: Vec::new(),
-            exposed: Vec::new(),
+            exposed: BitVec::new(),
         }
     }
 
@@ -123,9 +207,7 @@ where
     /// Adding a key that is already present returns the existing index.
     pub fn add_vertex(&mut self, key: N, weight: V) -> usize {
         let index = self.tree.add_node(key, weight);
-        if self.exposed.len() <= index {
-            self.exposed.resize(index + 1, false);
-        }
+        self.exposed.grow_to(index + 1);
         index
     }
 
@@ -159,15 +241,15 @@ where
 
         let id = match self.free_label_ids.pop() {
             Some(id) => {
-                self.label_ids[id] = Some(tree_label);
+                self.label_ids[id] = OptIdx::new(tree_label);
                 id
             }
             None => {
-                self.label_ids.push(Some(tree_label));
+                self.label_ids.push(OptIdx::new(tree_label));
                 self.label_ids.len() - 1
             }
         };
-        self.tree_label_ids[tree_label] = Some(id);
+        self.tree_label_ids[tree_label] = OptIdx::new(id);
 
         LabelId(id)
     }
@@ -176,9 +258,9 @@ where
     ///
     /// The handle is invalidated; all other [`LabelId`]s remain valid.
     pub fn detach(&mut self, label: LabelId) -> Option<W> {
-        let tree_label = self.label_ids.get(label.0).copied().flatten()?;
+        let tree_label = self.label_ids.get(label.0).copied().and_then(OptIdx::get)?;
         let weight = self.detach_internal(tree_label);
-        self.label_ids[label.0] = None;
+        self.label_ids[label.0] = OptIdx::VACANT;
         self.free_label_ids.push(label.0);
         weight
     }
@@ -288,17 +370,17 @@ where
 
     #[inline]
     fn parent(&self, node: usize) -> Option<usize> {
-        self.cl(node).parent
+        self.cl(node).parent.get()
     }
 
     #[inline]
     fn set_parent(&mut self, node: usize, parent: Option<usize>) {
-        self.cl_mut(node).parent = parent;
+        self.cl_mut(node).parent = OptIdx::from_option(parent);
     }
 
     fn is_left_child(&self, node: usize) -> Option<bool> {
-        let parent = self.cl(node).parent?;
-        Some(self.cl(parent).left == Some(node))
+        let parent = self.cl(node).parent.get()?;
+        Some(self.cl(parent).left.get() == Some(node))
     }
 
     /// Returns the child of `node` on the given side.
@@ -306,28 +388,32 @@ where
     /// `left` refers to the logical (unflipped) orientation.
     fn child(&self, node: usize, left: bool) -> Option<usize> {
         if left {
-            self.cl(node).left
+            self.cl(node).left.get()
         } else {
-            self.cl(node).right
+            self.cl(node).right.get()
         }
     }
 
     fn set_child(&mut self, node: usize, child: usize, left: bool) {
         if left {
-            self.cl_mut(node).left = Some(child);
+            self.cl_mut(node).left = OptIdx::new(child);
         } else {
-            self.cl_mut(node).right = Some(child);
+            self.cl_mut(node).right = OptIdx::new(child);
         }
-        self.cl_mut(child).parent = Some(node);
+        self.cl_mut(child).parent = OptIdx::new(node);
     }
 
     /// Returns the two children in logical (unflipped) order.
     fn flipped_children(&self, node: usize) -> (usize, usize) {
         let cluster = self.cl(node);
         let (left, right) = (
-            cluster.left.expect("internal node must have a left child"),
+            cluster
+                .left
+                .get()
+                .expect("internal node must have a left child"),
             cluster
                 .right
+                .get()
                 .expect("internal node must have a right child"),
         );
         if cluster.flipped {
@@ -338,12 +424,12 @@ where
     }
 
     fn sibling(&self, node: usize) -> Option<usize> {
-        let parent = self.cl(node).parent?;
+        let parent = self.cl(node).parent.get()?;
         let cluster = self.cl(parent);
-        if cluster.left == Some(node) {
-            cluster.right
+        if cluster.left.get() == Some(node) {
+            cluster.right.get()
         } else {
-            cluster.left
+            cluster.left.get()
         }
     }
 
@@ -384,8 +470,8 @@ where
 
     fn num_path_children(&self, node: usize) -> usize {
         let cluster = self.cl(node);
-        usize::from(cluster.left.is_some_and(|c| self.is_path(c)))
-            + usize::from(cluster.right.is_some_and(|c| self.is_path(c)))
+        usize::from(cluster.left.get().is_some_and(|c| self.is_path(c)))
+            + usize::from(cluster.right.get().is_some_and(|c| self.is_path(c)))
     }
 
     fn has_middle_boundary(&self, node: usize) -> bool {
@@ -401,7 +487,7 @@ where
     }
 
     fn is_boundary_vertex(&self, vertex: usize) -> bool {
-        self.exposed.get(vertex).copied().unwrap_or(false) || self.tree.degree(vertex) >= 2
+        self.exposed.get(vertex) || self.tree.degree(vertex) >= 2
     }
 
     fn has_left_boundary(&self, node: usize) -> bool {
@@ -445,20 +531,18 @@ where
     }
 
     fn set_exposed(&mut self, vertex: usize, exposed: bool) {
-        if let Some(slot) = self.exposed.get_mut(vertex) {
-            *slot = exposed;
-        }
+        self.exposed.set(vertex, exposed);
     }
 
     fn incident_leaves(&self, vertex: usize) -> impl Iterator<Item = usize> + '_ {
         let edges = self
             .tree
             .incident_edge_indices(vertex)
-            .filter_map(|edge| self.edge_leaf[edge]);
+            .filter_map(|edge| self.edge_leaf[edge].get());
         let labels = self
             .tree
             .incident_label_indices(vertex)
-            .filter_map(|label| self.label_leaf[label]);
+            .filter_map(|label| self.label_leaf[label].get());
         edges.chain(labels)
     }
 
@@ -482,7 +566,7 @@ where
         if !self.is_path(node) {
             return;
         }
-        let (left, right) = (self.cl(node).left, self.cl(node).right);
+        let (left, right) = (self.cl(node).left.get(), self.cl(node).right.get());
         for child in [left, right].into_iter().flatten() {
             if self.is_path(child) {
                 S::apply(&mut self.cl_mut(child).sum, &tag);
@@ -494,11 +578,11 @@ where
     fn push_flip(&mut self, node: usize) {
         self.push_tag(node);
         if self.cl(node).flipped {
-            let (left, right) = (self.cl(node).left, self.cl(node).right);
+            let (left, right) = (self.cl(node).left.get(), self.cl(node).right.get());
             let cluster = self.cl_mut(node);
             cluster.flipped = false;
-            cluster.left = right;
-            cluster.right = left;
+            cluster.left = OptIdx::from_option(right);
+            cluster.right = OptIdx::from_option(left);
             if let Some(child) = left {
                 self.toggle_flipped(child);
             }
@@ -534,9 +618,9 @@ where
         };
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);
         Cluster {
-            parent: None,
-            left: Some(left),
-            right: Some(right),
+            parent: OptIdx::VACANT,
+            left: OptIdx::new(left),
+            right: OptIdx::new(right),
             flipped: false,
             num_boundary,
             data: ClusterData::Internal,
@@ -559,9 +643,9 @@ where
         let weight = &self.tree.edge_index(edge).expect("edge must exist").weight;
         let sum = S::tree_edge(weight, u, v);
         let cluster = Cluster {
-            parent: None,
-            left: None,
-            right: None,
+            parent: OptIdx::VACANT,
+            left: OptIdx::VACANT,
+            right: OptIdx::VACANT,
             flipped: false,
             num_boundary,
             data: ClusterData::Edge(edge),
@@ -570,7 +654,7 @@ where
             _marker: PhantomData,
         };
         let node = self.alloc(cluster);
-        self.edge_leaf[edge] = Some(node);
+        self.edge_leaf[edge] = OptIdx::new(node);
         node
     }
 
@@ -580,9 +664,9 @@ where
             S::label(&label_ref.weight, label_ref.node_id())
         };
         let cluster = Cluster {
-            parent: None,
-            left: None,
-            right: None,
+            parent: OptIdx::VACANT,
+            left: OptIdx::VACANT,
+            right: OptIdx::VACANT,
             flipped: false,
             num_boundary,
             data: ClusterData::Label(label),
@@ -591,7 +675,7 @@ where
             _marker: PhantomData,
         };
         let node = self.alloc(cluster);
-        self.label_leaf[label] = Some(node);
+        self.label_leaf[label] = OptIdx::new(node);
         node
     }
 
@@ -725,6 +809,7 @@ where
         let node = self.incident_leaves(vertex).next()?;
         self.semi_splay(node);
 
+        // if the vertex has exactly one incident leaf, then the consuming node is the incident leaf.
         if self.has_at_most_one_incident_element(vertex) {
             return Some(node);
         }
@@ -903,7 +988,7 @@ where
         self.set_exposed(v, false);
 
         let edge = self.tree.add_edge(u, v, weight);
-        self.edge_leaf.push(None);
+        self.edge_leaf.push(OptIdx::VACANT);
         let leaf = self.new_leaf_edge(
             edge,
             u,
@@ -925,7 +1010,9 @@ where
 
     fn cut_internal(&mut self, u: usize, v: usize) -> Option<W> {
         let edge = self.tree.edge_index_of(u, v)?;
-        let leaf = self.edge_leaf[edge].expect("edge must have a top tree leaf");
+        let leaf = self.edge_leaf[edge]
+            .get()
+            .expect("edge must have a top tree leaf");
 
         self.full_splay(leaf);
         self.delete_all_ancestors(leaf);
@@ -935,7 +1022,7 @@ where
         let moved = self.edge_leaf.pop().expect("edge leaf entry must exist");
         if edge < last {
             self.edge_leaf[edge] = moved;
-            if let Some(node) = moved {
+            if let Some(node) = moved.get() {
                 self.cl_mut(node).data = ClusterData::Edge(edge);
             }
         }
@@ -958,8 +1045,8 @@ where
         self.set_exposed(vertex, false);
 
         let label = self.tree.add_label(vertex, weight);
-        self.label_leaf.push(None);
-        self.tree_label_ids.push(None);
+        self.label_leaf.push(OptIdx::VACANT);
+        self.tree_label_ids.push(OptIdx::VACANT);
         let leaf = self.new_leaf_label(label, u8::from(root_v.is_some()));
 
         if let Some(root_v) = root_v {
@@ -970,7 +1057,9 @@ where
     }
 
     fn detach_internal(&mut self, label: usize) -> Option<W> {
-        let label_node = self.label_leaf[label].expect("label must have a top tree leaf");
+        let label_node = self.label_leaf[label]
+            .get()
+            .expect("label must have a top tree leaf");
 
         if let Some(parent) = self.parent(label_node) {
             let sibling = self.sibling(label_node).expect("label has sibling");
@@ -1002,12 +1091,12 @@ where
             .expect("label id entry must exist");
         if label < last {
             self.label_leaf[label] = moved;
-            if let Some(node) = moved {
+            if let Some(node) = moved.get() {
                 self.cl_mut(node).data = ClusterData::Label(label);
             }
             self.tree_label_ids[label] = moved_id;
-            if let Some(id) = moved_id {
-                self.label_ids[id] = Some(label);
+            if let Some(id) = moved_id.get() {
+                self.label_ids[id] = OptIdx::new(label);
             }
         }
 

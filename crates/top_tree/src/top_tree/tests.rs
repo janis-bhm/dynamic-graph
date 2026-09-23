@@ -214,7 +214,11 @@ fn live_roots<S: Summary<u64>>(tt: &TopTree<u32, S, u64, ()>) -> Vec<usize> {
     tt.nodes
         .iter()
         .enumerate()
-        .filter_map(|(i, node)| node.as_ref().filter(|c| c.parent.is_none()).map(|_| i))
+        .filter_map(|(i, node)| {
+            node.as_ref()
+                .filter(|c| c.parent.get().is_none())
+                .map(|_| i)
+        })
         .collect()
 }
 
@@ -226,17 +230,21 @@ fn collect_leaves<S: Summary<u64>>(
 ) {
     *nodes += 1;
     let cluster = tt.cl(node);
-    if let (Some(left), Some(right)) = (cluster.left, cluster.right) {
-        assert_eq!(tt.cl(left).parent, Some(node), "left child parent mismatch");
+    if let (Some(left), Some(right)) = (cluster.left.get(), cluster.right.get()) {
         assert_eq!(
-            tt.cl(right).parent,
+            tt.cl(left).parent.get(),
+            Some(node),
+            "left child parent mismatch"
+        );
+        assert_eq!(
+            tt.cl(right).parent.get(),
             Some(node),
             "right child parent mismatch"
         );
         collect_leaves(tt, left, leaves, nodes);
         collect_leaves(tt, right, leaves, nodes);
     } else {
-        assert!(cluster.left.is_none() && cluster.right.is_none());
+        assert!(cluster.left.get().is_none() && cluster.right.get().is_none());
         leaves.push(node);
     }
 }
@@ -246,11 +254,11 @@ fn check_invariants<S: Summary<u64>>(h: &Harness<S>) {
 
     for (i, node) in tt.nodes.iter().enumerate() {
         if let Some(cluster) = node
-            && let Some(parent) = cluster.parent
+            && let Some(parent) = cluster.parent.get()
         {
             let p = tt.nodes[parent].as_ref().expect("parent must be live");
             assert!(
-                p.left == Some(i) || p.right == Some(i),
+                p.left.get() == Some(i) || p.right.get() == Some(i),
                 "node {i} is not a child of its parent {parent}"
             );
         }
@@ -631,4 +639,39 @@ fn randomized_link_cut() {
             check_invariants(&h);
         }
     }
+}
+
+#[test]
+fn opt_idx_is_one_word() {
+    use std::mem::size_of;
+
+    assert_eq!(size_of::<OptIdx>(), size_of::<usize>());
+    assert_eq!(OptIdx::new(0).get(), Some(0));
+    assert_eq!(OptIdx::new(usize::MAX - 1).get(), Some(usize::MAX - 1));
+    assert_eq!(OptIdx::VACANT.get(), None);
+    assert_eq!(OptIdx::from_option(None), OptIdx::VACANT);
+}
+
+#[test]
+fn bit_vec_packs_bits() {
+    let mut bits = BitVec::new();
+    assert!(!bits.get(0));
+
+    bits.grow_to(200);
+    bits.set(0, true);
+    bits.set(64, true);
+    bits.set(65, true);
+    bits.set(199, true);
+
+    assert!(bits.get(0));
+    assert!(!bits.get(1));
+    assert!(bits.get(64));
+    assert!(bits.get(65));
+    assert!(bits.get(199));
+
+    bits.set(64, false);
+    assert!(!bits.get(64));
+    assert!(bits.get(65));
+
+    assert_eq!(bits.blocks.len(), 4);
 }
