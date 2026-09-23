@@ -117,21 +117,6 @@ struct LabelNode<W> {
     label: Index,
 }
 
-impl<W> LabelNode<W> {
-    fn alloc(weight: W, vertex: Index, label: Index, num_boundary: usize) -> NonNull<Self> {
-        let mut node = Box::new(LabelNode {
-            node: Node {
-                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
-                weight,
-            },
-            vertex,
-            label,
-        });
-        node.node.set_num_boundary(num_boundary);
-        Box::into_non_null(node)
-    }
-}
-
 #[repr(C)]
 struct LeafNode<W> {
     node: Node<W>,
@@ -163,18 +148,6 @@ impl<W> LabelNode<W> {
 }
 
 impl<W> LeafNode<W> {
-    fn alloc(weight: W, edge: OwningEdgeKey, num_boundary: usize) -> NonNull<Self> {
-        let mut node = Box::new(LeafNode {
-            node: Node {
-                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
-                weight,
-            },
-            edge,
-        });
-        node.node.set_num_boundary(num_boundary);
-        Box::into_non_null(node)
-    }
-
     fn init(node: NonNull<LeafNode<W>>, weight: W, edge: OwningEdgeKey, num_boundary: usize) {
         unsafe {
             let uninit = node.as_uninit_mut();
