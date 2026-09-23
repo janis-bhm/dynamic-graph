@@ -16,26 +16,6 @@ pub struct Node<V> {
     next_label: usize,
 }
 
-impl<V> Node<V> {
-    #[cfg_attr(not(test), expect(unused))]
-    fn next_edge(&self) -> Option<usize> {
-        if self.next_edge == NO_EDGE {
-            None
-        } else {
-            Some(self.next_edge)
-        }
-    }
-
-    #[expect(unused)]
-    fn next_label(&self) -> Option<usize> {
-        if self.next_label == NO_EDGE {
-            None
-        } else {
-            Some(self.next_label)
-        }
-    }
-}
-
 pub struct Edge<W> {
     /// weight associated with an edge.
     pub weight: W,
@@ -103,14 +83,20 @@ impl<N, W, V> Tree<N, W, V> {
     where
         N: Eq + Hash,
     {
-        self.nodes
-            .entry(node)
-            .insert_entry(Node {
+        if let Some(index) = self.nodes.get_index_of(&node) {
+            return index;
+        }
+
+        self.nodes.insert(
+            node,
+            Node {
                 weight,
                 next_edge: NO_EDGE,
                 next_label: NO_EDGE,
-            })
-            .index()
+            },
+        );
+
+        self.nodes.len() - 1
     }
 
     pub fn add_edge(&mut self, u: usize, v: usize, w: W) -> usize {
@@ -150,20 +136,75 @@ impl<N, W, V> Tree<N, W, V> {
         self.edges.get(edge)
     }
 
+    /// Returns the index of the edge connecting `u` and `v`, if any.
     pub fn edge_index_of(&self, u: usize, v: usize) -> Option<usize> {
-        let (_, un) = self.nodes.get_index(u)?;
-
-        for edge in (EdgeWalker {
-            edges: &self.edges,
-            current_edge: un.next_edge,
-            direction: Direction::Left,
-        }) {
-            if edge.endpoints[Direction::Right] == v {
-                return Some(edge.endpoints[Direction::Left]);
+        for edge in self.incident_edge_indices(u) {
+            let (a, b) = self.edges[edge].endpoints();
+            if (a == u && b == v) || (a == v && b == u) {
+                return Some(edge);
             }
         }
 
         None
+    }
+
+    /// Returns the endpoints of the edge at `edge`.
+    pub fn edge_endpoints(&self, edge: usize) -> Option<(usize, usize)> {
+        self.edges.get(edge).map(Edge::endpoints)
+    }
+
+    /// Returns the label at `label`.
+    pub fn label(&self, label: usize) -> Option<&Label<W>> {
+        self.labels.get(label)
+    }
+
+    /// Returns an iterator over the indices of the edges incident to `node`.
+    pub fn incident_edge_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        let first = self
+            .nodes
+            .get_index(node)
+            .map(|(_, n)| n.next_edge)
+            .unwrap_or(NO_EDGE);
+
+        EdgeIndexWalker {
+            edges: &self.edges,
+            current_edge: first,
+            node,
+        }
+    }
+
+    /// Returns an iterator over the indices of the labels incident to `node`.
+    pub fn incident_label_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        let first = self
+            .nodes
+            .get_index(node)
+            .map(|(_, n)| n.next_label)
+            .unwrap_or(NO_EDGE);
+
+        LabelIndexWalker {
+            labels: &self.labels,
+            current_label: first,
+        }
+    }
+
+    /// The number of edges and labels incident to `node`.
+    pub fn degree(&self, node: usize) -> usize {
+        self.incident_edge_indices(node).count() + self.incident_label_indices(node).count()
+    }
+
+    /// The number of vertices in the forest.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The number of tree edges in the forest.
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// The number of labels in the forest.
+    pub fn label_count(&self) -> usize {
+        self.labels.len()
     }
 
     pub fn remove_node(&mut self, node: &N) -> Option<V>
@@ -185,22 +226,36 @@ impl<N, W, V> Tree<N, W, V> {
 
         let node = self.nodes.swap_remove_index(idx).unwrap().1;
 
-        if let Some((_, n)) = self.nodes.get_index(idx) {
-            for direction in Directions {
-                for edge in (EdgeWalkerMut {
-                    edges: &mut self.edges,
-                    current_edge: n.next_edge,
-                    direction,
-                }) {
-                    debug_assert_eq!(
-                        edge.endpoints[direction],
-                        self.nodes.len(),
-                        "Edge endpoint index {} does not match swapped-in node index {}",
-                        edge.endpoints[direction],
-                        self.nodes.len()
-                    );
-                    edge.endpoints[direction] = idx;
-                }
+        if self.nodes.get_index(idx).is_some() {
+            let old_index = self.nodes.len();
+
+            // The node formerly at `old_index` now lives at `idx`, so remap
+            // the endpoints of its incident edges and the node of its labels.
+            let mut edge_indices = Vec::new();
+            let mut current = self.nodes.get_index(idx).unwrap().1.next_edge;
+            while current != NO_EDGE {
+                let edge = &self.edges[current];
+                let direction = edge.endpoints.direction_of(old_index).unwrap_or_else(|| {
+                    panic!(
+                        "Edge endpoint index does not match swapped-in node index {}",
+                        old_index
+                    )
+                });
+                edge_indices.push((current, direction));
+                current = edge.next[direction];
+            }
+            for (edge, direction) in edge_indices {
+                self.edges[edge].endpoints[direction] = idx;
+            }
+
+            let mut label_indices = Vec::new();
+            let mut current = self.nodes.get_index(idx).unwrap().1.next_label;
+            while current != NO_EDGE {
+                label_indices.push(current);
+                current = self.labels[current].next;
+            }
+            for label in label_indices {
+                self.labels[label].node = idx;
             }
         }
 
@@ -289,26 +344,39 @@ impl<N, W, V> Tree<N, W, V> {
     }
 
     /// Fix all links referencing `edge` in the edge lists of `nodes` to point to `next` instead.
+    ///
+    /// `nodes[dir]` is the endpoint whose outgoing link for the removed edge
+    /// is `next[dir]`, i.e. `edge.endpoints[dir] == nodes[dir]`.
     fn fix_edge_links(&mut self, nodes: Endpoints, edge: usize, next: EdgeLinks) {
         for dir in Directions {
-            let node = self
-                .nodes
-                .get_index_mut(nodes[dir])
-                .expect("Node index not found in tree")
-                .1;
+            let endpoint = nodes[dir];
+            let replacement = next[dir];
 
-            let first = node.next_edge;
+            let first = self
+                .nodes
+                .get_index(endpoint)
+                .expect("Node index not found in tree")
+                .1
+                .next_edge;
 
             if first == edge {
-                node.next_edge = next[dir];
+                self.nodes
+                    .get_index_mut(endpoint)
+                    .expect("Node index not found in tree")
+                    .1
+                    .next_edge = replacement;
             } else {
                 for current in (EdgeWalkerMut {
                     edges: &mut self.edges,
                     current_edge: first,
-                    direction: dir,
+                    node: endpoint,
                 }) {
-                    if current.next[dir] == edge {
-                        current.next[dir] = next[dir];
+                    let current_dir = current
+                        .endpoints
+                        .direction_of(endpoint)
+                        .expect("Node index not found in edge endpoints");
+                    if current.next[current_dir] == edge {
+                        current.next[current_dir] = replacement;
                         break;
                     }
                 }
@@ -353,35 +421,24 @@ impl<'a, W> Iterator for LabelWalkerMut<'a, W> {
     }
 }
 
+#[allow(dead_code)]
 struct EdgeWalker<'a, W> {
     edges: &'a Vec<Edge<W>>,
     current_edge: usize,
-    direction: Direction,
+    node: usize,
 }
 
 impl<'a, W> EdgeWalker<'a, W> {
-    #[cfg_attr(not(test), expect(unused))]
+    #[allow(dead_code)]
     fn from_node<N, V>(tree: &'a Tree<N, W, V>, node_index: usize) -> Self {
         let node = tree
             .node_index(node_index)
             .expect("Node index not found in tree")
             .1;
-        match node.next_edge() {
-            Some(edge_index) => {
-                let edge = tree.edges.get(edge_index).unwrap();
-                let direction = unsafe { edge.endpoints.direction_of_unchecked(node_index) };
-
-                Self {
-                    edges: &tree.edges,
-                    current_edge: node.next_edge,
-                    direction,
-                }
-            }
-            None => Self {
-                edges: &tree.edges,
-                current_edge: NO_EDGE,
-                direction: Direction::Left,
-            },
+        Self {
+            edges: &tree.edges,
+            current_edge: node.next_edge,
+            node: node_index,
         }
     }
 }
@@ -399,7 +456,11 @@ impl<'a, W> Iterator for EdgeWalker<'a, W> {
             .edges
             .get(edge_index)
             .expect("Edge index not found in tree");
-        self.current_edge = edge.next[self.direction];
+        let direction = edge
+            .endpoints
+            .direction_of(self.node)
+            .expect("Node index not found in edge endpoints");
+        self.current_edge = edge.next[direction];
 
         // SAFETY: we can safely return a reference 'a because we hold the
         // vector of edges mutable for 'a, and we guarantee that we will not
@@ -409,10 +470,63 @@ impl<'a, W> Iterator for EdgeWalker<'a, W> {
     }
 }
 
+struct EdgeIndexWalker<'a, W> {
+    edges: &'a Vec<Edge<W>>,
+    current_edge: usize,
+    node: usize,
+}
+
+impl<'a, W> Iterator for EdgeIndexWalker<'a, W> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_edge == NO_EDGE {
+            return None;
+        }
+
+        let edge_index = self.current_edge;
+        let edge = self
+            .edges
+            .get(edge_index)
+            .expect("Edge index not found in tree");
+        let direction = edge
+            .endpoints
+            .direction_of(self.node)
+            .expect("Node index not found in edge endpoints");
+        self.current_edge = edge.next[direction];
+
+        Some(edge_index)
+    }
+}
+
+struct LabelIndexWalker<'a, W> {
+    labels: &'a Vec<Label<W>>,
+    current_label: usize,
+}
+
+impl<'a, W> Iterator for LabelIndexWalker<'a, W> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_label == NO_EDGE {
+            return None;
+        }
+
+        let label_index = self.current_label;
+        let label = self
+            .labels
+            .get(label_index)
+            .expect("Label index not found in tree");
+        self.current_label = label.next;
+
+        Some(label_index)
+    }
+}
+
 struct EdgeWalkerMut<'a, W> {
     edges: &'a mut Vec<Edge<W>>,
     current_edge: usize,
-    direction: Direction,
+    node: usize,
 }
 
 impl<'a, W> Iterator for EdgeWalkerMut<'a, W> {
@@ -428,7 +542,11 @@ impl<'a, W> Iterator for EdgeWalkerMut<'a, W> {
             .edges
             .get_mut(edge_index)
             .expect("Edge index not found in tree");
-        self.current_edge = edge.next[self.direction];
+        let direction = edge
+            .endpoints
+            .direction_of(self.node)
+            .expect("Node index not found in edge endpoints");
+        self.current_edge = edge.next[direction];
 
         // SAFETY: we can safely return a reference 'a because we hold the
         // vector of edges mutable for 'a, and we guarantee that we will not
@@ -450,7 +568,6 @@ enum Direction {
 struct Endpoints([usize; 2]);
 
 impl Endpoints {
-    #[expect(unused)]
     fn direction_of(&self, node: usize) -> Option<Direction> {
         if self.0[0] == node {
             Some(Direction::Left)
@@ -461,19 +578,9 @@ impl Endpoints {
         }
     }
 
-    #[cfg_attr(not(test), expect(unused))]
+    #[cfg(test)]
     fn contains(&self, node: usize) -> bool {
         self.0[0] == node || self.0[1] == node
-    }
-
-    #[cfg_attr(not(test), expect(unused))]
-    unsafe fn direction_of_unchecked(&self, node: usize) -> Direction {
-        if self.0[0] == node {
-            Direction::Left
-        } else {
-            debug_assert_eq!(self.0[1], node, "Node index not found in endpoints");
-            Direction::Right
-        }
     }
 }
 
@@ -536,11 +643,8 @@ trait VecExt {
 
     #[expect(unused)]
     /// Removes the element at `index` from the vector by swapping it with the last element and popping it off, returning the value and an optional mutable reference to the new element at the swapped-out index, if it exists.
-    /// ```rust
-    /// let mut vec = vec![1, 2, 3];
-    /// assert_eq!(vec.swap_remove_idx(1), (2, Some(&mut 3)));
-    /// assert_eq!(vec.swap_remove_idx(1), (3, None));
-    /// ```
+    ///
+    /// For example, `swap_remove_idx(1)` on `[1, 2, 3]` returns `(2, Some(&mut 3))`.
     fn swap_remove_idx(&mut self, index: usize) -> (Self::Item, Option<&mut Self::Item>);
 }
 impl<T> VecExt for Vec<T> {
