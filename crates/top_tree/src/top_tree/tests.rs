@@ -728,3 +728,39 @@ fn bit_vec_packs_bits() {
 
     assert_eq!(bits.blocks.len(), 4);
 }
+
+/// Regression test: removing a label must undo the boundary count that
+/// attaching it added, even though `num_boundary` is maintained relative to
+/// each cluster's parent context.
+#[test]
+fn detach_restores_boundary_count() {
+    // A vertex whose degree drops from 2 to 1 stops being a boundary.
+    let mut h = Harness::<PathLen>::new(2);
+    h.link(0, 1, 1);
+    let label = h.tt.attach(0, 9);
+    h.tt.detach(label);
+
+    let boundary_counts: Vec<u8> = h
+        .tt
+        .nodes
+        .iter()
+        .filter_map(|node| node.as_ref().map(|c| c.num_boundary))
+        .collect();
+    assert_eq!(boundary_counts, vec![0], "stale boundary after detach");
+    check_invariants(&h);
+
+    // A vertex that remains a boundary must not be over-decremented.
+    let mut h = Harness::<PathLen>::new(3);
+    h.link(0, 1, 1);
+    h.link(0, 2, 1);
+    let label = h.tt.attach(0, 9);
+    h.tt.detach(label);
+
+    let root = live_roots(&h.tt).pop().expect("a root must exist");
+    assert_eq!(
+        h.tt.cl(root).num_boundary,
+        0,
+        "vertex 0 is internal to the merged edge cluster"
+    );
+    check_invariants(&h);
+}

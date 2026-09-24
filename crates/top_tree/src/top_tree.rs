@@ -1154,12 +1154,22 @@ where
     }
 
     fn detach_internal(&mut self, label: usize) -> Option<W> {
+        let vertex = self.tree.label(label).expect("label must exist").node_id();
+        // Expose the vertex first so that removing the label undoes the
+        // boundary the exposure added. This keeps `num_boundary` consistent
+        // even though it is maintained relative to each cluster's parent
+        // context, which a plain path-based decrement cannot account for.
+        let _ = self.expose_vertex(vertex);
+
+        // labels are never path components, so removing them can never disconnect the tree.
+        // instead of removing the ancestors, we want to replace the label's parent with its sibling in the grandparent node, if it exists, and then delete the label and parent nodes.
         let label_node = self.label_leaf[label]
             .get()
             .expect("label must have a top tree leaf");
 
         if let Some(parent) = self.parent(label_node) {
             let sibling = self.sibling(label_node).expect("label has sibling");
+
             if let Some(grandparent) = self.parent(parent) {
                 let parent_is_left = self
                     .is_left_child(parent)
@@ -1167,6 +1177,7 @@ where
                 let sibling_is_left = self
                     .is_left_child(sibling)
                     .expect("sibling with parent has side");
+
                 let flip_sibling = (sibling_is_left != parent_is_left) ^ self.cl(parent).flipped;
                 if flip_sibling {
                     self.toggle_flipped(sibling);
@@ -1204,6 +1215,8 @@ where
                 self.label_ids[id] = OptIdx::new(label);
             }
         }
+
+        let _ = self.deexpose_vertex(vertex);
 
         weight
     }
