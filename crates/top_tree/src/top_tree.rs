@@ -19,55 +19,6 @@ use crate::{
     summary::{MergeContext, Summary},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(transparent)]
-struct ChildIdx(usize);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodeId {
-    Internal(usize),
-    Edge(usize),
-    Label(usize),
-}
-
-impl From<NodeId> for ChildIdx {
-    fn from(node: NodeId) -> Self {
-        ChildIdx::from_child(node)
-    }
-}
-
-impl From<ChildIdx> for NodeId {
-    fn from(idx: ChildIdx) -> Self {
-        idx.get()
-    }
-}
-
-impl ChildIdx {
-    fn get(self) -> NodeId {
-        let tag = self.0 >> (usize::BITS - 2);
-        const MASK: usize = usize::MAX >> 2;
-
-        match tag {
-            0 => NodeId::Internal(self.0),
-            1 => NodeId::Edge(self.0 & MASK),
-            2 => NodeId::Label(self.0 & MASK),
-            _ => unreachable!("invalid child tag"),
-        }
-    }
-
-    fn from_child(child: NodeId) -> Self {
-        let tag = match child {
-            NodeId::Internal(_) => 0,
-            NodeId::Edge(_) => 1,
-            NodeId::Label(_) => 2,
-        };
-        let index = match child {
-            NodeId::Internal(i) | NodeId::Edge(i) | NodeId::Label(i) => i,
-        };
-        Self((tag << (usize::BITS - 2)) | index)
-    }
-}
-
 /// A compact growable bit vector, used to track which vertices are exposed.
 ///
 /// Bits are packed into `u64` blocks, so each vertex costs a single bit rather
@@ -126,13 +77,19 @@ enum ClusterData {
     Internal,
 }
 
+struct Children {
+    left: NonMaxUsize,
+    right: NonMaxUsize,
+}
+
 /// A node of the top tree.
 struct Cluster<S: Summary<W>, W = ()> {
     parent: Option<NonMaxUsize>,
-    left: ChildIdx,
-    right: ChildIdx,
+    children: Option<Children>,
     /// Whether the logical orientation of the cluster is reversed.
     flipped: bool,
+    /// What this cluster represents.
+    data: ClusterData,
     /// The boundary vertices of the cluster.
     boundary_vertices: BoundaryVertices,
     /// The user supplied summary of this cluster.
