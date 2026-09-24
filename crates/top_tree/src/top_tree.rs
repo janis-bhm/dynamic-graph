@@ -23,33 +23,46 @@ use crate::{
 #[repr(transparent)]
 struct ChildIdx(usize);
 
-enum Child {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeId {
     Internal(usize),
     Edge(usize),
     Label(usize),
 }
 
+impl From<NodeId> for ChildIdx {
+    fn from(node: NodeId) -> Self {
+        ChildIdx::from_child(node)
+    }
+}
+
+impl From<ChildIdx> for NodeId {
+    fn from(idx: ChildIdx) -> Self {
+        idx.get()
+    }
+}
+
 impl ChildIdx {
-    fn get(self) -> Child {
+    fn get(self) -> NodeId {
         let tag = self.0 >> (usize::BITS - 2);
         const MASK: usize = usize::MAX >> 2;
 
         match tag {
-            0 => Child::Internal(self.0),
-            1 => Child::Edge(self.0 & MASK),
-            2 => Child::Label(self.0 & MASK),
+            0 => NodeId::Internal(self.0),
+            1 => NodeId::Edge(self.0 & MASK),
+            2 => NodeId::Label(self.0 & MASK),
             _ => unreachable!("invalid child tag"),
         }
     }
 
-    fn from_child(child: Child) -> Self {
+    fn from_child(child: NodeId) -> Self {
         let tag = match child {
-            Child::Internal(_) => 0,
-            Child::Edge(_) => 1,
-            Child::Label(_) => 2,
+            NodeId::Internal(_) => 0,
+            NodeId::Edge(_) => 1,
+            NodeId::Label(_) => 2,
         };
         let index = match child {
-            Child::Internal(i) | Child::Edge(i) | Child::Label(i) => i,
+            NodeId::Internal(i) | NodeId::Edge(i) | NodeId::Label(i) => i,
         };
         Self((tag << (usize::BITS - 2)) | index)
     }
@@ -114,7 +127,7 @@ enum ClusterData {
 }
 
 /// A node of the top tree.
-struct Cluster<S: Summary<W>, W> {
+struct Cluster<S: Summary<W>, W = ()> {
     parent: Option<NonMaxUsize>,
     left: ChildIdx,
     right: ChildIdx,
@@ -129,7 +142,7 @@ struct Cluster<S: Summary<W>, W> {
     _marker: PhantomData<fn() -> W>,
 }
 
-struct LeafCluster<S: Summary<W>, W> {
+struct LeafCluster<S: Summary<W>, W = ()> {
     parent: Option<NonMaxUsize>,
     flipped: bool,
     boundaries: BoundaryVertices,
@@ -244,13 +257,13 @@ where
     nodes: Vec<Option<Cluster<S, W>>>,
     free: Vec<usize>,
     /// The top tree leaf of each forest edge, indexed by edge index.
-    edge_leaf: Vec<NonMaxUsize>,
+    edge_leaf: Vec<Option<NonMaxUsize>>,
     /// The top tree leaf of each forest label, indexed by label index.
-    label_leaf: Vec<NonMaxUsize>,
+    label_leaf: Vec<Option<NonMaxUsize>>,
     /// Stable [`LabelId`] of each forest label, indexed by label index.
-    tree_label_ids: Vec<NonMaxUsize>,
+    tree_label_ids: Vec<Option<NonMaxUsize>>,
     /// Forest label index of each stable [`LabelId`].
-    label_ids: Vec<NonMaxUsize>,
+    label_ids: Vec<Option<NonMaxUsize>>,
     /// Free slots in `label_ids`.
     free_label_ids: Vec<usize>,
     /// Whether each vertex is currently exposed, indexed by vertex index.

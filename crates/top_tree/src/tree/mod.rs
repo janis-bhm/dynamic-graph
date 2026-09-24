@@ -132,6 +132,22 @@ impl<N, W, V> Tree<N, W, V> {
         self.nodes.get_index_of(node)
     }
 
+    pub fn label_weight(&self, label: usize) -> Option<&W> {
+        self.labels.get(label).map(|l| &l.weight)
+    }
+
+    pub fn label_weight_mut(&mut self, label: usize) -> Option<&mut W> {
+        self.labels.get_mut(label).map(|l| &mut l.weight)
+    }
+
+    pub fn edge_weight(&self, edge: usize) -> Option<&W> {
+        self.edges.get(edge).map(|e| &e.weight)
+    }
+
+    pub fn edge_weight_mut(&mut self, edge: usize) -> Option<&mut W> {
+        self.edges.get_mut(edge).map(|e| &mut e.weight)
+    }
+
     pub fn edge_index(&self, edge: usize) -> Option<&Edge<W>> {
         self.edges.get(edge)
     }
@@ -156,6 +172,35 @@ impl<N, W, V> Tree<N, W, V> {
     /// Returns the label at `label`.
     pub fn label(&self, label: usize) -> Option<&Label<W>> {
         self.labels.get(label)
+    }
+
+    pub fn incident_edges_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
+        let first = self
+            .nodes
+            .get_index(node)
+            .map(|(_, n)| n.next_edge)
+            .unwrap_or(NO_EDGE);
+
+        EdgeWalker {
+            edges: &self.edges,
+            current_edge: first,
+            node,
+        }
+        .map(|edge| &edge.weight)
+    }
+
+    pub fn incident_labels_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
+        let first = self
+            .nodes
+            .get_index(node)
+            .map(|(_, n)| n.next_label)
+            .unwrap_or(NO_EDGE);
+
+        LabelWalker {
+            labels: &self.labels,
+            current_label: first,
+        }
+        .map(|label| &label.weight)
     }
 
     /// Returns an iterator over the indices of the edges incident to `node`.
@@ -190,6 +235,12 @@ impl<N, W, V> Tree<N, W, V> {
     /// The number of edges and labels incident to `node`.
     pub fn degree(&self, node: usize) -> usize {
         self.incident_edge_indices(node).count() + self.incident_label_indices(node).count()
+    }
+
+    pub fn is_degree_leq_two(&self, node: usize) -> bool {
+        self.incident_edge_indices(node).take(3).count()
+            + self.incident_label_indices(node).take(3).count()
+            <= 2
     }
 
     /// The number of vertices in the forest.
@@ -406,6 +457,39 @@ pub enum SwapResult {
 }
 
 const NO_EDGE: usize = usize::MAX;
+
+pub struct LabelWalker<'a, W> {
+    labels: &'a Vec<Label<W>>,
+    current_label: usize,
+}
+
+impl<'a, W> LabelWalker<'a, W> {
+    fn new(labels: &'a Vec<Label<W>>, first_label: usize) -> Self {
+        Self {
+            labels,
+            current_label: first_label,
+        }
+    }
+}
+
+impl<'a, W> Iterator for LabelWalker<'a, W> {
+    type Item = &'a Label<W>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_label == NO_EDGE {
+            return None;
+        }
+
+        let label_index = self.current_label;
+        let label = self
+            .labels
+            .get(label_index)
+            .expect("Label index not found in tree");
+        self.current_label = label.next;
+
+        Some(label)
+    }
+}
 
 pub struct LabelWalkerMut<'a, W> {
     labels: &'a mut Vec<Label<W>>,

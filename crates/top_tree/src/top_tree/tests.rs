@@ -697,7 +697,7 @@ fn randomized_link_cut() {
 #[test]
 fn index_types_are_word_sized() {
     use core::mem::size_of;
-    assert_eq!(size_of::<Child>(), size_of::<usize>());
+    assert_eq!(size_of::<NodeId>(), size_of::<usize>());
 }
 
 #[test]
