@@ -19,6 +19,7 @@ use crate::{
     summary::{MergeContext, Summary},
 };
 
+// todo: replace with NonMaxUsize when stable
 /// A slot that either holds an index or is vacant, stored in a single `usize`
 /// by using `usize::MAX` as the vacancy sentinel.
 ///
@@ -310,6 +311,27 @@ where
     pub fn deexpose(&mut self, v: usize) -> Option<S> {
         self.deexpose_vertex(v)
             .map(|node| self.cl(node).sum.clone())
+    }
+
+    /// Returns whether `u` and `v` are in the same tree.
+    ///
+    /// This exposes `u` and `v` temporarily; any vertex exposed before the
+    /// call must be deexposed again by the caller, exactly as for
+    /// [`expose`](Self::expose).
+    pub fn connected(&mut self, u: usize, v: usize) -> bool {
+        if u == v {
+            return true;
+        }
+
+        let _ = self.expose_vertex(u);
+        let root_v = self.expose_vertex(v);
+        // If `u` and `v` are in the same tree, then exposing the second vertex
+        // joins the two boundaries into a single path cluster.
+        let connected = root_v.is_some_and(|root| self.is_path(root));
+
+        self.deexpose_vertex(v);
+        self.deexpose_vertex(u);
+        connected
     }
 
     /// Returns the summary of the root cluster of the tree containing `v`.
@@ -997,18 +1019,31 @@ where
 
     /// Removes the exposed status of `vertex`, returning the root node.
     fn deexpose_vertex(&mut self, vertex: usize) -> Option<usize> {
-        let mut node = self.find_consuming_node(vertex);
-        let mut root = None;
+        let consuming = self.find_consuming_node(vertex);
+
+        // Collect the path from the consuming node up to the root.
+        let mut path = Vec::new();
+        let mut node = consuming;
         while let Some(current) = node {
-            // Flush any pending tag while the cluster is still a path cluster,
-            // so that the affected edges keep their values once the cluster
-            // loses a boundary.
+            path.push(current);
+            node = self.parent(current);
+        }
+
+        // Flush pending tags from the root down. A tag can only be pushed onto
+        // path children, so this must happen while the nodes on the path still
+        // carry the boundary that makes them path clusters. Pushing bottom-up
+        // would let a child lose its boundary before its parent's tag reaches
+        // it, dropping the tag for the edges of that child.
+        for &current in path.iter().rev() {
             self.push_tag(current);
+        }
+
+        let mut root = None;
+        for &current in path.iter() {
             self.dec_num_boundary(current);
             if matches!(self.cl(current).data, ClusterData::Internal) {
                 self.recompute(current);
             }
-            node = self.parent(current);
             root = Some(current);
         }
         self.set_exposed(vertex, false);
