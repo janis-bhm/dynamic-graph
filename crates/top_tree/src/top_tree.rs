@@ -680,6 +680,9 @@ where
     }
 
     /// Rotates `node` up, above its parent and grandparent.
+    /// Rotating a node up is legal under the following condition:
+    /// sibling(node) \cup sibling(parent(node)) must be a valid cluster,
+    /// i.e. its children must share a vertex, and it must not have more than 2 boundary vertices.
     ///
     /// Returns `None` if `node` has no grandparent.
     fn rotate_up(&mut self, node: usize) -> Option<()> {
@@ -884,23 +887,73 @@ where
         }
     }
 
+    /// There must be at most one exposed vertex in the tree containing `consuming_node`.
     fn prepare_expose(&mut self, consuming_node: usize) -> usize {
         let mut consuming_node = consuming_node;
         let mut node = consuming_node;
+
+        // we want each cluster from the consuming node up to the root to hold
+        // the following invariant:
+        // the cluster should either be a point cluster, or a path cluster with
+        // the exposed vertex as one of its boundary vertices.
         while let Some(parent) = self.parent(node) {
             if self.is_point(node) {
                 node = parent;
             } else {
+                // This iterations goal is to either raise the consuming node,
+                // or a point cluster ancestor of the consuming node, up one
+                // level.
                 self.push_flip(parent);
                 self.push_flip(node);
+
                 let sibling = self.sibling(node).expect("node with parent has sibling");
+
                 let sibling_is_left = self
                     .is_left_child(sibling)
                     .expect("sibling with parent has side");
                 let same_side_child = self
                     .child(node, sibling_is_left)
                     .expect("internal node has children");
+
+                // recall that the conditions for rotating up are that the
+                // sibling and uncle must form a valid cluster.
+                //
+                // because of the orientational invariant, we know that
+                // same_side_child and sibling share the sibling-ward most
+                // boundary vertex of `node`.
+                //
+                // We want to produce a root-level cluster that is either a point cluster.
+                // Alternatively, a path cluster with the to-be-exposed
+                // vertex as one of its boundary vertices means the vertex
+                // is already exposed.
+                // The middle vertex of `parent` is not the to-be-exposed
+                // vertex, or else it would have been the consuming node.
+                // `node` is a path cluster, of which the to-be-exposed vertex.
+                // Because there can be at most one exposed vertex in the
+                // current tree, there must above `node` be a point cluster.
                 if self.is_path(same_side_child) || self.is_point(sibling) {
+                    // Rotating up the other-sided child of the consuming node
+                    // will make `parent` the new consuming node and we don't
+                    // care whether any of its children are point clusters.
+
+                    // If both children of `node` are path clusters, then `node`
+                    // is the consuming node.
+
+                    // If `sibling` is a point cluster and `node` is not the
+                    // consuming node, then `node` must have a point child which
+                    // is an ancestor of the to-be-exposed vertex.
+                    //
+                    // If `same_side_child` is that ancestor, merging it with
+                    // `sibling` will produce a point cluster, and we have
+                    // achieved our goal.
+                    //
+                    // If `other_side_child` is that ancestor, then merging
+                    // `same_side_child` with `sibling` will produce a cluster
+                    // that does not contain the to-be-exposed vertex, and
+                    // `other_side_child` is the ancestor of the to-be-exposed
+                    // vertex and a point cluster, and we have achieved our
+                    // goal.
+
                     let other_side_child = self
                         .child(node, !sibling_is_left)
                         .expect("internal node has children");
@@ -910,6 +963,7 @@ where
                     }
                     node = parent;
                 } else {
+                    // we pull down the uncle of `node` into the sibling position and try again.
                     let uncle = self.sibling(parent).expect("parent has sibling");
                     let uncle_is_left = self
                         .is_left_child(uncle)
