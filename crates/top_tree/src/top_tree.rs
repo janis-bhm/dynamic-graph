@@ -314,24 +314,18 @@ where
     }
 
     /// Returns whether `u` and `v` are in the same tree.
-    ///
-    /// This exposes `u` and `v` temporarily; any vertex exposed before the
-    /// call must be deexposed again by the caller, exactly as for
-    /// [`expose`](Self::expose).
     pub fn connected(&mut self, u: usize, v: usize) -> bool {
         if u == v {
             return true;
         }
 
-        let _ = self.expose_vertex(u);
-        let root_v = self.expose_vertex(v);
-        // If `u` and `v` are in the same tree, then exposing the second vertex
-        // joins the two boundaries into a single path cluster.
-        let connected = root_v.is_some_and(|root| self.is_path(root));
+        let root_u = self.find_root(u);
+        let root_v = self.find_root(v);
 
-        self.deexpose_vertex(v);
-        self.deexpose_vertex(u);
-        connected
+        match (root_u, root_v) {
+            (Some(u), Some(v)) => u == v,
+            _ => false,
+        }
     }
 
     /// Returns the summary of the root cluster of the tree containing `v`.
@@ -827,6 +821,16 @@ where
         while let Some(next) = self.splay_step(node) {
             self.splay_step(next);
         }
+    }
+
+    fn find_root(&mut self, vertex: usize) -> Option<usize> {
+        let mut node = self.incident_leaves(vertex).next()?;
+
+        while let Some(parent) = self.parent(node) {
+            node = parent;
+        }
+
+        Some(node)
     }
 
     /// Finds the least common ancestor of all leaves incident to `vertex`.
