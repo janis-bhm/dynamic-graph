@@ -6,23 +6,23 @@ use std::{
 use indexmap::IndexMap;
 
 pub struct Node<V> {
-    /// weight associated with a vertex.
-    pub weight: V,
     /// The first edge in the list of edges incident to this node.
     /// This is an index into the `edges` vector of the tree.
     next_edge: usize,
     /// The first label in the list of labels incident to this node.
     /// This is an index into the `labels` vector of the tree.
     next_label: usize,
+    /// weight associated with a vertex.
+    pub weight: V,
 }
 
 pub struct Edge<W> {
-    /// weight associated with an edge.
-    pub weight: W,
     /// The two endpoints of the edge. These are indices into the `nodes` map of the tree.
     endpoints: Endpoints,
     /// next edge in the list of edges incident to the [first, second] endpoint.
     next: EdgeLinks,
+    /// weight associated with an edge.
+    pub weight: W,
 }
 
 impl<W> Edge<W> {
@@ -207,7 +207,7 @@ impl<N, W, V> Tree<N, W, V> {
         self.labels.len()
     }
 
-    pub fn remove_node(&mut self, node: &N) -> Option<V>
+    pub fn remove_node(&mut self, node: &N) -> Option<(V, SwapResult)>
     where
         N: Eq + Hash,
     {
@@ -231,35 +231,29 @@ impl<N, W, V> Tree<N, W, V> {
 
             // The node formerly at `old_index` now lives at `idx`, so remap
             // the endpoints of its incident edges and the node of its labels.
-            let mut edge_indices = Vec::new();
-            let mut current = self.nodes.get_index(idx).unwrap().1.next_edge;
-            while current != NO_EDGE {
-                let edge = &self.edges[current];
-                let direction = edge.endpoints.direction_of(old_index).unwrap_or_else(|| {
-                    panic!(
-                        "Edge endpoint index does not match swapped-in node index {}",
-                        old_index
-                    )
-                });
-                edge_indices.push((current, direction));
-                current = edge.next[direction];
-            }
-            for (edge, direction) in edge_indices {
-                self.edges[edge].endpoints[direction] = idx;
+
+            for current in EdgeWalkerMut::from_edge_and_endpoint(
+                &mut self.edges,
+                self.nodes[idx].next_edge,
+                old_index,
+            ) {
+                current.endpoints.replace(old_index, idx);
             }
 
-            let mut label_indices = Vec::new();
-            let mut current = self.nodes.get_index(idx).unwrap().1.next_label;
-            while current != NO_EDGE {
-                label_indices.push(current);
-                current = self.labels[current].next;
+            for current in LabelWalkerMut::new(&mut self.labels, self.nodes[idx].next_label) {
+                current.node = idx;
             }
-            for label in label_indices {
-                self.labels[label].node = idx;
-            }
+
+            Some((
+                node.weight,
+                SwapResult::Some {
+                    prev: old_index,
+                    current: idx,
+                },
+            ))
+        } else {
+            Some((node.weight, SwapResult::None))
         }
-
-        Some(node.weight)
     }
 
     pub fn add_label(&mut self, node: usize, w: W) -> usize {
@@ -276,7 +270,7 @@ impl<N, W, V> Tree<N, W, V> {
         label
     }
 
-    pub fn remove_label(&mut self, label: usize) -> Option<W> {
+    pub fn remove_label(&mut self, label: usize) -> Option<(W, SwapResult)> {
         let (node, next) = {
             let l = self.labels.get(label)?;
             (l.node, l.next)
@@ -306,19 +300,25 @@ impl<N, W, V> Tree<N, W, V> {
         }
     }
 
-    fn swap_remove_label(&mut self, idx: usize) -> W {
+    fn swap_remove_label(&mut self, idx: usize) -> (W, SwapResult) {
         let label = self.labels.swap_remove(idx);
 
         match self.labels.get(idx) {
-            None => label.weight,
+            None => (label.weight, SwapResult::None),
             Some(l) => {
                 self.fix_label_links(l.node, self.labels.len(), l.next);
-                label.weight
+                (
+                    label.weight,
+                    SwapResult::Some {
+                        prev: self.labels.len(),
+                        current: idx,
+                    },
+                )
             }
         }
     }
 
-    pub fn remove_edge(&mut self, edge: usize) -> Option<W> {
+    pub fn remove_edge(&mut self, edge: usize) -> Option<(W, SwapResult)> {
         let (node, next) = {
             let e = self.edges.get(edge)?;
             (e.endpoints, e.next)
@@ -331,14 +331,20 @@ impl<N, W, V> Tree<N, W, V> {
     /// Removes the edge at `idx` from the `edges` vector by swapping it with
     /// the last edge and popping it off, returning the weight of the removed
     /// edge and fixing any links that referenced the swapped-in edge.
-    fn swap_remove_edge(&mut self, idx: usize) -> W {
+    fn swap_remove_edge(&mut self, idx: usize) -> (W, SwapResult) {
         let edge = self.edges.swap_remove(idx);
 
         match self.edges.get(idx) {
-            None => edge.weight,
+            None => (edge.weight, SwapResult::None),
             Some(e) => {
                 self.fix_edge_links(e.endpoints, self.edges.len(), EdgeLinks([idx, idx]));
-                edge.weight
+                (
+                    edge.weight,
+                    SwapResult::Some {
+                        prev: self.edges.len(),
+                        current: idx,
+                    },
+                )
             }
         }
     }
@@ -366,11 +372,9 @@ impl<N, W, V> Tree<N, W, V> {
                     .1
                     .next_edge = replacement;
             } else {
-                for current in (EdgeWalkerMut {
-                    edges: &mut self.edges,
-                    current_edge: first,
-                    node: endpoint,
-                }) {
+                for current in
+                    EdgeWalkerMut::from_edge_and_endpoint(&mut self.edges, first, endpoint)
+                {
                     let current_dir = current
                         .endpoints
                         .direction_of(endpoint)
@@ -391,11 +395,30 @@ impl<N, W, V> Default for Tree<N, W, V> {
     }
 }
 
+pub enum SwapResult {
+    None,
+    Some {
+        /// Previous index of the swapped element.
+        prev: usize,
+        /// New index of the swapped element.
+        current: usize,
+    },
+}
+
 const NO_EDGE: usize = usize::MAX;
 
 pub struct LabelWalkerMut<'a, W> {
     labels: &'a mut Vec<Label<W>>,
     current_label: usize,
+}
+
+impl<'a, W> LabelWalkerMut<'a, W> {
+    fn new(labels: &'a mut Vec<Label<W>>, first_label: usize) -> Self {
+        Self {
+            labels,
+            current_label: first_label,
+        }
+    }
 }
 
 impl<'a, W> Iterator for LabelWalkerMut<'a, W> {
@@ -526,7 +549,21 @@ impl<'a, W> Iterator for LabelIndexWalker<'a, W> {
 struct EdgeWalkerMut<'a, W> {
     edges: &'a mut Vec<Edge<W>>,
     current_edge: usize,
-    node: usize,
+    node_index: usize,
+}
+
+impl<'a, W> EdgeWalkerMut<'a, W> {
+    fn from_edge_and_endpoint(
+        edges: &'a mut Vec<Edge<W>>,
+        edge_index: usize,
+        endpoint: usize,
+    ) -> Self {
+        Self {
+            edges,
+            current_edge: edge_index,
+            node_index: endpoint,
+        }
+    }
 }
 
 impl<'a, W> Iterator for EdgeWalkerMut<'a, W> {
@@ -544,7 +581,7 @@ impl<'a, W> Iterator for EdgeWalkerMut<'a, W> {
             .expect("Edge index not found in tree");
         let direction = edge
             .endpoints
-            .direction_of(self.node)
+            .direction_of(self.node_index)
             .expect("Node index not found in edge endpoints");
         self.current_edge = edge.next[direction];
 
@@ -575,6 +612,16 @@ impl Endpoints {
             Some(Direction::Right)
         } else {
             None
+        }
+    }
+
+    fn replace(&mut self, old: usize, new: usize) {
+        if self.0[0] == old {
+            self.0[0] = new;
+        } else if self.0[1] == old {
+            self.0[1] = new;
+        } else {
+            panic!("Node index {} not found in edge endpoints {:?}", old, self);
         }
     }
 

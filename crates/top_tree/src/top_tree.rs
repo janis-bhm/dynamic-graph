@@ -263,7 +263,7 @@ where
         let weight = self.detach_internal(tree_label);
         self.label_ids[label.0] = OptIdx::VACANT;
         self.free_label_ids.push(label.0);
-        weight
+        Some(weight)
     }
 }
 
@@ -1115,7 +1115,7 @@ where
         self.delete_all_ancestors(leaf);
 
         let last = self.tree.edge_count() - 1;
-        let weight = self.tree.remove_edge(edge);
+        let (weight, _swap) = self.tree.remove_edge(edge).expect("edge must exist");
         let moved = self.edge_leaf.pop().expect("edge leaf entry must exist");
         if edge < last {
             self.edge_leaf[edge] = moved;
@@ -1129,7 +1129,7 @@ where
         self.deexpose_vertex(u);
         self.deexpose_vertex(v);
 
-        weight
+        Some(weight)
     }
 
     fn attach_internal(&mut self, vertex: usize, weight: W) -> usize {
@@ -1153,7 +1153,7 @@ where
         label
     }
 
-    fn detach_internal(&mut self, label: usize) -> Option<W> {
+    fn detach_internal(&mut self, label: usize) -> W {
         let vertex = self.tree.label(label).expect("label must exist").node_id();
         // Expose the vertex first so that removing the label undoes the
         // boundary the exposure added. This keeps `num_boundary` consistent
@@ -1199,7 +1199,7 @@ where
         self.dealloc(label_node);
 
         let last = self.tree.label_count() - 1;
-        let weight = self.tree.remove_label(label);
+        let (weight, _swap) = self.tree.remove_label(label).expect("label must exist");
         let moved = self.label_leaf.pop().expect("label leaf entry must exist");
         let moved_id = self
             .tree_label_ids
