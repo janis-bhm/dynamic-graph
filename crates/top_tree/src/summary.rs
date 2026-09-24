@@ -86,6 +86,14 @@ pub trait Summary<W = ()>: Sized {
     /// Combine the summaries of the left and right child of a cluster.
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
 
+    /// Reverses the orientation of this cluster's summary.
+    ///
+    /// The top tree calls this whenever it flips a cluster. Summaries that
+    /// depend on path direction should update their orientation-sensitive
+    /// fields; summaries that do not depend on orientation can use this
+    /// default no-op implementation.
+    fn flip(&mut self) {}
+
     /// Apply a lazy `tag` to this summary.
     fn apply(&mut self, _tag: &Self::Tag) {}
 

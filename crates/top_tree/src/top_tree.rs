@@ -450,11 +450,15 @@ where
     }
 
     fn set_flipped(&mut self, node: usize, flipped: bool) {
-        self.cl_mut(node).flipped = flipped;
+        let cluster = self.cl_mut(node);
+        if cluster.flipped != flipped {
+            cluster.flipped = flipped;
+            S::flip(&mut cluster.sum);
+        }
     }
 
     fn toggle_flipped(&mut self, node: usize) {
-        self.cl_mut(node).flipped = !self.cl(node).flipped;
+        self.set_flipped(node, !self.cl(node).flipped);
     }
 
     fn set_num_boundary(&mut self, node: usize, num: u8) {
@@ -1168,6 +1172,14 @@ where
                     self.toggle_flipped(sibling);
                 }
                 self.set_child(grandparent, sibling, parent_is_left);
+                let mut node = grandparent;
+                loop {
+                    self.recompute(node);
+                    let Some(parent) = self.parent(node) else {
+                        break;
+                    };
+                    node = parent;
+                }
             } else {
                 self.set_parent(sibling, None);
             }

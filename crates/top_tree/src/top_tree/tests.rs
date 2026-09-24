@@ -139,6 +139,40 @@ impl Summary<u64> for PathMax {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirectedPath {
+    edges: Vec<(usize, usize)>,
+}
+
+impl Summary<u64> for DirectedPath {
+    type Tag = ();
+
+    fn tree_edge(_w: &u64, u: usize, v: usize) -> Self {
+        DirectedPath {
+            edges: vec![(u, v)],
+        }
+    }
+
+    fn label(_w: &u64, _v: usize) -> Self {
+        DirectedPath { edges: Vec::new() }
+    }
+
+    fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
+        let mut edges = Vec::new();
+        if ctx.left_is_path_child() {
+            edges.extend_from_slice(&left.edges);
+        }
+        if ctx.right_is_path_child() {
+            edges.extend_from_slice(&right.edges);
+        }
+        DirectedPath { edges }
+    }
+
+    fn flip(&mut self) {
+        self.edges = self.edges.drain(..).rev().map(|(u, v)| (v, u)).collect();
+    }
+}
+
 struct Harness<S: Summary<u64>> {
     tt: TopTree<u32, S, u64, ()>,
     adj: BTreeMap<usize, BTreeMap<usize, u64>>,
@@ -393,6 +427,25 @@ fn path_summary() {
         h.cut(i - 1, i);
         check_invariants(&h);
     }
+}
+
+#[test]
+fn orientation_sensitive_summary_flips_with_cluster() {
+    let mut tt: TopTree<u32, DirectedPath, u64, ()> = TopTree::new();
+    let u = tt.add_vertex(0, ());
+    let v = tt.add_vertex(1, ());
+    tt.link(u, v, 1);
+
+    let leaf = tt.edge_leaf[0].get().unwrap();
+    tt.toggle_flipped(leaf);
+    assert_eq!(tt.cl(leaf).sum.edges, vec![(1, 0)]);
+
+    // Materializing the lazy flip must not reverse the already-flipped sum again.
+    tt.push_flip(leaf);
+    assert_eq!(tt.cl(leaf).sum.edges, vec![(1, 0)]);
+
+    tt.toggle_flipped(leaf);
+    assert_eq!(tt.cl(leaf).sum.edges, vec![(0, 1)]);
 }
 
 #[test]
