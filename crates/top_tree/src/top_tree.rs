@@ -15,45 +15,43 @@
 use std::{hash::Hash, marker::PhantomData};
 
 use crate::{
-    Tree,
+    NonMaxUsize, Tree,
     summary::{MergeContext, Summary},
 };
 
-// todo: replace with NonMaxUsize when stable
-/// A slot that either holds an index or is vacant, stored in a single `usize`
-/// by using `usize::MAX` as the vacancy sentinel.
-///
-/// Unlike `Option<usize>`, which is two words wide because `usize` has no
-/// niche, this stays one word. No valid index can be `usize::MAX` (that would
-/// require a `Vec` of `usize::MAX` elements), so the sentinel is unambiguous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OptIdx(usize);
+#[repr(transparent)]
+struct ChildIdx(usize);
 
-impl OptIdx {
-    /// A vacant slot.
-    const VACANT: Self = Self(usize::MAX);
+enum Child {
+    Internal(usize),
+    Edge(usize),
+    Label(usize),
+}
 
-    /// Wraps an index. `index` must not be `usize::MAX`.
-    fn new(index: usize) -> Self {
-        debug_assert_ne!(index, usize::MAX, "index must fit in an `OptIdx`");
-        Self(index)
-    }
+impl ChildIdx {
+    fn get(self) -> Child {
+        let tag = self.0 >> (usize::BITS - 2);
+        const MASK: usize = usize::MAX >> 2;
 
-    /// Returns the contained index, or `None` if the slot is vacant.
-    fn get(self) -> Option<usize> {
-        if self.0 == usize::MAX {
-            None
-        } else {
-            Some(self.0)
+        match tag {
+            0 => Child::Internal(self.0),
+            1 => Child::Edge(self.0 & MASK),
+            2 => Child::Label(self.0 & MASK),
+            _ => unreachable!("invalid child tag"),
         }
     }
 
-    /// Packs an optional index into a slot.
-    fn from_option(index: Option<usize>) -> Self {
-        match index {
-            Some(index) => Self::new(index),
-            None => Self::VACANT,
-        }
+    fn from_child(child: Child) -> Self {
+        let tag = match child {
+            Child::Internal(_) => 0,
+            Child::Edge(_) => 1,
+            Child::Label(_) => 2,
+        };
+        let index = match child {
+            Child::Internal(i) | Child::Edge(i) | Child::Label(i) => i,
+        };
+        Self((tag << (usize::BITS - 2)) | index)
     }
 }
 
@@ -117,19 +115,114 @@ enum ClusterData {
 
 /// A node of the top tree.
 struct Cluster<S: Summary<W>, W> {
-    parent: OptIdx,
-    left: OptIdx,
-    right: OptIdx,
+    parent: Option<NonMaxUsize>,
+    left: ChildIdx,
+    right: ChildIdx,
     /// Whether the logical orientation of the cluster is reversed.
     flipped: bool,
-    /// The number of boundary vertices of the cluster (0, 1, or 2).
-    num_boundary: u8,
-    data: ClusterData,
+    /// The boundary vertices of the cluster.
+    boundary_vertices: BoundaryVertices,
     /// The user supplied summary of this cluster.
     sum: S,
     /// A lazy tag waiting to be pushed to this cluster's descendants.
     tag: S::Tag,
     _marker: PhantomData<fn() -> W>,
+}
+
+struct LeafCluster<S: Summary<W>, W> {
+    parent: Option<NonMaxUsize>,
+    flipped: bool,
+    boundaries: BoundaryVertices,
+    sum: S,
+    tag: S::Tag,
+    _marker: PhantomData<fn() -> W>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundaryVertices {
+    None,
+    One(NonMaxUsize),
+    Two {
+        left: NonMaxUsize,
+        right: NonMaxUsize,
+    },
+}
+
+impl BoundaryVertices {
+    fn from_children(left: Self, right: Self) -> Self {
+        match (left, right) {
+            (Self::None, Self::None) => Self::None,
+            (Self::None, _) | (_, Self::None) => {
+                panic!("call expose on a vertex before linking or attaching an edge/label to it")
+            }
+            (Self::One(v), Self::One(w)) => {
+                if v == w {
+                    Self::One(v)
+                } else {
+                    Self::Two { left: v, right: w }
+                }
+            }
+            (Self::One(v), Self::Two { left, right }) => {
+                if v == left || v == right {
+                    Self::Two { left, right }
+                } else {
+                    Self::Two { left: v, right }
+                }
+            }
+            (Self::Two { left, right }, Self::One(v)) => {
+                if v == left || v == right {
+                    Self::Two { left, right }
+                } else {
+                    Self::Two { left, right: v }
+                }
+            }
+            (
+                Self::Two { left, right },
+                Self::Two {
+                    left: l2,
+                    right: r2,
+                },
+            ) => {
+                debug_assert_eq!(
+                    right, l2,
+                    "two clusters can only be merged if they share a boundary vertex"
+                );
+                Self::Two { left, right: r2 }
+            }
+        }
+    }
+
+    fn left(&self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::One(v) => Some(v.get()),
+            Self::Two { left, .. } => Some(left.get()),
+        }
+    }
+
+    fn right(&self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::One(v) => Some(v.get()),
+            Self::Two { right, .. } => Some(right.get()),
+        }
+    }
+
+    fn is_path(&self) -> bool {
+        matches!(self, Self::Two { .. })
+    }
+
+    fn is_point(&self) -> bool {
+        !self.is_path()
+    }
+
+    fn count(&self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::One(_) => 1,
+            Self::Two { .. } => 2,
+        }
+    }
 }
 
 /// A stable handle to a label attached with [`TopTree::attach`].
@@ -151,13 +244,13 @@ where
     nodes: Vec<Option<Cluster<S, W>>>,
     free: Vec<usize>,
     /// The top tree leaf of each forest edge, indexed by edge index.
-    edge_leaf: Vec<OptIdx>,
+    edge_leaf: Vec<NonMaxUsize>,
     /// The top tree leaf of each forest label, indexed by label index.
-    label_leaf: Vec<OptIdx>,
+    label_leaf: Vec<NonMaxUsize>,
     /// Stable [`LabelId`] of each forest label, indexed by label index.
-    tree_label_ids: Vec<OptIdx>,
+    tree_label_ids: Vec<NonMaxUsize>,
     /// Forest label index of each stable [`LabelId`].
-    label_ids: Vec<OptIdx>,
+    label_ids: Vec<NonMaxUsize>,
     /// Free slots in `label_ids`.
     free_label_ids: Vec<usize>,
     /// Whether each vertex is currently exposed, indexed by vertex index.

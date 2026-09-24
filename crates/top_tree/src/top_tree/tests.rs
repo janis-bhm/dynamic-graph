@@ -695,14 +695,9 @@ fn randomized_link_cut() {
 }
 
 #[test]
-fn opt_idx_is_one_word() {
-    use std::mem::size_of;
-
-    assert_eq!(size_of::<OptIdx>(), size_of::<usize>());
-    assert_eq!(OptIdx::new(0).get(), Some(0));
-    assert_eq!(OptIdx::new(usize::MAX - 1).get(), Some(usize::MAX - 1));
-    assert_eq!(OptIdx::VACANT.get(), None);
-    assert_eq!(OptIdx::from_option(None), OptIdx::VACANT);
+fn index_types_are_word_sized() {
+    use core::mem::size_of;
+    assert_eq!(size_of::<Child>(), size_of::<usize>());
 }
 
 #[test]
@@ -740,12 +735,11 @@ fn detach_restores_boundary_count() {
     let label = h.tt.attach(0, 9);
     h.tt.detach(label);
 
-    let boundary_counts: Vec<u8> = h
-        .tt
-        .nodes
-        .iter()
-        .filter_map(|node| node.as_ref().map(|c| c.num_boundary))
-        .collect();
+    let boundary_counts: Vec<u8> =
+        h.tt.nodes
+            .iter()
+            .filter_map(|node| node.as_ref().map(|c| c.num_boundary))
+            .collect();
     assert_eq!(boundary_counts, vec![0], "stale boundary after detach");
     check_invariants(&h);
 
