@@ -1,9 +1,12 @@
 use std::{
     hash::Hash,
+    mem,
     ops::{Index, IndexMut},
 };
 
 use indexmap::IndexMap;
+
+use crate::NonMaxUsize;
 
 pub struct Node<V> {
     /// The first edge in the list of edges incident to this node.
@@ -11,7 +14,7 @@ pub struct Node<V> {
     next_edge: usize,
     /// The first label in the list of labels incident to this node.
     /// This is an index into the `labels` vector of the tree.
-    next_label: usize,
+    next_label: Option<NonMaxUsize>,
     /// weight associated with a vertex.
     pub weight: V,
 }
@@ -48,10 +51,16 @@ impl<W> Edge<W> {
 }
 
 pub struct Label<W> {
+    /// A label attached to a single vertex, used to represent non-tree edges or
+    /// arbitrary vertex marks.
+    ///
+    /// Labels are keyed by a globally unique id `L`, so a label can be looked up in
+    /// constant time without disturbing the ids of any other label. The vertex's
+    /// labels form a singly linked list through `next`.
     pub weight: W,
     node: usize,
     /// next label in the list of labels incident to attache node.
-    next: usize,
+    next: Option<NonMaxUsize>,
 }
 
 impl<W> Label<W> {
@@ -64,17 +73,23 @@ impl<W> Label<W> {
 /// graph. Each edge and node can have an associated weight, and nodes can have
 /// associated labels which act like leaf edges and may represent non-tree edges
 /// in the underlying graph.
-pub struct Tree<N, W = (), V = ()> {
+///
+/// Labels are stored in an [`IndexMap`] keyed by a globally unique id `L`, so a
+/// label can be looked up directly by its id and removing one does not disturb
+/// the ids of any other label. The label's payload has the same weight type `W`
+/// as a tree edge. The labels at a vertex are additionally chained through a
+/// singly linked list (`Node::first_label` / `Label::next`) for enumeration.
+pub struct Tree<N, L, W = (), V = ()> {
     edges: Vec<Edge<W>>,
-    labels: Vec<Label<W>>,
+    labels: IndexMap<L, Label<W>>,
     nodes: IndexMap<N, Node<V>>,
 }
 
-impl<N, W, V> Tree<N, W, V> {
+impl<N, W, L, V> Tree<N, L, W, V> {
     pub fn new() -> Self {
         Self {
             edges: Vec::new(),
-            labels: Vec::new(),
+            labels: IndexMap::new(),
             nodes: IndexMap::new(),
         }
     }
@@ -92,7 +107,7 @@ impl<N, W, V> Tree<N, W, V> {
             Node {
                 weight,
                 next_edge: NO_EDGE,
-                next_label: NO_EDGE,
+                next_label: None,
             },
         );
 
@@ -132,11 +147,19 @@ impl<N, W, V> Tree<N, W, V> {
         self.nodes.get_index_of(node)
     }
 
-    pub fn label_weight(&self, label: usize) -> Option<&W> {
+    /// Returns the weight of the label with the given id.
+    pub fn label_weight(&self, label: &L) -> Option<&W>
+    where
+        L: Eq + Hash,
+    {
         self.labels.get(label).map(|l| &l.weight)
     }
 
-    pub fn label_weight_mut(&mut self, label: usize) -> Option<&mut W> {
+    /// Returns a mutable reference to the weight of the label with the given id.
+    pub fn label_weight_mut(&mut self, label: &L) -> Option<&mut W>
+    where
+        L: Eq + Hash,
+    {
         self.labels.get_mut(label).map(|l| &mut l.weight)
     }
 
@@ -169,8 +192,11 @@ impl<N, W, V> Tree<N, W, V> {
         self.edges.get(edge).map(Edge::endpoints)
     }
 
-    /// Returns the label at `label`.
-    pub fn label(&self, label: usize) -> Option<&Label<W>> {
+    /// Returns the label with the given id.
+    pub fn label(&self, label: &L) -> Option<&Label<W>>
+    where
+        L: Eq + Hash,
+    {
         self.labels.get(label)
     }
 
@@ -189,18 +215,14 @@ impl<N, W, V> Tree<N, W, V> {
         .map(|edge| &edge.weight)
     }
 
-    pub fn incident_labels_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
-        let first = self
-            .nodes
-            .get_index(node)
-            .map(|(_, n)| n.next_label)
-            .unwrap_or(NO_EDGE);
-
-        LabelWalker {
-            labels: &self.labels,
-            current_label: first,
-        }
-        .map(|label| &label.weight)
+    /// Returns an iterator over the weights of the labels incident to `node`.
+    pub fn incident_label_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_
+    where
+        L: Eq + Hash,
+    {
+        self.incident_label_keys(node)
+            .filter_map(|key| self.labels.get(key))
+            .map(|label| &label.weight)
     }
 
     /// Returns an iterator over the indices of the edges incident to `node`.
@@ -219,12 +241,11 @@ impl<N, W, V> Tree<N, W, V> {
     }
 
     /// Returns an iterator over the indices of the labels incident to `node`.
-    pub fn incident_label_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        let first = self
-            .nodes
-            .get_index(node)
-            .map(|(_, n)| n.next_label)
-            .unwrap_or(NO_EDGE);
+    pub fn incident_label_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_
+    where
+        L: Eq + Hash,
+    {
+        let first = self.nodes.get_index(node).and_then(|(_, n)| n.next_label);
 
         LabelIndexWalker {
             labels: &self.labels,
@@ -232,12 +253,32 @@ impl<N, W, V> Tree<N, W, V> {
         }
     }
 
+    /// Returns an iterator over the globally unique ids of the labels incident
+    /// to `node`.
+    pub fn incident_label_keys(&self, node: usize) -> impl Iterator<Item = &L> + '_
+    where
+        L: Eq + Hash,
+    {
+        let first = self.nodes.get_index(node).and_then(|(_, n)| n.next_label);
+
+        LabelKeyWalker {
+            labels: &self.labels,
+            current: first,
+        }
+    }
+
     /// The number of edges and labels incident to `node`.
-    pub fn degree(&self, node: usize) -> usize {
+    pub fn degree(&self, node: usize) -> usize
+    where
+        L: Eq + Hash,
+    {
         self.incident_edge_indices(node).count() + self.incident_label_indices(node).count()
     }
 
-    pub fn is_degree_leq_two(&self, node: usize) -> bool {
+    pub fn is_degree_leq_two(&self, node: usize) -> bool
+    where
+        L: Eq + Hash,
+    {
         self.incident_edge_indices(node).take(3).count()
             + self.incident_label_indices(node).take(3).count()
             <= 2
@@ -261,6 +302,7 @@ impl<N, W, V> Tree<N, W, V> {
     pub fn remove_node(&mut self, node: &N) -> Option<(V, SwapResult)>
     where
         N: Eq + Hash,
+        L: Eq + Hash,
     {
         let idx = self.nodes.get_index_of(node)?;
 
@@ -291,7 +333,7 @@ impl<N, W, V> Tree<N, W, V> {
                 current.endpoints.replace(old_index, idx);
             }
 
-            for current in LabelWalkerMut::new(&mut self.labels, self.nodes[idx].next_label) {
+            for (_, current) in LabelWalkerMut::from_node(self, idx) {
                 current.node = idx;
             }
 
@@ -307,66 +349,54 @@ impl<N, W, V> Tree<N, W, V> {
         }
     }
 
-    pub fn add_label(&mut self, node: usize, w: W) -> usize {
+    /// Attaches a label with the globally unique id `key` to `node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a label with `key` is already attached. Label ids are
+    /// required to be globally unique.
+    pub fn add_label(&mut self, node: usize, key: L, weight: W)
+    where
+        L: Eq + Hash,
+    {
+        assert!(
+            !self.labels.contains_key(&key),
+            "label id must be globally unique"
+        );
+
         let (_, n) = self.nodes.get_index_mut(node).unwrap();
+        let first = mem::replace(&mut n.next_label, NonMaxUsize::new(self.labels.len()));
 
-        let label = self.labels.push_idx(Label {
-            weight: w,
-            node,
-            next: n.next_label,
-        });
-
-        n.next_label = label;
-
-        label
+        self.labels.insert(
+            key,
+            Label {
+                weight,
+                node,
+                next: first,
+            },
+        );
     }
 
-    pub fn remove_label(&mut self, label: usize) -> Option<(W, SwapResult)> {
-        let (node, next) = {
-            let l = self.labels.get(label)?;
-            (l.node, l.next)
-        };
+    /// Removes the label with the given id, returning its weight.
+    ///
+    /// The ids of all other labels remain valid. Unlinking the label from the
+    /// singly linked list of labels at its vertex takes time linear in the
+    /// number of labels attached to that vertex.
+    pub fn remove_label(&mut self, key: &L) -> Option<W>
+    where
+        L: Eq + Hash,
+    {
+        let label_idx = self.labels.get_index_of(key)?;
+        let label = self.labels.swap_remove_index(label_idx).unwrap().1;
+        let next = label.next;
 
-        self.fix_label_links(node, label, next);
-        Some(self.swap_remove_label(label))
-    }
+        self.fix_label_links(
+            label.node,
+            unsafe { NonMaxUsize::new_unchecked(label_idx) },
+            next,
+        );
 
-    fn fix_label_links(&mut self, node: usize, label: usize, next: usize) {
-        let (_, n) = self.nodes.get_index_mut(node).unwrap();
-
-        let first = n.next_label;
-
-        if first == label {
-            n.next_label = next;
-        } else {
-            for current in (LabelWalkerMut {
-                labels: &mut self.labels,
-                current_label: first,
-            }) {
-                if current.next == label {
-                    current.next = next;
-                    break;
-                }
-            }
-        }
-    }
-
-    fn swap_remove_label(&mut self, idx: usize) -> (W, SwapResult) {
-        let label = self.labels.swap_remove(idx);
-
-        match self.labels.get(idx) {
-            None => (label.weight, SwapResult::None),
-            Some(l) => {
-                self.fix_label_links(l.node, self.labels.len(), l.next);
-                (
-                    label.weight,
-                    SwapResult::Some {
-                        prev: self.labels.len(),
-                        current: idx,
-                    },
-                )
-            }
-        }
+        Some(label.weight)
     }
 
     pub fn remove_edge(&mut self, edge: usize) -> Option<(W, SwapResult)> {
@@ -438,9 +468,39 @@ impl<N, W, V> Tree<N, W, V> {
             }
         }
     }
+
+    fn fix_label_links(
+        &mut self,
+        node: usize,
+        label_idx: NonMaxUsize,
+        next_idx: Option<NonMaxUsize>,
+    ) {
+        let first = self
+            .nodes
+            .get_index(node)
+            .expect("Node index not found in tree")
+            .1
+            .next_label
+            .unwrap();
+
+        if first == label_idx {
+            self.nodes
+                .get_index_mut(node)
+                .expect("Node index not found in tree")
+                .1
+                .next_label = next_idx;
+        } else {
+            for (_, current) in LabelWalkerMut::new(&mut self.labels, first) {
+                if current.next == Some(label_idx) {
+                    current.next = next_idx;
+                    break;
+                }
+            }
+        }
+    }
 }
 
-impl<N, W, V> Default for Tree<N, W, V> {
+impl<N, L, W, V> Default for Tree<N, L, W, V> {
     fn default() -> Self {
         Self::new()
     }
@@ -458,16 +518,52 @@ pub enum SwapResult {
 
 const NO_EDGE: usize = usize::MAX;
 
+pub struct LabelKeyWalker<'a, L, W> {
+    labels: &'a IndexMap<L, Label<W>>,
+    current: Option<NonMaxUsize>,
+}
+
+impl<'a, L, W> LabelKeyWalker<'a, L, W> {
+    fn from_node<N, V>(tree: &'a Tree<N, L, W, V>, node_index: usize) -> Self {
+        let node = tree
+            .node_index(node_index)
+            .expect("Node index not found in tree")
+            .1;
+        Self {
+            labels: &tree.labels,
+            current: node.next_label,
+        }
+    }
+}
+
+impl<'a, L, W> Iterator for LabelKeyWalker<'a, L, W> {
+    type Item = &'a L;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Some(label_index) = self.current.map(NonMaxUsize::get) else {
+            return None;
+        };
+
+        let (key, label) = self
+            .labels
+            .get_index(label_index)
+            .expect("Label index not found in tree");
+        self.current = label.next;
+
+        Some(key)
+    }
+}
+
 pub struct LabelWalker<'a, W> {
     labels: &'a Vec<Label<W>>,
-    current_label: usize,
+    current_label: Option<NonMaxUsize>,
 }
 
 impl<'a, W> LabelWalker<'a, W> {
     fn new(labels: &'a Vec<Label<W>>, first_label: usize) -> Self {
         Self {
             labels,
-            current_label: first_label,
+            current_label: NonMaxUsize::new(first_label),
         }
     }
 }
@@ -476,11 +572,10 @@ impl<'a, W> Iterator for LabelWalker<'a, W> {
     type Item = &'a Label<W>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_label == NO_EDGE {
+        let Some(label_index) = self.current_label.map(NonMaxUsize::get) else {
             return None;
-        }
+        };
 
-        let label_index = self.current_label;
         let label = self
             .labels
             .get(label_index)
@@ -491,32 +586,42 @@ impl<'a, W> Iterator for LabelWalker<'a, W> {
     }
 }
 
-pub struct LabelWalkerMut<'a, W> {
-    labels: &'a mut Vec<Label<W>>,
-    current_label: usize,
+pub struct LabelWalkerMut<'a, W, L> {
+    labels: &'a mut IndexMap<L, Label<W>>,
+    current_label: Option<NonMaxUsize>,
 }
 
-impl<'a, W> LabelWalkerMut<'a, W> {
-    fn new(labels: &'a mut Vec<Label<W>>, first_label: usize) -> Self {
+impl<'a, W, L> LabelWalkerMut<'a, W, L> {
+    fn new(labels: &'a mut IndexMap<L, Label<W>>, first_label: NonMaxUsize) -> Self {
         Self {
             labels,
-            current_label: first_label,
+            current_label: Some(first_label),
+        }
+    }
+
+    fn from_node<N, V>(tree: &'a mut Tree<N, L, W, V>, node_index: usize) -> Self {
+        let node = tree
+            .node_index(node_index)
+            .expect("Node index not found in tree")
+            .1;
+        Self {
+            current_label: node.next_label,
+            labels: &mut tree.labels,
         }
     }
 }
 
-impl<'a, W> Iterator for LabelWalkerMut<'a, W> {
-    type Item = &'a mut Label<W>;
+impl<'a, W, L> Iterator for LabelWalkerMut<'a, W, L> {
+    type Item = (&'a L, &'a mut Label<W>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_label == NO_EDGE {
+        let Some(label_index) = self.current_label.map(NonMaxUsize::get) else {
             return None;
-        }
+        };
 
-        let label_index = self.current_label;
-        let label = self
+        let (key, label) = self
             .labels
-            .get_mut(label_index)
+            .get_index_mut(label_index)
             .expect("Label index not found in tree");
         self.current_label = label.next;
 
@@ -524,7 +629,8 @@ impl<'a, W> Iterator for LabelWalkerMut<'a, W> {
         // vector of labels mutable for 'a, and we guarantee that we will not
         // return the same label twice in this iterator.
         let label = unsafe { &mut *(label as *mut Label<W>) };
-        Some(label)
+        let key = unsafe { &*(key as *const L) };
+        Some((key, label))
     }
 }
 
@@ -537,7 +643,7 @@ struct EdgeWalker<'a, W> {
 
 impl<'a, W> EdgeWalker<'a, W> {
     #[allow(dead_code)]
-    fn from_node<N, V>(tree: &'a Tree<N, W, V>, node_index: usize) -> Self {
+    fn from_node<N, L, V>(tree: &'a Tree<N, L, W, V>, node_index: usize) -> Self {
         let node = tree
             .node_index(node_index)
             .expect("Node index not found in tree")
@@ -606,23 +712,21 @@ impl<'a, W> Iterator for EdgeIndexWalker<'a, W> {
     }
 }
 
-struct LabelIndexWalker<'a, W> {
-    labels: &'a Vec<Label<W>>,
-    current_label: usize,
+struct LabelIndexWalker<'a, L, W> {
+    labels: &'a IndexMap<L, Label<W>>,
+    current_label: Option<NonMaxUsize>,
 }
 
-impl<'a, W> Iterator for LabelIndexWalker<'a, W> {
+impl<'a, L, W> Iterator for LabelIndexWalker<'a, L, W> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_label == NO_EDGE {
+        let Some(label_index) = self.current_label.map(NonMaxUsize::get) else {
             return None;
-        }
-
-        let label_index = self.current_label;
-        let label = self
+        };
+        let (_, label) = self
             .labels
-            .get(label_index)
+            .get_index(label_index)
             .expect("Label index not found in tree");
         self.current_label = label.next;
 
