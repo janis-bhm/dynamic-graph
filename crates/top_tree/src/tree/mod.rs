@@ -420,7 +420,7 @@ impl<N, W, L, V> Tree<N, L, W, V> {
                 self.fix_label_links(
                     l.node,
                     unsafe { NonMaxUsize::new_unchecked(self.labels.len()) },
-                    l.next,
+                    unsafe { Some(NonMaxUsize::new_unchecked(idx)) },
                 );
                 (
                     label.weight,

@@ -70,13 +70,13 @@
 //!     }
 //! }
 //!
-//! let mut top_tree = TopTree::<u32, PathLen>::new();
-//! let a = top_tree.add_vertex(0, ());
-//! let b = top_tree.add_vertex(1, ());
-//! let c = top_tree.add_vertex(2, ());
+//! let mut top_tree = TopTree::<u32, u32, PathLen>::new();
+//! let a = top_tree.add_vertex(0);
+//! let b = top_tree.add_vertex(1);
+//! let c = top_tree.add_vertex(2);
 //!
-//! top_tree.link(a, b, ());
-//! top_tree.link(b, c, ());
+//! top_tree.link(a, b);
+//! top_tree.link(b, c);
 //!
 //! assert_eq!(top_tree.expose_path(a, c), Some(PathLen { len: 2 }));
 //! ```

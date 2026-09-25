@@ -117,15 +117,6 @@ impl<S: Summary<W>, W> Cluster<S, W> {
     }
 }
 
-struct LeafCluster<S: Summary<W>, W = ()> {
-    parent: Option<NonMaxUsize>,
-    flipped: bool,
-    boundaries: BoundaryVertices,
-    sum: S,
-    tag: S::Tag,
-    _marker: PhantomData<fn() -> W>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BoundaryVertices {
     None,
@@ -240,10 +231,14 @@ impl BoundaryVertices {
             }
         }
 
-        return None;
+        None
     }
 
     fn add(&mut self, v: NonMaxUsize, left: bool) {
+        if self.contains(v) {
+            return;
+        }
+
         match self {
             Self::None => *self = Self::One(v),
             Self::One(w) => {
@@ -325,9 +320,6 @@ impl BoundaryVertices {
 /// corresponding [`TopTree::detach`] call, even when other labels are removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LabelId(pub usize);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Label;
 
 /// A dynamic top tree over a forest of trees.
 ///
@@ -642,14 +634,45 @@ where
     fn add_boundary(&mut self, node: usize, vertex: usize) {
         let v = unsafe { NonMaxUsize::new_unchecked(vertex) };
 
-        let cluster = self.cl_mut(node);
-        if let Some(Children { left, right }) = cluster.children {
-            if self.cl(left.get()).boundary_vertices.contains(v) {
-                self.cl_mut(node).boundary_vertices.add(v, true);
-            } else if self.cl(right.get()).boundary_vertices.contains(v) {
+        let (data, children) = {
+            let cluster = self.cl(node);
+            (cluster.data, cluster.children)
+        };
+
+        match data {
+            ClusterData::Edge(edge) => {
+                // `boundary_vertices` is stored in the cluster's local
+                // (unflipped) frame, so compare against the physical endpoints.
+                let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
+                if left == vertex {
+                    self.cl_mut(node).boundary_vertices.add(v, true);
+                } else if right == vertex {
+                    self.cl_mut(node).boundary_vertices.add(v, false);
+                } else {
+                    panic!("vertex must be an endpoint of the edge");
+                }
+            }
+            ClusterData::Label(_) => {
                 self.cl_mut(node).boundary_vertices.add(v, false);
-            } else {
-                panic!("vertex must be a boundary of one of the children");
+            }
+            ClusterData::Internal => {
+                let Children { left, right } = children.expect("internal node must have children");
+                let (left, right) = (left.get(), right.get());
+                let in_left = self.cl(left).boundary_vertices.contains(v);
+                let in_right = self.cl(right).boundary_vertices.contains(v);
+                if in_left && in_right {
+                    // `vertex` is the central vertex. It sits on the side of the
+                    // child that is a path cluster, because that child's outer
+                    // boundary is the node's other boundary.
+                    let is_left = !self.is_path(left);
+                    self.cl_mut(node).boundary_vertices.add(v, is_left);
+                } else if in_left {
+                    self.cl_mut(node).boundary_vertices.add(v, true);
+                } else if in_right {
+                    self.cl_mut(node).boundary_vertices.add(v, false);
+                } else {
+                    panic!("vertex must be a boundary of one of the children");
+                }
             }
         }
     }
@@ -911,11 +934,8 @@ where
         self.alloc(cluster)
     }
 
-    fn new_leaf_label(&mut self, label: usize, boundary: BoundaryVertices) -> usize {
-        let sum = {
-            let label_ref = self.tree.label_index(label).expect("label must exist");
-            S::label(&(), label_ref.node_id())
-        };
+    fn new_leaf_label(&mut self, label: usize, vertex: usize, boundary: BoundaryVertices) -> usize {
+        let sum = S::label(&(), vertex);
         let cluster = Cluster {
             parent: None,
             children: None,
@@ -964,12 +984,23 @@ where
         let new_parent_boundary;
         let flip_new_parent;
         let flip_grandparent;
+        // The new parent's physical left child is `uncle` when `uncle_is_left`,
+        // otherwise `sibling`. Merge the children's logical boundaries (the
+        // orientation in which a child contributes to the merge) in that
+        // physical order.
+        let sibling_boundary = self.cl(sibling).flipped_boundary_vertices();
+        let uncle_boundary = self.cl(uncle).flipped_boundary_vertices();
+        let (left_boundary, right_boundary) = if uncle_is_left {
+            (uncle_boundary, sibling_boundary)
+        } else {
+            (sibling_boundary, uncle_boundary)
+        };
         if same_sides && sibling_is_path {
             // path rotation
             let grandparent_has_middle = self.has_middle_boundary(grandparent);
             new_parent_boundary = BoundaryVertices::from_children(
-                self.cl(sibling).flipped_boundary_vertices(),
-                self.cl(uncle).flipped_boundary_vertices(),
+                left_boundary,
+                right_boundary,
                 grandparent_has_middle || uncle_is_path,
             );
             flip_new_parent = false;
@@ -991,8 +1022,8 @@ where
                 self.toggle_flipped(node);
 
                 new_parent_boundary = BoundaryVertices::from_children(
-                    self.cl(sibling).flipped_boundary_vertices(),
-                    self.cl(uncle).flipped_boundary_vertices(),
+                    left_boundary,
+                    right_boundary,
                     sibling_is_path || uncle_is_path,
                 );
             } else {
@@ -1001,11 +1032,8 @@ where
                 flip_grandparent = false;
                 self.toggle_flipped(sibling);
 
-                new_parent_boundary = BoundaryVertices::from_children(
-                    self.cl(sibling).flipped_boundary_vertices(),
-                    self.cl(uncle).flipped_boundary_vertices(),
-                    uncle_is_path,
-                );
+                new_parent_boundary =
+                    BoundaryVertices::from_children(left_boundary, right_boundary, uncle_is_path);
             }
         }
 
@@ -1271,6 +1299,12 @@ where
 
     /// Exposes `vertex`, returning the root node of its top tree.
     fn expose_vertex(&mut self, vertex: usize) -> Option<usize> {
+        // Exposing an already exposed vertex is a no-op: its boundary is
+        // already present on the path to the root.
+        if self.exposed.get(vertex) {
+            return self.find_root(vertex);
+        }
+
         match self.find_consuming_node(vertex) {
             Some(consuming) => {
                 let consuming = self.prepare_expose(consuming);
@@ -1287,6 +1321,12 @@ where
 
     /// Removes the exposed status of `vertex`, returning the root node.
     fn deexpose_vertex(&mut self, vertex: usize) -> Option<usize> {
+        // Deexposing a vertex that is not exposed is a no-op, matching the
+        // idempotent behaviour of `expose_vertex`.
+        if !self.exposed.get(vertex) {
+            return None;
+        }
+
         let consuming = self.find_consuming_node(vertex);
 
         // Collect the path from the consuming node up to the root.
@@ -1308,11 +1348,16 @@ where
 
         let mut root = None;
         for &current in path.iter() {
+            let before = self.cl(current).boundary_vertices;
             let _contains = self
                 .cl_mut(current)
                 .boundary_vertices
                 .remove(unsafe { NonMaxUsize::new_unchecked(vertex) });
-            assert!(_contains.is_some(), "boundary must contain vertex");
+            assert!(
+                _contains.is_some(),
+                "boundary of node {current} must contain vertex {vertex}, but was {before:?} \
+                 (consuming={consuming:?})"
+            );
 
             if matches!(self.cl(current).data, ClusterData::Internal) {
                 self.recompute(current);
@@ -1415,7 +1460,7 @@ where
         }
         self.set_exposed(vertex, false);
 
-        let leaf = self.new_leaf_label(self.tree.label_count(), unsafe {
+        let leaf = self.new_leaf_label(self.tree.label_count(), vertex, unsafe {
             BoundaryVertices::from_option(root_v.map(|_| NonMaxUsize::new_unchecked(vertex)))
         });
 

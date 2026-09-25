@@ -2,6 +2,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::*;
 
+/// The top tree no longer carries user supplied edge weights: the payload of a
+/// forest edge is the index of its top tree leaf. To keep the summaries below
+/// exercising non-trivial per-edge values, we derive a deterministic "weight"
+/// from an edge's endpoints. Along the path `0-1-2-...` this yields `1, 2, ...`,
+/// matching the weights the old weight-carrying tests used.
+fn edge_weight(u: usize, v: usize) -> u64 {
+    (u.min(v) + 1) as u64
+}
+
 /// A monoid summary over the whole cluster: number of tree edges and xor of
 /// their weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,14 +19,17 @@ struct Agg {
     xor: u64,
 }
 
-impl Summary<u64> for Agg {
+impl Summary for Agg {
     type Tag = ();
 
-    fn tree_edge(w: &u64, _u: usize, _v: usize) -> Self {
-        Agg { edges: 1, xor: *w }
+    fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
+        Agg {
+            edges: 1,
+            xor: edge_weight(u, v),
+        }
     }
 
-    fn label(_w: &u64, _v: usize) -> Self {
+    fn label(_w: &(), _v: usize) -> Self {
         Agg { edges: 0, xor: 0 }
     }
 
@@ -36,14 +48,14 @@ struct PathLen {
     len: u32,
 }
 
-impl Summary<u64> for PathLen {
+impl Summary for PathLen {
     type Tag = ();
 
-    fn tree_edge(_w: &u64, _u: usize, _v: usize) -> Self {
+    fn tree_edge(_w: &(), _u: usize, _v: usize) -> Self {
         PathLen { len: 1 }
     }
 
-    fn label(_w: &u64, _v: usize) -> Self {
+    fn label(_w: &(), _v: usize) -> Self {
         PathLen { len: 0 }
     }
 
@@ -68,14 +80,17 @@ struct PathSum {
     len: u32,
 }
 
-impl Summary<i64> for PathSum {
+impl Summary for PathSum {
     type Tag = i64;
 
-    fn tree_edge(w: &i64, _u: usize, _v: usize) -> Self {
-        PathSum { sum: *w, len: 1 }
+    fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
+        PathSum {
+            sum: edge_weight(u, v) as i64,
+            len: 1,
+        }
     }
 
-    fn label(_w: &i64, _v: usize) -> Self {
+    fn label(_w: &(), _v: usize) -> Self {
         PathSum { sum: 0, len: 0 }
     }
 
@@ -112,14 +127,16 @@ struct PathMax {
     max: u64,
 }
 
-impl Summary<u64> for PathMax {
+impl Summary for PathMax {
     type Tag = ();
 
-    fn tree_edge(w: &u64, _u: usize, _v: usize) -> Self {
-        PathMax { max: *w }
+    fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
+        PathMax {
+            max: edge_weight(u, v) * 10,
+        }
     }
 
-    fn label(_w: &u64, _v: usize) -> Self {
+    fn label(_w: &(), _v: usize) -> Self {
         PathMax { max: 0 }
     }
 
@@ -144,16 +161,16 @@ struct DirectedPath {
     edges: Vec<(usize, usize)>,
 }
 
-impl Summary<u64> for DirectedPath {
+impl Summary for DirectedPath {
     type Tag = ();
 
-    fn tree_edge(_w: &u64, u: usize, v: usize) -> Self {
+    fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
         DirectedPath {
             edges: vec![(u, v)],
         }
     }
 
-    fn label(_w: &u64, _v: usize) -> Self {
+    fn label(_w: &(), _v: usize) -> Self {
         DirectedPath { edges: Vec::new() }
     }
 
@@ -173,26 +190,26 @@ impl Summary<u64> for DirectedPath {
     }
 }
 
-struct Harness<S: Summary<u64>> {
-    tt: TopTree<u32, S, u64, ()>,
-    adj: BTreeMap<usize, BTreeMap<usize, u64>>,
+struct Harness<S: Summary> {
+    tt: TopTree<u32, u32, S>,
+    adj: BTreeMap<usize, BTreeSet<usize>>,
 }
 
-impl<S: Summary<u64>> Harness<S> {
+impl<S: Summary> Harness<S> {
     fn new(n: usize) -> Self {
         let mut tt = TopTree::new();
         let mut adj = BTreeMap::new();
         for i in 0..n {
-            tt.add_vertex(i as u32, ());
-            adj.insert(i, BTreeMap::new());
+            tt.add_vertex(i as u32);
+            adj.insert(i, BTreeSet::new());
         }
         Self { tt, adj }
     }
 
-    fn link(&mut self, u: usize, v: usize, w: u64) {
-        self.tt.link(u, v, w);
-        self.adj.get_mut(&u).unwrap().insert(v, w);
-        self.adj.get_mut(&v).unwrap().insert(u, w);
+    fn link(&mut self, u: usize, v: usize) {
+        self.tt.link(u, v);
+        self.adj.get_mut(&u).unwrap().insert(v);
+        self.adj.get_mut(&v).unwrap().insert(u);
     }
 
     fn cut(&mut self, u: usize, v: usize) {
@@ -212,7 +229,7 @@ impl<S: Summary<u64>> Harness<S> {
             let mut queue = VecDeque::from([start]);
             while let Some(v) = queue.pop_front() {
                 comp.push(v);
-                for &w in self.adj[&v].keys() {
+                for &w in &self.adj[&v] {
                     if seen.insert(w) {
                         queue.push_back(w);
                     }
@@ -223,7 +240,7 @@ impl<S: Summary<u64>> Harness<S> {
         out
     }
 
-    fn component_edges(&self, v: usize) -> Vec<(usize, usize, u64)> {
+    fn component_edges(&self, v: usize) -> Vec<(usize, usize)> {
         let comp = self
             .components()
             .into_iter()
@@ -234,9 +251,8 @@ impl<S: Summary<u64>> Harness<S> {
             .flat_map(|&u| {
                 self.adj[&u]
                     .iter()
-                    .map(|(&w, &weight)| (w, weight))
-                    .filter(move |&(w, _)| u < w)
-                    .map(move |(w, weight)| (u, w, weight))
+                    .filter(move |&&w| u < w)
+                    .map(move |&w| (u, w))
             })
             .collect();
         edges.sort();
@@ -244,58 +260,274 @@ impl<S: Summary<u64>> Harness<S> {
     }
 }
 
-fn live_roots<S: Summary<u64>>(tt: &TopTree<u32, S, u64, ()>) -> Vec<usize> {
+fn live_roots<S: Summary>(tt: &TopTree<u32, u32, S>) -> Vec<usize> {
     tt.nodes
         .iter()
         .enumerate()
-        .filter_map(|(i, node)| {
-            node.as_ref()
-                .filter(|c| c.parent.get().is_none())
-                .map(|_| i)
-        })
+        .filter_map(|(i, node)| node.as_ref().filter(|c| c.parent.is_none()).map(|_| i))
         .collect()
 }
 
-fn collect_leaves<S: Summary<u64>>(
-    tt: &TopTree<u32, S, u64, ()>,
+fn collect_leaves<S: Summary>(
+    tt: &TopTree<u32, u32, S>,
     node: usize,
     leaves: &mut Vec<usize>,
     nodes: &mut usize,
 ) {
     *nodes += 1;
     let cluster = tt.cl(node);
-    if let (Some(left), Some(right)) = (cluster.left.get(), cluster.right.get()) {
+    if let Some(Children { left, right }) = cluster.children {
         assert_eq!(
-            tt.cl(left).parent.get(),
+            tt.cl(left.get()).parent.map(NonMaxUsize::get),
             Some(node),
             "left child parent mismatch"
         );
         assert_eq!(
-            tt.cl(right).parent.get(),
+            tt.cl(right.get()).parent.map(NonMaxUsize::get),
             Some(node),
             "right child parent mismatch"
         );
-        collect_leaves(tt, left, leaves, nodes);
-        collect_leaves(tt, right, leaves, nodes);
+        collect_leaves(tt, left.get(), leaves, nodes);
+        collect_leaves(tt, right.get(), leaves, nodes);
     } else {
-        assert!(cluster.left.get().is_none() && cluster.right.get().is_none());
         leaves.push(node);
     }
 }
 
-fn check_invariants<S: Summary<u64>>(h: &Harness<S>) {
+/// The boundary vertices of a node in the three "slots" used by the classic
+/// splay top tree: a left boundary, a (possibly shared) middle boundary, and a
+/// right boundary. At most two slots are ever populated.
+#[derive(Clone, Copy, Debug, Default)]
+struct Boundaries {
+    left: Option<usize>,
+    mid: Option<usize>,
+    right: Option<usize>,
+}
+
+impl Boundaries {
+    fn count(&self) -> usize {
+        usize::from(self.left.is_some())
+            + usize::from(self.mid.is_some())
+            + usize::from(self.right.is_some())
+    }
+
+    fn leftmost(&self) -> Option<usize> {
+        self.left.or(self.mid)
+    }
+
+    fn rightmost(&self) -> Option<usize> {
+        self.right.or(self.mid)
+    }
+
+    fn set(&self) -> BTreeSet<usize> {
+        [self.left, self.mid, self.right]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    fn flipped(&self) -> Self {
+        Self {
+            left: self.right,
+            mid: self.mid,
+            right: self.left,
+        }
+    }
+}
+
+/// Counts the leaves below `node` incident to `vertex`.
+fn count_incident_leaves<S: Summary>(
+    tt: &TopTree<u32, u32, S>,
+    node: usize,
+    vertex: usize,
+) -> usize {
+    match tt.cl(node).data {
+        ClusterData::Edge(edge) => {
+            let (u, v) = tt.tree.edge_endpoints(edge).expect("edge must exist");
+            usize::from(u == vertex || v == vertex)
+        }
+        ClusterData::Label(label) => usize::from(
+            tt.tree
+                .label_index(label)
+                .expect("label must exist")
+                .node_id()
+                == vertex,
+        ),
+        ClusterData::Internal => {
+            let Children { left, right } = tt.cl(node).children.expect("internal has children");
+            count_incident_leaves(tt, left.get(), vertex)
+                + count_incident_leaves(tt, right.get(), vertex)
+        }
+    }
+}
+
+/// Recomputes the boundary vertices of `node` from scratch (from the underlying
+/// forest and the exposed bits) and checks them against the stored value.
+///
+/// The orientation invariant from the paper is a property of the *materialized*
+/// tree, i.e. the frame obtained by pushing every pending flip from the root
+/// down. `parity` accumulates the flip bits of the proper ancestors of `node`,
+/// so the node's effective flip is `parity ^ cluster.flipped`. The returned
+/// `Boundaries` are expressed in that materialized frame; the stored value is in
+/// the node's local frame and must equal the returned value flipped by the
+/// effective flip.
+///
+/// The invariant checked for every internal node is: the rightmost boundary of
+/// the materialized left child and the leftmost boundary of the materialized
+/// right child must both exist and equal the central vertex.
+fn check_node_boundaries<S: Summary>(tt: &TopTree<u32, u32, S>, node: usize) -> Boundaries {
+    check_node_boundaries_in(tt, node, false)
+}
+
+fn check_node_boundaries_in<S: Summary>(
+    tt: &TopTree<u32, u32, S>,
+    node: usize,
+    parity: bool,
+) -> Boundaries {
+    let cluster = tt.cl(node);
+    let effective_flip = parity ^ cluster.flipped;
+
+    let materialized = match cluster.data {
+        ClusterData::Edge(edge) => {
+            let (left, right) = tt.tree.edge_endpoints(edge).expect("edge must exist");
+            // Materialized left endpoint is `endpoints[effective_flip]`.
+            let (left, right) = if effective_flip {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let mut c = Boundaries::default();
+            if tt.is_boundary_vertex(left) {
+                c.left = Some(left);
+            }
+            if tt.is_boundary_vertex(right) {
+                c.right = Some(right);
+            }
+            c
+        }
+        ClusterData::Label(label) => {
+            let vertex = tt
+                .tree
+                .label_index(label)
+                .expect("label must exist")
+                .node_id();
+            let mut c = Boundaries::default();
+            if tt.is_boundary_vertex(vertex) {
+                c.mid = Some(vertex);
+            }
+            c
+        }
+        ClusterData::Internal => {
+            let Children { left, right } = cluster.children.expect("internal has children");
+            // Materialized left/right child of the node.
+            let (materialized_left, materialized_right) = if effective_flip {
+                (right.get(), left.get())
+            } else {
+                (left.get(), right.get())
+            };
+
+            let bl = check_node_boundaries_in(tt, materialized_left, effective_flip);
+            let br = check_node_boundaries_in(tt, materialized_right, effective_flip);
+
+            assert_eq!(
+                bl.rightmost(),
+                br.leftmost(),
+                "children of internal node {node} must share a central boundary vertex"
+            );
+            let central = bl.rightmost().unwrap_or_else(|| {
+                panic!("left child must have a rightmost boundary at node {node}")
+            });
+
+            let mut c = Boundaries::default();
+            let inside = count_incident_leaves(tt, node, central);
+            if tt.exposed.get(central) || inside < tt.tree.degree(central) {
+                c.mid = Some(central);
+            }
+            if bl.leftmost() != bl.rightmost() {
+                c.left = bl.leftmost();
+            }
+            if br.leftmost() != br.rightmost() {
+                c.right = br.rightmost();
+            }
+            c
+        }
+    };
+
+    // The stored value lives in the node's local frame.
+    let expected = if effective_flip {
+        materialized.flipped()
+    } else {
+        materialized
+    };
+    let stored = cluster.boundary_vertices;
+    assert_eq!(
+        expected.count() as u8,
+        stored.count(),
+        "boundary count mismatch at node {node} ({:?})",
+        cluster.data
+    );
+
+    let expected_set: BTreeSet<usize> = expected.set();
+    let stored_set: BTreeSet<usize> = match stored {
+        BoundaryVertices::None => BTreeSet::new(),
+        BoundaryVertices::One(v) => BTreeSet::from([v.get()]),
+        BoundaryVertices::Two { left, right } => BTreeSet::from([left.get(), right.get()]),
+    };
+    assert_eq!(
+        expected_set, stored_set,
+        "boundary vertices mismatch at node {node} ({:?})",
+        cluster.data
+    );
+
+    let mapped = match [expected.left, expected.mid, expected.right]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] => BoundaryVertices::None,
+        [v] => BoundaryVertices::One(NonMaxUsize::new(*v).unwrap()),
+        [l, r] => BoundaryVertices::Two {
+            left: NonMaxUsize::new(*l).unwrap(),
+            right: NonMaxUsize::new(*r).unwrap(),
+        },
+        other => panic!("more than two boundary vertices {other:?} at node {node}"),
+    };
+    assert_eq!(
+        stored, mapped,
+        "boundary orientation mismatch at node {node} ({:?})",
+        cluster.data
+    );
+
+    if matches!(cluster.data, ClusterData::Internal) {
+        assert_eq!(
+            tt.has_middle_boundary(node),
+            materialized.mid.is_some(),
+            "has_middle_boundary mismatch at node {node}"
+        );
+    }
+
+    materialized
+}
+
+fn check_invariants<S: Summary>(h: &Harness<S>) {
     let tt = &h.tt;
 
     for (i, node) in tt.nodes.iter().enumerate() {
         if let Some(cluster) = node
-            && let Some(parent) = cluster.parent.get()
+            && let Some(parent) = cluster.parent.map(NonMaxUsize::get)
         {
             let p = tt.nodes[parent].as_ref().expect("parent must be live");
-            assert!(
-                p.left.get() == Some(i) || p.right.get() == Some(i),
-                "node {i} is not a child of its parent {parent}"
-            );
+            let is_child = p
+                .children
+                .is_some_and(|c| c.left.get() == i || c.right.get() == i);
+            assert!(is_child, "node {i} is not a child of its parent {parent}");
         }
+    }
+
+    // Every live node's stored boundary vertices must match the forest.
+    for root in live_roots(tt) {
+        check_node_boundaries(tt, root);
     }
 
     let mut total_nodes = 0;
@@ -312,6 +544,14 @@ fn check_invariants<S: Summary<u64>>(h: &Harness<S>) {
             "a top tree with k leaves must have 2k-1 nodes"
         );
         total_nodes += nodes;
+
+        // The boundaries of a component root are exactly its exposed vertices.
+        for vertex in check_node_boundaries(tt, root).set() {
+            assert!(
+                tt.exposed.get(vertex),
+                "root boundary vertex {vertex} must be exposed"
+            );
+        }
 
         for leaf in leaves {
             match tt.cl(leaf).data {
@@ -356,35 +596,31 @@ fn check_invariants<S: Summary<u64>>(h: &Harness<S>) {
             }
         }
         if let Some(sample) = sample {
-            let expected: BTreeSet<_> = h
-                .component_edges(sample)
-                .into_iter()
-                .map(|(u, v, _)| (u, v))
-                .collect();
+            let expected: BTreeSet<_> = h.component_edges(sample).into_iter().collect();
             assert_eq!(top_edges, expected, "top tree component edges mismatch");
         }
     }
 }
 
-fn path_edges(h: &Harness<impl Summary<u64>>, u: usize, v: usize) -> Option<Vec<u64>> {
-    let mut prev: BTreeMap<usize, (usize, u64)> = BTreeMap::new();
+fn path_edges(h: &Harness<impl Summary>, u: usize, v: usize) -> Option<Vec<(usize, usize)>> {
+    let mut prev: BTreeMap<usize, usize> = BTreeMap::new();
     let mut seen = BTreeSet::from([u]);
     let mut queue = VecDeque::from([u]);
     while let Some(x) = queue.pop_front() {
         if x == v {
-            let mut weights = Vec::new();
+            let mut edges = Vec::new();
             let mut cur = v;
             while cur != u {
-                let (p, w) = prev[&cur];
-                weights.push(w);
+                let p = prev[&cur];
+                edges.push((p.min(cur), p.max(cur)));
                 cur = p;
             }
-            weights.reverse();
-            return Some(weights);
+            edges.reverse();
+            return Some(edges);
         }
-        for (&w, &weight) in &h.adj[&x] {
+        for &w in &h.adj[&x] {
             if seen.insert(w) {
-                prev.insert(w, (x, weight));
+                prev.insert(w, x);
                 queue.push_back(w);
             }
         }
@@ -395,7 +631,7 @@ fn path_edges(h: &Harness<impl Summary<u64>>, u: usize, v: usize) -> Option<Vec<
 #[test]
 fn single_edge_summary() {
     let mut h = Harness::<PathLen>::new(2);
-    h.link(0, 1, 42);
+    h.link(0, 1);
 
     assert_eq!(h.tt.expose(0), Some(PathLen { len: 1 }));
     check_invariants(&h);
@@ -411,7 +647,7 @@ fn single_edge_summary() {
 fn path_summary() {
     let mut h = Harness::<PathLen>::new(6);
     for i in 1..6 {
-        h.link(i - 1, i, i as u64);
+        h.link(i - 1, i);
         check_invariants(&h);
     }
 
@@ -431,12 +667,13 @@ fn path_summary() {
 
 #[test]
 fn orientation_sensitive_summary_flips_with_cluster() {
-    let mut tt: TopTree<u32, DirectedPath, u64, ()> = TopTree::new();
-    let u = tt.add_vertex(0, ());
-    let v = tt.add_vertex(1, ());
-    tt.link(u, v, 1);
+    let mut tt: TopTree<u32, u32, DirectedPath> = TopTree::new();
+    let u = tt.add_vertex(0);
+    let v = tt.add_vertex(1);
+    tt.link(u, v);
 
-    let leaf = tt.edge_leaf[0].get().unwrap();
+    // The payload of the forest edge is the index of its top tree leaf.
+    let leaf = *tt.tree.edge_weight(0).expect("edge must exist");
     tt.toggle_flipped(leaf);
     assert_eq!(tt.cl(leaf).sum.edges, vec![(1, 0)]);
 
@@ -452,7 +689,7 @@ fn orientation_sensitive_summary_flips_with_cluster() {
 fn star_summary() {
     let mut h = Harness::<PathLen>::new(6);
     for i in 1..6 {
-        h.link(0, i, i as u64);
+        h.link(0, i);
         check_invariants(&h);
     }
 
@@ -471,7 +708,7 @@ fn star_summary() {
 fn component_aggregate_is_whole_component() {
     let mut h = Harness::<Agg>::new(6);
     for i in 1..6 {
-        h.link(i - 1, i, i as u64);
+        h.link(i - 1, i);
     }
 
     let expected_xor = (1..6u64).fold(0, |a, b| a ^ b);
@@ -502,7 +739,7 @@ fn component_aggregate_is_whole_component() {
 fn path_max_summary() {
     let mut h = Harness::<PathMax>::new(6);
     for i in 1..6 {
-        h.link(i - 1, i, (i as u64) * 10);
+        h.link(i - 1, i);
     }
     for i in 1..6 {
         for j in i + 1..6 {
@@ -516,12 +753,12 @@ fn path_max_summary() {
 
 #[test]
 fn lazy_path_tag_propagates() {
-    let mut tt: TopTree<u32, PathSum, i64, ()> = TopTree::new();
+    let mut tt: TopTree<u32, u32, PathSum> = TopTree::new();
     for i in 0..5 {
-        tt.add_vertex(i as u32, ());
+        tt.add_vertex(i as u32);
     }
     for i in 1..5 {
-        tt.link(i - 1, i, i as i64);
+        tt.link(i - 1, i);
     }
 
     // Path 1..3 has edges 2 and 3.
@@ -554,8 +791,8 @@ fn lazy_path_tag_propagates() {
 #[test]
 fn labels_count_towards_component() {
     let mut h = Harness::<PathLen>::new(2);
-    h.link(0, 1, 5);
-    let label = h.tt.attach(0, 9);
+    h.link(0, 1);
+    h.tt.attach(0, 9);
     check_invariants(&h);
 
     assert_eq!(h.tt.label_count(), 1);
@@ -566,7 +803,7 @@ fn labels_count_towards_component() {
     h.tt.deexpose(1);
     h.tt.deexpose(0);
 
-    h.tt.detach(label);
+    h.tt.detach(&9);
     assert_eq!(h.tt.label_count(), 0);
     check_invariants(&h);
 }
@@ -574,11 +811,11 @@ fn labels_count_towards_component() {
 #[test]
 fn label_on_isolated_vertex() {
     let mut h = Harness::<PathLen>::new(2);
-    let label = h.tt.attach(0, 5);
+    h.tt.attach(0, 5);
     check_invariants(&h);
     assert_eq!(h.tt.label_count(), 1);
 
-    h.tt.detach(label).expect("label exists");
+    h.tt.detach(&5);
     check_invariants(&h);
     assert_eq!(h.tt.label_count(), 0);
 }
@@ -586,23 +823,23 @@ fn label_on_isolated_vertex() {
 #[test]
 fn stable_label_handles() {
     let mut h = Harness::<PathLen>::new(3);
-    h.link(0, 1, 7);
+    h.link(0, 1);
 
-    let a = h.tt.attach(0, 1);
-    let b = h.tt.attach(0, 2);
-    let c = h.tt.attach(1, 3);
+    h.tt.attach(0, 1);
+    h.tt.attach(0, 2);
+    h.tt.attach(1, 3);
     check_invariants(&h);
     assert_eq!(h.tt.label_count(), 3);
 
-    // Removing `b` must not invalidate the other handles even though the
+    // Removing `2` must not invalidate the other keys even though the
     // underlying label storage swap-removes.
-    h.tt.detach(b).expect("b exists");
+    h.tt.detach(&2);
     assert_eq!(h.tt.label_count(), 2);
     check_invariants(&h);
 
-    h.tt.detach(a).expect("a still exists");
+    h.tt.detach(&1);
     check_invariants(&h);
-    h.tt.detach(c).expect("c still exists");
+    h.tt.detach(&3);
     assert_eq!(h.tt.label_count(), 0);
     check_invariants(&h);
 }
@@ -611,7 +848,7 @@ fn stable_label_handles() {
 fn link_cut_and_expose_paths() {
     let mut h = Harness::<PathLen>::new(10);
     for i in 1..10 {
-        h.link(i - 1, i, (i as u64) * 7 + 1);
+        h.link(i - 1, i);
     }
     for u in 0..10 {
         for v in u + 1..10 {
@@ -652,7 +889,7 @@ fn randomized_link_cut() {
             let edges: Vec<(usize, usize)> = h
                 .adj
                 .iter()
-                .flat_map(|(&u, nbrs)| nbrs.keys().map(move |&v| (u, v)))
+                .flat_map(|(&u, nbrs)| nbrs.iter().map(move |&v| (u, v)))
                 .filter(|(u, v)| u < v)
                 .collect();
 
@@ -665,7 +902,7 @@ fn randomized_link_cut() {
                     }
                     let u = comps[a][(rng.next() as usize) % comps[a].len()];
                     let v = comps[b][(rng.next() as usize) % comps[b].len()];
-                    h.link(u, v, rng.next());
+                    h.link(u, v);
                 }
                 1 if !edges.is_empty() => {
                     let (u, v) = edges[(rng.next() as usize) % edges.len()];
@@ -718,37 +955,37 @@ fn bit_vec_packs_bits() {
     assert_eq!(bits.blocks.len(), 4);
 }
 
-/// Regression test: removing a label must undo the boundary count that
-/// attaching it added, even though `num_boundary` is maintained relative to
+/// Regression test: removing a label must undo the boundary vertices that
+/// attaching it added, even though the boundaries are maintained relative to
 /// each cluster's parent context.
 #[test]
 fn detach_restores_boundary_count() {
     // A vertex whose degree drops from 2 to 1 stops being a boundary.
     let mut h = Harness::<PathLen>::new(2);
-    h.link(0, 1, 1);
-    let label = h.tt.attach(0, 9);
-    h.tt.detach(label);
-
-    let boundary_counts: Vec<u8> =
-        h.tt.nodes
-            .iter()
-            .filter_map(|node| node.as_ref().map(|c| c.num_boundary))
-            .collect();
-    assert_eq!(boundary_counts, vec![0], "stale boundary after detach");
+    h.link(0, 1);
+    h.tt.attach(0, 9);
+    h.tt.detach(&9);
     check_invariants(&h);
+    for root in live_roots(&h.tt) {
+        assert_eq!(
+            h.tt.cl(root).boundary_vertices,
+            BoundaryVertices::None,
+            "stale boundary after detach"
+        );
+    }
 
     // A vertex that remains a boundary must not be over-decremented.
     let mut h = Harness::<PathLen>::new(3);
-    h.link(0, 1, 1);
-    h.link(0, 2, 1);
-    let label = h.tt.attach(0, 9);
-    h.tt.detach(label);
-
-    let root = live_roots(&h.tt).pop().expect("a root must exist");
-    assert_eq!(
-        h.tt.cl(root).num_boundary,
-        0,
-        "vertex 0 is internal to the merged edge cluster"
-    );
+    h.link(0, 1);
+    h.link(0, 2);
+    h.tt.attach(0, 9);
+    h.tt.detach(&9);
     check_invariants(&h);
+    for root in live_roots(&h.tt) {
+        assert_eq!(
+            h.tt.cl(root).boundary_vertices,
+            BoundaryVertices::None,
+            "vertex 0 is internal to the merged edge cluster"
+        );
+    }
 }
