@@ -695,12 +695,6 @@ fn randomized_link_cut() {
 }
 
 #[test]
-fn index_types_are_word_sized() {
-    use core::mem::size_of;
-    assert_eq!(size_of::<NodeId>(), size_of::<usize>());
-}
-
-#[test]
 fn bit_vec_packs_bits() {
     let mut bits = BitVec::new();
     assert!(!bits.get(0));

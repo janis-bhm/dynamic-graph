@@ -200,7 +200,22 @@ impl<N, W, L, V> Tree<N, L, W, V> {
         self.labels.get(label)
     }
 
-    pub fn incident_edges_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
+    pub fn label_index(&self, label: usize) -> Option<&Label<W>> {
+        self.labels.get_index(label).map(|(_, l)| l)
+    }
+
+    pub fn label_key(&self, label: usize) -> Option<&L> {
+        self.labels.get_index(label).map(|(k, _)| k)
+    }
+
+    pub fn label_index_of(&self, label: &L) -> Option<usize>
+    where
+        L: Eq + Hash,
+    {
+        self.labels.get_index_of(label)
+    }
+
+    pub fn incident_edge_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
         let first = self
             .nodes
             .get_index(node)
@@ -216,13 +231,10 @@ impl<N, W, L, V> Tree<N, L, W, V> {
     }
 
     /// Returns an iterator over the weights of the labels incident to `node`.
-    pub fn incident_label_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_
-    where
-        L: Eq + Hash,
-    {
-        self.incident_label_keys(node)
-            .filter_map(|key| self.labels.get(key))
-            .map(|label| &label.weight)
+    pub fn incident_label_weights(&self, node: usize) -> impl Iterator<Item = &W> + '_ {
+        self.incident_label_indices(node)
+            .filter_map(|key| self.labels.get_index(key))
+            .map(|(_, label)| &label.weight)
     }
 
     /// Returns an iterator over the indices of the edges incident to `node`.
@@ -241,10 +253,7 @@ impl<N, W, L, V> Tree<N, L, W, V> {
     }
 
     /// Returns an iterator over the indices of the labels incident to `node`.
-    pub fn incident_label_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_
-    where
-        L: Eq + Hash,
-    {
+    pub fn incident_label_indices(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
         let first = self.nodes.get_index(node).and_then(|(_, n)| n.next_label);
 
         LabelIndexWalker {
@@ -268,10 +277,7 @@ impl<N, W, L, V> Tree<N, L, W, V> {
     }
 
     /// The number of edges and labels incident to `node`.
-    pub fn degree(&self, node: usize) -> usize
-    where
-        L: Eq + Hash,
-    {
+    pub fn degree(&self, node: usize) -> usize {
         self.incident_edge_indices(node).count() + self.incident_label_indices(node).count()
     }
 
@@ -299,7 +305,11 @@ impl<N, W, L, V> Tree<N, L, W, V> {
         self.labels.len()
     }
 
-    pub fn remove_node(&mut self, node: &N) -> Option<(V, SwapResult)>
+    pub fn remove_node(
+        &mut self,
+        node: &N,
+        mut edge_swapped: impl FnMut(SwapResult),
+    ) -> Option<(V, SwapResult)>
     where
         N: Eq + Hash,
         L: Eq + Hash,
@@ -312,9 +322,11 @@ impl<N, W, L, V> Tree<N, L, W, V> {
                 break;
             }
 
-            let Some(_) = self.remove_edge(next) else {
+            let Some((_, swap)) = self.remove_edge(next) else {
                 panic!("Edge index {} not found in tree", next);
             };
+
+            edge_swapped(swap);
         }
 
         let node = self.nodes.swap_remove_index(idx).unwrap().1;
@@ -382,12 +394,12 @@ impl<N, W, L, V> Tree<N, L, W, V> {
     /// The ids of all other labels remain valid. Unlinking the label from the
     /// singly linked list of labels at its vertex takes time linear in the
     /// number of labels attached to that vertex.
-    pub fn remove_label(&mut self, key: &L) -> Option<W>
+    pub fn remove_label(&mut self, key: &L) -> Option<(W, SwapResult)>
     where
         L: Eq + Hash,
     {
         let label_idx = self.labels.get_index_of(key)?;
-        let label = self.labels.swap_remove_index(label_idx).unwrap().1;
+        let label = self.labels.get_index(label_idx).unwrap().1;
         let next = label.next;
 
         self.fix_label_links(
@@ -396,7 +408,29 @@ impl<N, W, L, V> Tree<N, L, W, V> {
             next,
         );
 
-        Some(label.weight)
+        Some(self.swap_remove_label(label_idx))
+    }
+
+    fn swap_remove_label(&mut self, idx: usize) -> (W, SwapResult) {
+        let label = self.labels.swap_remove_index(idx).unwrap().1;
+
+        match self.labels.get_index(idx) {
+            None => (label.weight, SwapResult::None),
+            Some((_, l)) => {
+                self.fix_label_links(
+                    l.node,
+                    unsafe { NonMaxUsize::new_unchecked(self.labels.len()) },
+                    l.next,
+                );
+                (
+                    label.weight,
+                    SwapResult::Some {
+                        prev: self.labels.len(),
+                        current: idx,
+                    },
+                )
+            }
+        }
     }
 
     pub fn remove_edge(&mut self, edge: usize) -> Option<(W, SwapResult)> {

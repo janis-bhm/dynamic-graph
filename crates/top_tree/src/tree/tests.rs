@@ -20,7 +20,7 @@ fn remove_nodes() {
     assert_eq!(tree.edges.len(), 1);
     verify_tree(&tree);
 
-    tree.remove_node(&2);
+    tree.remove_node(&2, |_| ());
     assert_eq!(tree.edges.len(), 0);
     assert_eq!(tree.nodes.len(), 1);
     verify_tree(&tree);
@@ -54,19 +54,19 @@ fn labels_are_keyed_by_unique_id() {
     weights.sort_unstable();
     assert_eq!(weights, vec![100, 101]);
 
-    assert_eq!(tree.remove_label(&11), Some(101));
+    assert_eq!(tree.remove_label(&11).map(|(i, _)| i), Some(101));
     assert_eq!(tree.label_count(), 2);
     assert!(tree.label(&11).is_none());
     assert_eq!(tree.degree(u), 1);
     assert_eq!(tree.label_weight(&10), Some(&100));
 
     // Removing another label must not disturb the ids or payloads of the rest.
-    assert_eq!(tree.remove_label(&10), Some(100));
+    assert_eq!(tree.remove_label(&10).map(|(i, _)| i), Some(100));
     assert_eq!(tree.label_weight(&12), Some(&102));
     assert_eq!(tree.label(&12).unwrap().node_id(), v);
     assert_eq!(tree.degree(v), 1);
 
-    assert_eq!(tree.remove_label(&12), Some(102));
+    assert_eq!(tree.remove_label(&12).map(|(i, _)| i), Some(102));
     assert_eq!(tree.label_count(), 0);
     assert_eq!(tree.degree(v), 0);
 }
@@ -88,7 +88,7 @@ fn removing_node_remaps_its_labels() {
     tree.add_label(u, 10, 100);
     tree.add_label(v, 11, 101);
 
-    tree.remove_node(&1);
+    tree.remove_node(&1, |_| ());
 
     // `v` was swapped into `u`'s slot, so its label must now point at the new
     // node index.
