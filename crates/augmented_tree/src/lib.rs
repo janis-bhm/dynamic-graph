@@ -1985,25 +1985,25 @@ unsafe fn clone_subtree<K: Clone, V: Aggregate + Clone>(
     };
 
     unsafe {
-        ptr::addr_of_mut!((*cloned.as_ptr()).parent).write(parent_ptr);
-        ptr::addr_of_mut!((*cloned.as_ptr()).len).write(0);
+        (&raw mut (*cloned.as_ptr()).parent).write(parent_ptr);
+        (&raw mut (*cloned.as_ptr()).len).write(0);
         if let Some(index) = parent_idx {
-            ptr::addr_of_mut!((*cloned.as_ptr()).parent_idx).write(MaybeUninit::new(index));
+            (&raw mut (*cloned.as_ptr()).parent_idx).write(MaybeUninit::new(index));
         }
     }
 
     let aggregate = source_leaf.aggregate.clone();
-    unsafe { ptr::addr_of_mut!((*cloned.as_ptr()).aggregate).write(aggregate) };
+    unsafe { (&raw mut (*cloned.as_ptr()).aggregate).write(aggregate) };
 
     for i in 0..len {
         let key = unsafe { source_leaf.keys[i].assume_init_ref() }.clone();
         unsafe {
-            ptr::addr_of_mut!((*cloned.as_ptr()).keys[i]).write(MaybeUninit::new(key));
+            (&raw mut (*cloned.as_ptr()).keys[i]).write(MaybeUninit::new(key));
         }
 
         let value = unsafe { source_leaf.values[i].assume_init_ref() }.clone();
         unsafe {
-            ptr::addr_of_mut!((*cloned.as_ptr()).values[i]).write(MaybeUninit::new(value));
+            (&raw mut (*cloned.as_ptr()).values[i]).write(MaybeUninit::new(value));
         }
     }
 
@@ -2017,7 +2017,7 @@ unsafe fn clone_subtree<K: Clone, V: Aggregate + Clone>(
                 clone_subtree(source_child.cast(), height - 1, Some((cloned_internal, i)))
             };
             unsafe {
-                ptr::addr_of_mut!((*cloned_internal.as_ptr()).edges[i])
+                (&raw mut (*cloned_internal.as_ptr()).edges[i])
                     .write(MaybeUninit::new(cloned_child.cast()));
             }
         }
