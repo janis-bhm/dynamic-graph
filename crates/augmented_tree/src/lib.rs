@@ -2340,6 +2340,16 @@ impl<K, V: Aggregate> Default for BTree<K, V> {
     }
 }
 
+impl<K: Clone + Ord, V: Aggregate + Clone> Clone for BTree<K, V> {
+    fn clone(&self) -> Self {
+        let mut cloned = Self::new();
+        for (key, value) in self.iter() {
+            let _ = cloned.insert(key.clone(), value.clone());
+        }
+        cloned
+    }
+}
+
 impl<K, V> Drop for BTree<K, V> {
     fn drop(&mut self) {
         // SAFETY: the root is a valid subtree and is not used afterwards.

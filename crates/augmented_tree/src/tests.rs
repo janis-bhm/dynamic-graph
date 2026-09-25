@@ -407,6 +407,12 @@ mod key_drop {
         }
     }
 
+    impl Clone for Key {
+        fn clone(&self) -> Self {
+            Self::new(self.0, &self.1)
+        }
+    }
+
     impl PartialEq for Key {
         fn eq(&self, other: &Self) -> bool {
             self.0 == other.0
@@ -456,6 +462,44 @@ fn drops_keys_exactly_once() {
         counts.dropped.load(std::sync::atomic::Ordering::SeqCst),
         n as usize,
         "every key must be dropped exactly once"
+    );
+}
+
+#[test]
+fn cloned_tree_drops_each_key_once() {
+    use key_drop::{Counts, Key};
+    use std::sync::Arc;
+
+    let counts = Arc::new(Counts::default());
+    let n = if cfg!(miri) { 60 } else { 300 };
+    {
+        let mut tree: BTree<Key, Sum> = BTree::new();
+        for i in 0..n {
+            tree.insert(Key::new(i, &counts), Sum(1));
+        }
+
+        let cloned = tree.clone();
+        assert_eq!(cloned.len(), n as usize);
+        assert_eq!(cloned.aggregate(), &Sum(i64::from(n)));
+        for i in 0..n {
+            assert_eq!(cloned.get(&i), Some(&Sum(1)));
+        }
+        assert_eq!(
+            counts.created.load(std::sync::atomic::Ordering::SeqCst),
+            2 * n as usize
+        );
+
+        drop(cloned);
+        assert_eq!(
+            counts.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            n as usize,
+            "dropping the clone must drop only its keys"
+        );
+    }
+    assert_eq!(
+        counts.dropped.load(std::sync::atomic::Ordering::SeqCst),
+        2 * n as usize,
+        "every original and cloned key must be dropped exactly once"
     );
 }
 
