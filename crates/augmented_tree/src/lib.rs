@@ -1958,6 +1958,92 @@ unsafe fn drop_subtree<K, V>(node: NonNull<LeafNode<K, V>>, height: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// Cloning
+// ---------------------------------------------------------------------------
+
+/// Clones a node and its subtree while rebuilding links into the cloned tree.
+///
+/// # Safety
+/// `source` must be a valid subtree root of the given `height`.
+unsafe fn clone_subtree<K: Clone, V: Aggregate + Clone>(
+    source: NonNull<LeafNode<K, V>>,
+    height: usize,
+    parent: Option<(NonNull<InternalNode<K, V>>, usize)>,
+) -> NonNull<LeafNode<K, V>> {
+    let source_leaf = unsafe { source.as_ref() };
+    let len = usize::from(source_leaf.len);
+
+    let cloned = if height == 0 {
+        unsafe { alloc_node::<LeafNode<K, V>>() }
+    } else {
+        unsafe { alloc_node::<InternalNode<K, V>>().cast() }
+    };
+
+    let (parent_ptr, parent_idx) = match parent {
+        Some((parent, index)) => (Some(parent), Some(index as u16)),
+        None => (None, None),
+    };
+
+    unsafe {
+        ptr::addr_of_mut!((*cloned.as_ptr()).parent).write(parent_ptr);
+        ptr::addr_of_mut!((*cloned.as_ptr()).len).write(0);
+        if let Some(index) = parent_idx {
+            ptr::addr_of_mut!((*cloned.as_ptr()).parent_idx).write(MaybeUninit::new(index));
+        }
+    }
+
+    let aggregate = source_leaf.aggregate.clone();
+    unsafe { ptr::addr_of_mut!((*cloned.as_ptr()).aggregate).write(aggregate) };
+
+    for i in 0..len {
+        let key = unsafe { source_leaf.keys[i].assume_init_ref() }.clone();
+        unsafe {
+            ptr::addr_of_mut!((*cloned.as_ptr()).keys[i]).write(MaybeUninit::new(key));
+        }
+
+        let value = unsafe { source_leaf.values[i].assume_init_ref() }.clone();
+        unsafe {
+            ptr::addr_of_mut!((*cloned.as_ptr()).values[i]).write(MaybeUninit::new(value));
+        }
+    }
+
+    if height > 0 {
+        let source_internal = unsafe { &*source.cast::<InternalNode<K, V>>().as_ptr() };
+        let cloned_internal = cloned.cast::<InternalNode<K, V>>();
+        for i in 0..=len {
+            let source_child = unsafe { source_internal.edges[i].assume_init() };
+            // SAFETY: each source edge is a valid child subtree at `height - 1`.
+            let cloned_child = unsafe {
+                clone_subtree(source_child.cast(), height - 1, Some((cloned_internal, i)))
+            };
+            unsafe {
+                ptr::addr_of_mut!((*cloned_internal.as_ptr()).edges[i])
+                    .write(MaybeUninit::new(cloned_child.cast()));
+            }
+        }
+    }
+
+    unsafe { (&raw mut (*cloned.as_ptr()).len).write(source_leaf.len) }
+    cloned
+}
+
+impl<K: Clone, V: Aggregate + Clone> Clone for BTree<K, V> {
+    fn clone(&self) -> Self {
+        let height = self.root.height;
+        // SAFETY: the root and all descendants are valid nodes in this tree.
+        let node = unsafe { clone_subtree(self.root.node, height, None) };
+        Self {
+            root: NodeRef {
+                node,
+                height,
+                _marker: PhantomData,
+            },
+            length: self.length,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Dormant mutable reference
 // ---------------------------------------------------------------------------
 
@@ -2337,16 +2423,6 @@ impl<K, V: Aggregate> BTree<K, V> {
 impl<K, V: Aggregate> Default for BTree<K, V> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<K: Clone + Ord, V: Aggregate + Clone> Clone for BTree<K, V> {
-    fn clone(&self) -> Self {
-        let mut cloned = Self::new();
-        for (key, value) in self.iter() {
-            let _ = cloned.insert(key.clone(), value.clone());
-        }
-        cloned
     }
 }
 

@@ -478,12 +478,19 @@ fn cloned_tree_drops_each_key_once() {
             tree.insert(Key::new(i, &counts), Sum(1));
         }
 
-        let cloned = tree.clone();
+        let mut cloned = tree.clone();
         assert_eq!(cloned.len(), n as usize);
         assert_eq!(cloned.aggregate(), &Sum(i64::from(n)));
         for i in 0..n {
             assert_eq!(cloned.get(&i), Some(&Sum(1)));
         }
+        assert_eq!(
+            cloned.iter().map(|(key, _)| key.0).collect::<Vec<_>>(),
+            (0..n).collect::<Vec<_>>()
+        );
+        assert_eq!(cloned.remove(&(n / 2)), Some(Sum(1)));
+        assert_eq!(cloned.aggregate(), &Sum(i64::from(n) - 1));
+        assert_eq!(tree.get(&(n / 2)), Some(&Sum(1)));
         assert_eq!(
             counts.created.load(std::sync::atomic::Ordering::SeqCst),
             2 * n as usize
