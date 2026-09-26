@@ -988,12 +988,9 @@ where
         let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
         let parent_vertices = self.cl(node).flipped_boundary_vertices().to_boundary();
         let ctx = MergeContext {
-            left_boundary: left_vertices.count(),
-            right_boundary: right_vertices.count(),
-            boundary: parent_vertices.count(),
-            left_vertices,
-            right_vertices,
-            parent_vertices,
+            left_boundary: left_vertices,
+            right_boundary: right_vertices,
+            boundary: parent_vertices,
             central: shared(left_vertices, right_vertices),
         };
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);
@@ -1010,12 +1007,9 @@ where
         let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
         let parent_vertices = boundary_vertices.to_boundary();
         let ctx = MergeContext {
-            left_boundary: left_vertices.count(),
-            right_boundary: right_vertices.count(),
-            boundary: parent_vertices.count(),
-            left_vertices,
-            right_vertices,
-            parent_vertices,
+            left_boundary: left_vertices,
+            right_boundary: right_vertices,
+            boundary: parent_vertices,
             central: shared(left_vertices, right_vertices),
         };
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);

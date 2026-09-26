@@ -62,7 +62,7 @@ impl Summary for PathLen {
     }
 
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
-        if ctx.boundary == 2 {
+        if ctx.boundary.is_path() {
             PathLen {
                 len: u32::from(ctx.left_is_path_child()) * left.len
                     + u32::from(ctx.right_is_path_child()) * right.len,
@@ -124,7 +124,7 @@ impl Summary for PathSum {
     }
 
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
-        if ctx.boundary == 2 {
+        if ctx.boundary.is_path() {
             let mut sum = 0;
             let mut len = 0;
             if ctx.left_is_path_child() {
@@ -171,7 +171,7 @@ impl Summary for PathMax {
     }
 
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
-        if ctx.boundary == 2 {
+        if ctx.boundary.is_path() {
             let mut max = 0;
             if ctx.left_is_path_child() {
                 max = max.max(left.max);

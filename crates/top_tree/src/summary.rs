@@ -65,18 +65,12 @@ impl Boundary {
 /// cluster*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergeContext {
-    /// Number of boundary vertices of the left child.
-    pub left_boundary: u8,
-    /// Number of boundary vertices of the right child.
-    pub right_boundary: u8,
-    /// Number of boundary vertices of the merged cluster.
-    pub boundary: u8,
     /// Left child's boundary vertices, in the logical frame of `left.sum`.
-    pub left_vertices: Boundary,
+    pub left_boundary: Boundary,
     /// Right child's boundary vertices, in the logical frame of `right.sum`.
-    pub right_vertices: Boundary,
+    pub right_boundary: Boundary,
     /// Merged cluster's boundary vertices, in the logical frame of the new sum.
-    pub parent_vertices: Boundary,
+    pub boundary: Boundary,
     /// The vertex shared by the two children (their central vertex).
     pub central: usize,
 }
@@ -85,25 +79,26 @@ impl MergeContext {
     /// The merged cluster is a path cluster and both children are path
     /// children: this is a *compress*.
     pub fn is_compress(&self) -> bool {
-        self.boundary == 2 && self.left_boundary == 2 && self.right_boundary == 2
+        self.boundary.is_path() && self.left_boundary.is_path() && self.right_boundary.is_path()
     }
 
     /// The merged cluster is a path cluster and exactly one child is a path
     /// child: this is a *rake*.
     pub fn is_rake(&self) -> bool {
-        self.boundary == 2 && ((self.left_boundary == 2) ^ (self.right_boundary == 2))
+        self.boundary.is_path()
+            && ((self.left_boundary.is_path()) ^ (self.right_boundary.is_path()))
     }
 
     /// Whether the left child's cluster path is a sub-path of the merged
     /// cluster's path.
     pub fn left_is_path_child(&self) -> bool {
-        self.boundary == 2 && self.left_boundary == 2
+        self.boundary.is_path() && self.left_boundary.is_path()
     }
 
     /// Whether the right child's cluster path is a sub-path of the merged
     /// cluster's path.
     pub fn right_is_path_child(&self) -> bool {
-        self.boundary == 2 && self.right_boundary == 2
+        self.boundary.is_path() && self.right_boundary.is_path()
     }
 }
 
