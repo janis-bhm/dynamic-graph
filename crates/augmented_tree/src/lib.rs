@@ -23,6 +23,7 @@ use std::{
     alloc::{Layout, alloc, dealloc, handle_alloc_error},
     borrow::Borrow,
     cmp::Ordering,
+    fmt,
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{Bound, RangeBounds},
@@ -2548,3 +2549,17 @@ impl<K, V> Drop for BTree<K, V> {
         unsafe { drop_subtree(self.root.node, self.root.height) };
     }
 }
+
+impl<K: fmt::Debug, V: Aggregate + fmt::Debug> fmt::Debug for BTree<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K: PartialEq, V: Aggregate + PartialEq> PartialEq for BTree<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl<K: Eq, V: Aggregate + Eq> Eq for BTree<K, V> {}
