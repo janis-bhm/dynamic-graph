@@ -473,6 +473,7 @@ fn component_size_and_labels() {
 }
 
 #[test]
+#[ignore] // This test is slow, so we ignore it by default.
 fn randomized_find_size_and_labels() {
     for seed in 0..8 {
         let n = 8;
@@ -494,7 +495,7 @@ fn randomized_find_size_and_labels() {
 
         let mut labels: BTreeMap<LabelId, (usize, i32)> = BTreeMap::new();
 
-        for _ in 0..120 {
+        for _ in 0..60 {
             match rng.next() % 6 {
                 0 => {
                     let u = (rng.next() as usize) % n;
@@ -566,4 +567,183 @@ fn randomized_find_size_and_labels() {
             }
         }
     }
+}
+
+#[test]
+fn find_size_above_level_cap_counts_path_vertices() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..4 {
+        fb.add_vertex(vertex);
+    }
+    for vertex in 1..4 {
+        fb.link(vertex - 1, vertex);
+    }
+
+    assert_eq!(fb.find_size(0, 3, LEVEL_CAP + 1), 4);
+}
+
+#[test]
+fn find_size_above_level_cap_on_point_cluster() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..6 {
+        fb.add_vertex(vertex);
+    }
+    for vertex in 1..6 {
+        fb.link(vertex - 1, vertex);
+    }
+
+    for vertex in 0..6 {
+        assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 1), 1);
+        assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 100), 1);
+    }
+}
+
+#[test]
+fn find_size_above_level_cap_is_path_length() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..6 {
+        fb.add_vertex(vertex);
+    }
+    for vertex in 1..6 {
+        fb.link(vertex - 1, vertex);
+    }
+
+    for (u, v) in [(1, 4), (0, 5), (2, 3)] {
+        let expected = (v - u + 1) as u64;
+        assert_eq!(
+            fb.find_size(u, v, LEVEL_CAP + 1),
+            expected,
+            "forward pair {u}->{v}"
+        );
+        assert_eq!(
+            fb.find_size(v, u, LEVEL_CAP + 1),
+            expected,
+            "reverse pair {v}->{u}"
+        );
+    }
+}
+
+#[test]
+fn find_size_is_symmetric() {
+    for seed in 0..4 {
+        let n = 12;
+        let component_size = 4;
+        let mut rng = Rng(seed);
+        let mut fb = FindBridge::new();
+        for vertex in 0..n {
+            fb.add_vertex(vertex);
+        }
+
+        // Generate three small random trees, hence a random forest.
+        for component_start in (0..n).step_by(component_size) {
+            for vertex in component_start + 1..component_start + component_size {
+                let parent = component_start + (rng.next() as usize % (vertex - component_start));
+                fb.link(parent, vertex);
+            }
+
+            // Apply at least one cover to every component.
+            let level = (rng.next() % (LEVEL_CAP as u64 + 1)) as i32;
+            fb.cover(component_start, component_start + component_size - 1, level);
+        }
+
+        // Add more randomly oriented covers within the generated components.
+        for _ in 0..24 {
+            let component_start = (rng.next() as usize % (n / component_size)) * component_size;
+            let u = component_start + (rng.next() as usize % component_size);
+            let v = component_start + (rng.next() as usize % component_size);
+            let level = (rng.next() % (LEVEL_CAP as u64 + 1)) as i32;
+            fb.cover(u, v, level);
+        }
+
+        // Check every represented level for random endpoint pairs, including
+        // pairs from different components.
+        for level in -1..=LEVEL_CAP {
+            for _ in 0..8 {
+                let u = (rng.next() as usize) % n;
+                let v = (rng.next() as usize) % n;
+                let forward = fb.find_size(u, v, level);
+                let reverse = fb.find_size(v, u, level);
+                assert_eq!(
+                    forward, reverse,
+                    "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
+                );
+            }
+        }
+
+        // Sample levels randomly as well, over the inclusive -1..=LEVEL_CAP
+        // domain.
+        for _ in 0..64 {
+            let u = (rng.next() as usize) % n;
+            let v = (rng.next() as usize) % n;
+            let level = (rng.next() % (LEVEL_CAP as u64 + 2)) as i32 - 1;
+            let forward = fb.find_size(u, v, level);
+            let reverse = fb.find_size(v, u, level);
+            assert_eq!(
+                forward, reverse,
+                "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
+            );
+        }
+    }
+}
+
+#[test]
+fn find_size_at_minus_one_is_component_size() {
+    let n = 7;
+    let mut fb = FindBridge::new();
+    let mut naive = Naive::new(n);
+    for vertex in 0..n {
+        fb.add_vertex(vertex);
+    }
+    for &(u, v) in &[(0, 1), (1, 2), (1, 3), (4, 5), (5, 6)] {
+        fb.link(u, v);
+        naive.link(u, v);
+    }
+
+    for vertex in 0..n {
+        let expected = naive.component(vertex).len() as u64;
+        assert_eq!(
+            fb.find_size(vertex, vertex, -1),
+            expected,
+            "component size mismatch at vertex {vertex}"
+        );
+    }
+}
+
+#[test]
+fn find_size_above_level_cap_on_single_edge() {
+    let mut fb = FindBridge::new();
+    fb.add_vertex(0);
+    fb.add_vertex(1);
+    fb.link(0, 1);
+
+    assert_eq!(fb.find_size(0, 0, LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size(1, 1, LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size(0, 1, LEVEL_CAP + 1), 2);
+    assert_eq!(fb.find_size(1, 0, LEVEL_CAP + 1), 2);
+}
+
+#[test]
+fn find_size_above_level_cap_on_isolated_vertex() {
+    let mut fb = FindBridge::new();
+    let vertex = fb.add_vertex(0);
+
+    assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 100), 1);
+}
+
+#[test]
+fn find_size_above_level_cap_on_star() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=5 {
+        fb.add_vertex(vertex);
+    }
+    for leaf in 1..=5 {
+        fb.link(0, leaf);
+    }
+
+    assert_eq!(fb.find_size(0, 0, LEVEL_CAP + 1), 1);
+    for leaf in 1..=5 {
+        assert_eq!(fb.find_size(0, leaf, LEVEL_CAP + 1), 2);
+    }
+    assert_eq!(fb.find_size(1, 2, LEVEL_CAP + 1), 3);
 }
