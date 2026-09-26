@@ -21,6 +21,7 @@ struct Agg {
 
 impl Summary for Agg {
     type Tag = ();
+    type LabelKey = u32;
 
     fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
         Agg {
@@ -29,7 +30,7 @@ impl Summary for Agg {
         }
     }
 
-    fn label(_w: &(), _v: usize) -> Self {
+    fn label(_key: &u32, _v: usize) -> Self {
         Agg { edges: 0, xor: 0 }
     }
 
@@ -50,12 +51,13 @@ struct PathLen {
 
 impl Summary for PathLen {
     type Tag = ();
+    type LabelKey = u32;
 
     fn tree_edge(_w: &(), _u: usize, _v: usize) -> Self {
         PathLen { len: 1 }
     }
 
-    fn label(_w: &(), _v: usize) -> Self {
+    fn label(_key: &u32, _v: usize) -> Self {
         PathLen { len: 0 }
     }
 
@@ -82,6 +84,7 @@ struct PathSum {
 
 impl Summary for PathSum {
     type Tag = i64;
+    type LabelKey = u32;
 
     fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
         PathSum {
@@ -90,7 +93,7 @@ impl Summary for PathSum {
         }
     }
 
-    fn label(_w: &(), _v: usize) -> Self {
+    fn label(_key: &u32, _v: usize) -> Self {
         PathSum { sum: 0, len: 0 }
     }
 
@@ -129,6 +132,7 @@ struct PathMax {
 
 impl Summary for PathMax {
     type Tag = ();
+    type LabelKey = u32;
 
     fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
         PathMax {
@@ -136,7 +140,7 @@ impl Summary for PathMax {
         }
     }
 
-    fn label(_w: &(), _v: usize) -> Self {
+    fn label(_key: &u32, _v: usize) -> Self {
         PathMax { max: 0 }
     }
 
@@ -163,6 +167,7 @@ struct DirectedPath {
 
 impl Summary for DirectedPath {
     type Tag = ();
+    type LabelKey = u32;
 
     fn tree_edge(_w: &(), u: usize, v: usize) -> Self {
         DirectedPath {
@@ -170,7 +175,7 @@ impl Summary for DirectedPath {
         }
     }
 
-    fn label(_w: &(), _v: usize) -> Self {
+    fn label(_key: &u32, _v: usize) -> Self {
         DirectedPath { edges: Vec::new() }
     }
 
@@ -190,12 +195,12 @@ impl Summary for DirectedPath {
     }
 }
 
-struct Harness<S: Summary> {
+struct Harness<S: Summary<LabelKey = u32>> {
     tt: TopTree<u32, u32, S>,
     adj: BTreeMap<usize, BTreeSet<usize>>,
 }
 
-impl<S: Summary> Harness<S> {
+impl<S: Summary<LabelKey = u32>> Harness<S> {
     fn new(n: usize) -> Self {
         let mut tt = TopTree::new();
         let mut adj = BTreeMap::new();
@@ -260,7 +265,7 @@ impl<S: Summary> Harness<S> {
     }
 }
 
-fn live_roots<S: Summary>(tt: &TopTree<u32, u32, S>) -> Vec<usize> {
+fn live_roots<S: Summary<LabelKey = u32>>(tt: &TopTree<u32, u32, S>) -> Vec<usize> {
     tt.nodes
         .iter()
         .enumerate()
@@ -268,7 +273,7 @@ fn live_roots<S: Summary>(tt: &TopTree<u32, u32, S>) -> Vec<usize> {
         .collect()
 }
 
-fn collect_leaves<S: Summary>(
+fn collect_leaves<S: Summary<LabelKey = u32>>(
     tt: &TopTree<u32, u32, S>,
     node: usize,
     leaves: &mut Vec<usize>,
@@ -336,7 +341,7 @@ impl Boundaries {
 }
 
 /// Counts the leaves below `node` incident to `vertex`.
-fn count_incident_leaves<S: Summary>(
+fn count_incident_leaves<S: Summary<LabelKey = u32>>(
     tt: &TopTree<u32, u32, S>,
     node: usize,
     vertex: usize,
@@ -375,11 +380,14 @@ fn count_incident_leaves<S: Summary>(
 /// The invariant checked for every internal node is: the rightmost boundary of
 /// the materialized left child and the leftmost boundary of the materialized
 /// right child must both exist and equal the central vertex.
-fn check_node_boundaries<S: Summary>(tt: &TopTree<u32, u32, S>, node: usize) -> Boundaries {
+fn check_node_boundaries<S: Summary<LabelKey = u32>>(
+    tt: &TopTree<u32, u32, S>,
+    node: usize,
+) -> Boundaries {
     check_node_boundaries_in(tt, node, false)
 }
 
-fn check_node_boundaries_in<S: Summary>(
+fn check_node_boundaries_in<S: Summary<LabelKey = u32>>(
     tt: &TopTree<u32, u32, S>,
     node: usize,
     parity: bool,
@@ -510,7 +518,7 @@ fn check_node_boundaries_in<S: Summary>(
     materialized
 }
 
-fn check_invariants<S: Summary>(h: &Harness<S>) {
+fn check_invariants<S: Summary<LabelKey = u32>>(h: &Harness<S>) {
     let tt = &h.tt;
 
     for (i, node) in tt.nodes.iter().enumerate() {
@@ -602,7 +610,11 @@ fn check_invariants<S: Summary>(h: &Harness<S>) {
     }
 }
 
-fn path_edges(h: &Harness<impl Summary>, u: usize, v: usize) -> Option<Vec<(usize, usize)>> {
+fn path_edges(
+    h: &Harness<impl Summary<LabelKey = u32>>,
+    u: usize,
+    v: usize,
+) -> Option<Vec<(usize, usize)>> {
     let mut prev: BTreeMap<usize, usize> = BTreeMap::new();
     let mut seen = BTreeSet::from([u]);
     let mut queue = VecDeque::from([u]);
