@@ -107,14 +107,19 @@ macro_rules! impl_nonmax_type {
         impl $name {
             pub const fn new(value: $int) -> Option<Self> {
                 if let $pat = value {
-                    Some(unsafe { $name(core::mem::transmute(value)) })
+                    // SAFETY: The value is guaranteed to be in the valid range for this type.
+                    Some($name(unsafe { core::mem::transmute::<$int, pattern_type!($int is $pat)>(value) }))
                 } else {
                     None
                 }
             }
 
+            /// # Safety
+            /// The caller must ensure that `value` is in the valid range for this type.
             pub const unsafe fn new_unchecked(value: $int) -> Self {
-                $name(unsafe {core::mem::transmute(value) })
+                    // SAFETY: The value is guaranteed to be in the valid range
+                    // for this type by the caller
+                    $name(unsafe { core::mem::transmute::<$int, pattern_type!($int is $pat)>(value) })
             }
 
             pub const fn get(self) -> $int {
@@ -165,8 +170,6 @@ macro_rules! impl_nonmax_type {
         }
     };
 }
-
-const USIZE_MINUS_TWO_BITS_MASK: usize = usize::MAX >> 3;
 
 impl_nonmax_type!(
     pub struct NonMaxUsize(usize is 0..=0xFFFFFFFFFFFFFFFE),
