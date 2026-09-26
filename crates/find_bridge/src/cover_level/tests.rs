@@ -2,6 +2,30 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::*;
 
+fn lvl(i: i32) -> Level {
+    Level::new(i).unwrap()
+}
+
+#[test]
+fn level_bounds_and_conversions() {
+    assert_eq!(Level::new(-1), Some(Level::MIN));
+    assert_eq!(Level::new(LEVEL_CAP), Some(Level::MAX));
+    assert_eq!(Level::new(-2), None);
+    assert_eq!(Level::new(LEVEL_CAP + 1), None);
+    assert_eq!(Level::new(NO_COVER), None);
+
+    assert_eq!(Level::try_from(-1), Ok(Level::MIN));
+    assert_eq!(Level::try_from(LEVEL_CAP), Ok(Level::MAX));
+    assert_eq!(Level::try_from(-2), Err(()));
+    assert_eq!(Level::try_from(LEVEL_CAP + 1), Err(()));
+    assert_eq!(Level::try_from(NO_COVER), Err(()));
+
+    for (value, level) in [(-1, Level::MIN), (0, lvl(0)), (LEVEL_CAP, Level::MAX)] {
+        assert_eq!(i32::from(level), value);
+        assert_eq!(Level::try_from(value), Ok(level));
+    }
+}
+
 /// A straightforward (slow) reference implementation of the same operations.
 struct Naive {
     adj: BTreeMap<usize, BTreeSet<usize>>,
@@ -263,18 +287,18 @@ fn single_edge_is_a_bridge() {
     assert!(fb.find_bridge(a).is_some());
     assert!(fb.find_bridge_between(a, b).is_some());
 
-    fb.cover(a, b, 2);
+    fb.cover(a, b, lvl(2));
     assert_eq!(fb.cover_level(a), 2);
     assert_eq!(fb.cover_level_between(a, b), 2);
     assert!(fb.find_bridge(a).is_none());
 
-    fb.uncover(a, b, 2);
+    fb.uncover(a, b, lvl(2));
     assert_eq!(fb.cover_level(a), -1);
     assert!(fb.find_bridge_between(a, b).is_some());
 
     // Uncovering with a too small level does nothing.
-    fb.cover(a, b, 4);
-    fb.uncover(a, b, 3);
+    fb.cover(a, b, lvl(4));
+    fb.uncover(a, b, lvl(3));
     assert_eq!(fb.cover_level_between(a, b), 4);
 }
 
@@ -316,7 +340,7 @@ fn path_cover_and_uncover() {
         naive.link(i - 1, i);
     }
 
-    fb.cover(1, 5, 3);
+    fb.cover(1, 5, lvl(3));
     naive.cover_path(1, 5, 3);
     assert_eq!(fb.cover_level_between(0, 6), -1);
     assert_eq!(fb.cover_level_between(2, 4), 3);
@@ -324,11 +348,11 @@ fn path_cover_and_uncover() {
     assert_eq!(fb.cover_level_between(0, 5), -1);
     check_against_naive(&mut fb, &naive, n);
 
-    fb.cover(0, 6, 5);
+    fb.cover(0, 6, lvl(5));
     naive.cover_path(0, 6, 5);
     check_against_naive(&mut fb, &naive, n);
 
-    fb.uncover(0, 6, 4);
+    fb.uncover(0, 6, lvl(4));
     naive.uncover_path(0, 6, 4);
     check_against_naive(&mut fb, &naive, n);
 }
@@ -358,11 +382,11 @@ fn randomized_cover_uncover_no_naive() {
                 match op {
                     0 => {
                         let level = (rng.next() % levels) as i32;
-                        fb.cover(u, v, level);
+                        fb.cover(u, v, lvl(level));
                     }
                     1 => {
                         let level = (rng.next() % levels) as i32;
-                        fb.uncover(u, v, level);
+                        fb.uncover(u, v, lvl(level));
                     }
                     _ => {}
                 }
@@ -400,12 +424,12 @@ fn randomized_cover_uncover() {
             match op {
                 0 if reachable => {
                     let level = (rng.next() % levels) as i32;
-                    fb.cover(u, v, level);
+                    fb.cover(u, v, lvl(level));
                     naive.cover_path(u, v, level);
                 }
                 1 if reachable => {
                     let level = (rng.next() % levels) as i32;
-                    fb.uncover(u, v, level);
+                    fb.uncover(u, v, lvl(level));
                     naive.uncover_path(u, v, level);
                 }
                 2 if !edges.is_empty() => {
@@ -509,7 +533,7 @@ fn component_size_and_labels() {
     assert_eq!(fb.find_size(3, 3, -1), 6);
 
     // Cover 1..4 at level 2.
-    fb.cover(1, 4, 2);
+    fb.cover(1, 4, lvl(2));
     // With threshold 3, only the path edges are all "vertex-level", so every
     // vertex counts (CoverLevel of a vertex to itself is the sentinel).
     // With threshold 2, vertices whose projection path uses an uncovered edge
@@ -519,16 +543,16 @@ fn component_size_and_labels() {
     // for i <= 2.
     assert_eq!(fb.find_size(0, 5, 2), 6);
 
-    let a = fb.add_label(2, 1);
-    let b = fb.add_label(4, 2);
-    let c = fb.add_label(0, 1);
-    assert_eq!(fb.find_first_label(0, 5, 1), Some(c));
-    assert_eq!(fb.find_first_label(0, 5, 2), Some(b));
-    assert_eq!(fb.find_first_label(3, 5, 1), Some(a));
-    assert_eq!(fb.find_first_label(0, 1, 2), Some(b));
+    let a = fb.add_label(2, lvl(1));
+    let b = fb.add_label(4, lvl(2));
+    let c = fb.add_label(0, lvl(1));
+    assert_eq!(fb.find_first_label(0, 5, lvl(1)), Some(c));
+    assert_eq!(fb.find_first_label(0, 5, lvl(2)), Some(b));
+    assert_eq!(fb.find_first_label(3, 5, lvl(1)), Some(a));
+    assert_eq!(fb.find_first_label(0, 1, lvl(2)), Some(b));
 
-    fb.remove_label(b);
-    assert_eq!(fb.find_first_label(0, 5, 2), None);
+    assert_eq!(fb.remove_label(b), Some((4, lvl(2))));
+    assert_eq!(fb.find_first_label(0, 5, lvl(2)), None);
     let _ = a;
 }
 
@@ -542,11 +566,11 @@ fn find_first_label_off_path_branch() {
         fb.link(u, v);
     }
 
-    fb.cover(1, 6, 2);
-    let near = fb.add_label(6, 2);
-    fb.add_label(3, 2);
+    fb.cover(1, 6, lvl(2));
+    let near = fb.add_label(6, lvl(2));
+    fb.add_label(3, lvl(2));
 
-    assert_eq!(fb.find_first_label(0, 4, 2), Some(near));
+    assert_eq!(fb.find_first_label(0, 4, lvl(2)), Some(near));
 }
 
 #[test]
@@ -559,17 +583,17 @@ fn find_first_label_star_cover() {
         fb.link(0, leaf);
     }
 
-    fb.cover(0, 2, 1);
-    let good = fb.add_label(2, 1);
-    fb.add_label(3, 1);
-    assert_eq!(fb.find_first_label(0, 1, 1), Some(good));
+    fb.cover(0, 2, lvl(1));
+    let good = fb.add_label(2, lvl(1));
+    fb.add_label(3, lvl(1));
+    assert_eq!(fb.find_first_label(0, 1, lvl(1)), Some(good));
 
     fb.remove_label(good);
-    assert_eq!(fb.find_first_label(0, 1, 1), None);
+    assert_eq!(fb.find_first_label(0, 1, lvl(1)), None);
 
-    fb.cover(0, 4, 1);
-    let good2 = fb.add_label(4, 1);
-    assert_eq!(fb.find_first_label(0, 1, 1), Some(good2));
+    fb.cover(0, 4, lvl(1));
+    let good2 = fb.add_label(4, lvl(1));
+    assert_eq!(fb.find_first_label(0, 1, lvl(1)), Some(good2));
 }
 
 #[test]
@@ -579,11 +603,11 @@ fn find_first_label_v_equals_w() {
         fb.add_vertex(vertex);
     }
     fb.link(0, 1);
-    let l = fb.add_label(0, 1);
-    assert_eq!(fb.find_first_label(0, 0, 1), Some(l));
+    let l = fb.add_label(0, lvl(1));
+    assert_eq!(fb.find_first_label(0, 0, lvl(1)), Some(l));
 
-    let l2 = fb.add_label(2, 1);
-    assert_eq!(fb.find_first_label(2, 2, 1), Some(l2));
+    let l2 = fb.add_label(2, lvl(1));
+    assert_eq!(fb.find_first_label(2, 2, lvl(1)), Some(l2));
 }
 
 #[test]
@@ -594,10 +618,10 @@ fn find_first_label_disconnected() {
     }
     fb.link(0, 1);
     fb.link(2, 3);
-    fb.add_label(0, 1);
-    fb.add_label(2, 1);
+    fb.add_label(0, lvl(1));
+    fb.add_label(2, lvl(1));
 
-    assert_eq!(fb.find_first_label(0, 2, 1), None);
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), None);
 }
 
 #[test]
@@ -609,10 +633,10 @@ fn find_first_label_prefers_nearest() {
     for vertex in 1..=5 {
         fb.link(vertex - 1, vertex);
     }
-    let id_at_1 = fb.add_label(1, 0);
-    fb.add_label(4, 0);
+    let id_at_1 = fb.add_label(1, lvl(0));
+    fb.add_label(4, lvl(0));
 
-    assert_eq!(fb.find_first_label(0, 5, 0), Some(id_at_1));
+    assert_eq!(fb.find_first_label(0, 5, lvl(0)), Some(id_at_1));
 }
 
 #[test]
@@ -624,22 +648,22 @@ fn find_first_label_after_uncover() {
     for (u, v) in [(0, 1), (1, 2), (1, 3)] {
         fb.link(u, v);
     }
-    let path_label = fb.add_label(1, 1);
-    let branch_label = fb.add_label(3, 1);
+    let path_label = fb.add_label(1, lvl(1));
+    let branch_label = fb.add_label(3, lvl(1));
 
-    fb.cover(0, 2, 1);
-    assert_eq!(fb.find_first_label(0, 2, 1), Some(path_label));
-    fb.uncover(0, 2, 1);
+    fb.cover(0, 2, lvl(1));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(path_label));
+    fb.uncover(0, 2, lvl(1));
     // The label remains valid because its projection is its own vertex, whose
     // CoverLevel is the no-cover sentinel.
-    assert_eq!(fb.find_first_label(0, 2, 1), Some(path_label));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(path_label));
 
     fb.remove_label(path_label);
-    assert_eq!(fb.find_first_label(0, 2, 1), None);
-    fb.cover(1, 3, 1);
-    assert_eq!(fb.find_first_label(0, 2, 1), Some(branch_label));
-    fb.uncover(1, 3, 1);
-    assert_eq!(fb.find_first_label(0, 2, 1), None);
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), None);
+    fb.cover(1, 3, lvl(1));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(branch_label));
+    fb.uncover(1, 3, lvl(1));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), None);
 }
 
 #[test]
@@ -672,7 +696,7 @@ fn randomized_find_size_and_labels() {
                     let v = (rng.next() as usize) % n;
                     if u != v && naive.path_vertices(u, v).is_some() {
                         let level = (rng.next() % levels) as i32;
-                        fb.cover(u, v, level);
+                        fb.cover(u, v, lvl(level));
                         naive.cover_path(u, v, level);
                     }
                 }
@@ -681,7 +705,7 @@ fn randomized_find_size_and_labels() {
                     let v = (rng.next() as usize) % n;
                     if u != v && naive.path_vertices(u, v).is_some() {
                         let level = (rng.next() % levels) as i32;
-                        fb.uncover(u, v, level);
+                        fb.uncover(u, v, lvl(level));
                         naive.uncover_path(u, v, level);
                     }
                 }
@@ -705,7 +729,7 @@ fn randomized_find_size_and_labels() {
                 4 => {
                     let v = (rng.next() as usize) % n;
                     let level = (rng.next() % levels) as i32;
-                    let id = fb.add_label(v, level);
+                    let id = fb.add_label(v, lvl(level));
                     labels.insert(id, (v, level));
                 }
                 _ => {
@@ -728,7 +752,7 @@ fn randomized_find_size_and_labels() {
                     naive_find_size(&naive, n, v, w, i),
                     "find_size({v}, {w}, {i}) mismatch (seed {seed})"
                 );
-                let got = fb.find_first_label(v, w, i);
+                let got = fb.find_first_label(v, w, lvl(i));
                 match naive_find_first_label(&naive, &labels, v, w, i) {
                     None => assert!(
                         got.is_none(),
@@ -800,7 +824,7 @@ fn incident_mask_matches_naive() {
                     let v = (rng.next() as usize) % n;
                     if u != v && naive.path_vertices(u, v).is_some() {
                         let level = (rng.next() % levels) as i32;
-                        fb.cover(u, v, level);
+                        fb.cover(u, v, lvl(level));
                         naive.cover_path(u, v, level);
                     }
                 }
@@ -809,7 +833,7 @@ fn incident_mask_matches_naive() {
                     let v = (rng.next() as usize) % n;
                     if u != v && naive.path_vertices(u, v).is_some() {
                         let level = (rng.next() % levels) as i32;
-                        fb.uncover(u, v, level);
+                        fb.uncover(u, v, lvl(level));
                         naive.uncover_path(u, v, level);
                     }
                 }
@@ -833,7 +857,7 @@ fn incident_mask_matches_naive() {
                 4 => {
                     let v = (rng.next() as usize) % n;
                     let level = (rng.next() % (levels as u64 + 1)) as i32 - 1;
-                    let id = fb.add_label(v, level);
+                    let id = fb.add_label(v, lvl(level));
                     labels.insert(id, (v, level));
                 }
                 _ => {
@@ -859,7 +883,7 @@ fn incident_mask_matches_naive() {
                 if connected {
                     let expected = naive_has_incident(&naive, &labels, v, w, level);
                     let mask = fb.debug_root_incident(v, w);
-                    let actual = mask & super::level_bit(level) != 0;
+                    let actual = mask & super::level_bit(lvl(level)) != 0;
                     assert_eq!(
                         actual, expected,
                         "incident({v}, {w}, {level}) mismatch (seed {seed})"
@@ -869,7 +893,7 @@ fn incident_mask_matches_naive() {
                     // summary whose mask was returned by the debug method.
                     let summary_has = {
                         let summary = fb.top_tree.expose_path(v, w);
-                        summary.map_or(false, |s| super::incident_has(&s, level))
+                        summary.map_or(false, |s| super::incident_has(&s, lvl(level)))
                     };
                     fb.top_tree.deexpose(w);
                     fb.top_tree.deexpose(v);
@@ -954,7 +978,11 @@ fn find_size_is_symmetric() {
 
             // Apply at least one cover to every component.
             let level = (rng.next() % (LEVEL_CAP as u64 + 1)) as i32;
-            fb.cover(component_start, component_start + component_size - 1, level);
+            fb.cover(
+                component_start,
+                component_start + component_size - 1,
+                lvl(level),
+            );
         }
 
         // Add more randomly oriented covers within the generated components.
@@ -963,7 +991,7 @@ fn find_size_is_symmetric() {
             let u = component_start + (rng.next() as usize % component_size);
             let v = component_start + (rng.next() as usize % component_size);
             let level = (rng.next() % (LEVEL_CAP as u64 + 1)) as i32;
-            fb.cover(u, v, level);
+            fb.cover(u, v, lvl(level));
         }
 
         // Check every represented level for random endpoint pairs, including

@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```
-//! use find_bridge::FindBridge;
+//! use find_bridge::{FindBridge, Level};
 //!
 //! let mut graph = FindBridge::new();
 //! let a = graph.add_vertex(0);
@@ -24,19 +24,20 @@
 //! let c = graph.add_vertex(2);
 //! graph.link(a, b);
 //! graph.link(b, c);
+//! let level = Level::new(0).unwrap();
 //!
 //! // Every tree edge starts out as a bridge.
 //! assert_eq!(graph.find_bridge(a), Some((a, b)));
 //!
 //! // Cover the whole path with a (non-tree) edge; nothing is a bridge now.
-//! graph.cover(a, c, 0);
+//! graph.cover(a, c, level);
 //! assert_eq!(graph.find_bridge(a), None);
 //!
 //! // Remove the cover again.
-//! graph.uncover(a, c, 0);
+//! graph.uncover(a, c, level);
 //! assert!(graph.find_bridge_between(a, c).is_some());
 //! ```
 
 mod cover_level;
 
-pub use cover_level::{CoverLevel, CoverTag, Edge, FindBridge, LabelId, LabelKey, NO_COVER};
+pub use cover_level::{CoverLevel, CoverTag, Edge, FindBridge, LabelId, LabelKey, Level, NO_COVER};
