@@ -39,4 +39,4 @@
 
 mod cover_level;
 
-pub use cover_level::{CoverLevel, CoverTag, Edge, FindBridge, LabelId, NO_COVER};
+pub use cover_level::{CoverLevel, CoverTag, Edge, FindBridge, LabelId, LabelKey, NO_COVER};

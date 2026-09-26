@@ -471,6 +471,28 @@ fn naive_find_first_label(
     None
 }
 
+fn naive_has_incident(
+    naive: &Naive,
+    labels: &BTreeMap<LabelId, (usize, i32)>,
+    v: usize,
+    w: usize,
+    level: i32,
+) -> bool {
+    let Some(path) = naive.path_vertices(v, w) else {
+        return false;
+    };
+    let projection = naive.projections(&path);
+    labels.values().any(|&(u, label_level)| {
+        if label_level != level {
+            return false;
+        }
+        let Some(&m) = projection.get(&u) else {
+            return false;
+        };
+        naive.cover_between(u, m) >= level
+    })
+}
+
 #[test]
 fn component_size_and_labels() {
     let n = 6;
@@ -508,6 +530,116 @@ fn component_size_and_labels() {
     fb.remove_label(b);
     assert_eq!(fb.find_first_label(0, 5, 2), None);
     let _ = a;
+}
+
+#[test]
+fn find_first_label_off_path_branch() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=6 {
+        fb.add_vertex(vertex);
+    }
+    for (u, v) in [(0, 1), (1, 2), (2, 3), (3, 4), (1, 5), (5, 6)] {
+        fb.link(u, v);
+    }
+
+    fb.cover(1, 6, 2);
+    let near = fb.add_label(6, 2);
+    fb.add_label(3, 2);
+
+    assert_eq!(fb.find_first_label(0, 4, 2), Some(near));
+}
+
+#[test]
+fn find_first_label_star_cover() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=4 {
+        fb.add_vertex(vertex);
+    }
+    for leaf in 1..=4 {
+        fb.link(0, leaf);
+    }
+
+    fb.cover(0, 2, 1);
+    let good = fb.add_label(2, 1);
+    fb.add_label(3, 1);
+    assert_eq!(fb.find_first_label(0, 1, 1), Some(good));
+
+    fb.remove_label(good);
+    assert_eq!(fb.find_first_label(0, 1, 1), None);
+
+    fb.cover(0, 4, 1);
+    let good2 = fb.add_label(4, 1);
+    assert_eq!(fb.find_first_label(0, 1, 1), Some(good2));
+}
+
+#[test]
+fn find_first_label_v_equals_w() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=2 {
+        fb.add_vertex(vertex);
+    }
+    fb.link(0, 1);
+    let l = fb.add_label(0, 1);
+    assert_eq!(fb.find_first_label(0, 0, 1), Some(l));
+
+    let l2 = fb.add_label(2, 1);
+    assert_eq!(fb.find_first_label(2, 2, 1), Some(l2));
+}
+
+#[test]
+fn find_first_label_disconnected() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..4 {
+        fb.add_vertex(vertex);
+    }
+    fb.link(0, 1);
+    fb.link(2, 3);
+    fb.add_label(0, 1);
+    fb.add_label(2, 1);
+
+    assert_eq!(fb.find_first_label(0, 2, 1), None);
+}
+
+#[test]
+fn find_first_label_prefers_nearest() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=5 {
+        fb.add_vertex(vertex);
+    }
+    for vertex in 1..=5 {
+        fb.link(vertex - 1, vertex);
+    }
+    let id_at_1 = fb.add_label(1, 0);
+    fb.add_label(4, 0);
+
+    assert_eq!(fb.find_first_label(0, 5, 0), Some(id_at_1));
+}
+
+#[test]
+fn find_first_label_after_uncover() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=3 {
+        fb.add_vertex(vertex);
+    }
+    for (u, v) in [(0, 1), (1, 2), (1, 3)] {
+        fb.link(u, v);
+    }
+    let path_label = fb.add_label(1, 1);
+    let branch_label = fb.add_label(3, 1);
+
+    fb.cover(0, 2, 1);
+    assert_eq!(fb.find_first_label(0, 2, 1), Some(path_label));
+    fb.uncover(0, 2, 1);
+    // The label remains valid because its projection is its own vertex, whose
+    // CoverLevel is the no-cover sentinel.
+    assert_eq!(fb.find_first_label(0, 2, 1), Some(path_label));
+
+    fb.remove_label(path_label);
+    assert_eq!(fb.find_first_label(0, 2, 1), None);
+    fb.cover(1, 3, 1);
+    assert_eq!(fb.find_first_label(0, 2, 1), Some(branch_label));
+    fb.uncover(1, 3, 1);
+    assert_eq!(fb.find_first_label(0, 2, 1), None);
 }
 
 #[test]
@@ -596,12 +728,153 @@ fn randomized_find_size_and_labels() {
                     naive_find_size(&naive, n, v, w, i),
                     "find_size({v}, {w}, {i}) mismatch (seed {seed})"
                 );
-                let expected = naive_find_first_label(&naive, &labels, v, w, i);
+                let got = fb.find_first_label(v, w, i);
+                match naive_find_first_label(&naive, &labels, v, w, i) {
+                    None => assert!(
+                        got.is_none(),
+                        "expected no label ({v},{w},{i}, seed {seed})"
+                    ),
+                    Some(_) => {
+                        let id = got.expect("a label must be found");
+                        let &(u, l) = labels.get(&id).expect("returned label must be live");
+                        assert_eq!(l, i, "wrong level ({v},{w},{i}, seed {seed})");
+                        let path = naive.path_vertices(v, w).unwrap();
+                        let projection = naive.projections(&path);
+                        let m = *projection.get(&u).expect("label must be in the component");
+                        assert!(
+                            naive.cover_between(u, m) >= i,
+                            "invalid label ({v},{w},{i}, seed {seed})"
+                        );
+                        let dist = path.iter().position(|&x| x == m).unwrap();
+                        let best = labels
+                            .values()
+                            .filter_map(|&(u2, l2)| {
+                                if l2 != i {
+                                    return None;
+                                }
+                                let m2 = *projection.get(&u2)?;
+                                if naive.cover_between(u2, m2) >= i {
+                                    Some(path.iter().position(|&x| x == m2).unwrap())
+                                } else {
+                                    None
+                                }
+                            })
+                            .min()
+                            .unwrap();
+                        assert_eq!(
+                            dist, best,
+                            "not a minimal-distance label ({v},{w},{i}, seed {seed})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn incident_mask_matches_naive() {
+    for seed in 0..5 {
+        let n = 8;
+        let levels = 5;
+        let mut rng = Rng(seed);
+        let mut fb = FindBridge::new();
+        let mut naive = Naive::new(n);
+        for i in 0..n {
+            fb.add_vertex(i);
+        }
+
+        let mut edges: Vec<(usize, usize)> = Vec::new();
+        for v in 1..n {
+            let u = (rng.next() as usize) % v;
+            fb.link(u, v);
+            naive.link(u, v);
+            edges.push((u, v));
+        }
+
+        let mut labels: BTreeMap<LabelId, (usize, i32)> = BTreeMap::new();
+        for _ in 0..30 {
+            match rng.next() % 6 {
+                0 => {
+                    let u = (rng.next() as usize) % n;
+                    let v = (rng.next() as usize) % n;
+                    if u != v && naive.path_vertices(u, v).is_some() {
+                        let level = (rng.next() % levels) as i32;
+                        fb.cover(u, v, level);
+                        naive.cover_path(u, v, level);
+                    }
+                }
+                1 => {
+                    let u = (rng.next() as usize) % n;
+                    let v = (rng.next() as usize) % n;
+                    if u != v && naive.path_vertices(u, v).is_some() {
+                        let level = (rng.next() % levels) as i32;
+                        fb.uncover(u, v, level);
+                        naive.uncover_path(u, v, level);
+                    }
+                }
+                2 if !edges.is_empty() => {
+                    let (a, b) = edges.swap_remove((rng.next() as usize) % edges.len());
+                    fb.cut(a, b);
+                    naive.cut(a, b);
+                }
+                3 => {
+                    for _ in 0..8 {
+                        let a = (rng.next() as usize) % n;
+                        let b = (rng.next() as usize) % n;
+                        if a != b && naive.path_vertices(a, b).is_none() {
+                            fb.link(a, b);
+                            naive.link(a, b);
+                            edges.push((a, b));
+                            break;
+                        }
+                    }
+                }
+                4 => {
+                    let v = (rng.next() as usize) % n;
+                    let level = (rng.next() % (levels as u64 + 1)) as i32 - 1;
+                    let id = fb.add_label(v, level);
+                    labels.insert(id, (v, level));
+                }
+                _ => {
+                    if !labels.is_empty() {
+                        let ids: Vec<_> = labels.keys().copied().collect();
+                        let id = ids[(rng.next() as usize) % ids.len()];
+                        fb.remove_label(id);
+                        labels.remove(&id);
+                    }
+                }
+            }
+
+            for _ in 0..4 {
+                let v = (rng.next() as usize) % n;
+                let w = (rng.next() as usize) % n;
+                let level = (rng.next() % (levels as u64 + 2)) as i32 - 1;
+                let connected = naive.path_vertices(v, w).is_some();
                 assert_eq!(
-                    fb.find_first_label(v, w, i),
-                    expected,
-                    "find_first_label({v}, {w}, {i}) mismatch (seed {seed})"
+                    fb.connected(v, w),
+                    connected,
+                    "connected({v}, {w}) mismatch (seed {seed})"
                 );
+                if connected {
+                    let expected = naive_has_incident(&naive, &labels, v, w, level);
+                    let mask = fb.debug_root_incident(v, w);
+                    let actual = mask & super::level_bit(level) != 0;
+                    assert_eq!(
+                        actual, expected,
+                        "incident({v}, {w}, {level}) mismatch (seed {seed})"
+                    );
+
+                    // Exercise the scalar query helper against the same root
+                    // summary whose mask was returned by the debug method.
+                    let summary_has = {
+                        let summary = fb.top_tree.expose_path(v, w);
+                        summary.map_or(false, |s| super::incident_has(&s, level))
+                    };
+                    fb.top_tree.deexpose(w);
+                    fb.top_tree.deexpose(v);
+                    assert_eq!(summary_has, actual, "incident_has mismatch");
+                }
             }
         }
     }

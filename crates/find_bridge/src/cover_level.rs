@@ -26,10 +26,10 @@
 //! # FindSize and FindFirstLabel
 //!
 //! [`FindBridge::find_size`] uses the FindSize vectors from Section 5 as part
-//! of each top-tree summary. [`FindBridge::find_first_label`] remains a direct
-//! search over the forest and user labels.
+//! of each top-tree summary. [`FindBridge::find_first_label`] descends the
+//! exposed path cluster using the per-cluster incident masks from Section 6.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 
 use augmented_tree::{Aggregate, BTree};
 use top_tree::{MergeContext, Summary};
@@ -52,6 +52,8 @@ type SizeVector = Vec<u64>;
 struct PartEntry {
     raw: SizeVector,
     diag: SizeVector,
+    inc: u64,
+    inc_diag: u64,
 }
 
 impl Aggregate for PartEntry {
@@ -59,6 +61,8 @@ impl Aggregate for PartEntry {
         PartEntry {
             raw: add_vectors(&self.raw, &other.raw),
             diag: add_vectors(&self.diag, &other.diag),
+            inc: self.inc | other.inc,
+            inc_diag: self.inc_diag | other.inc_diag,
         }
     }
 
@@ -66,6 +70,8 @@ impl Aggregate for PartEntry {
         PartEntry {
             raw: zero_vector(),
             diag: zero_vector(),
+            inc: 0,
+            inc_diag: 0,
         }
     }
 }
@@ -96,9 +102,9 @@ fn zero_tree() -> PartTree {
     PartTree::new()
 }
 
-fn single_key_tree(key: i32, value: &[u64]) -> PartTree {
+fn single_key_tree(key: i32, value: &[u64], inc: u64) -> PartTree {
     let mut tree = zero_tree();
-    add_at(&mut tree, key, value);
+    add_at(&mut tree, key, value, inc);
     tree
 }
 
@@ -123,13 +129,16 @@ fn restrict(tree: &PartTree, klo: i32, khi: i32) -> PartTree {
     restricted
 }
 
-fn add_at(tree: &mut PartTree, key: i32, value: &[u64]) {
+fn add_at(tree: &mut PartTree, key: i32, value: &[u64], inc: u64) {
     let key = find_size_level(key);
     let diag = m_apply(key, value);
+    let inc_diag = inc_m_apply(key, inc);
     if tree
         .update(&key, |entry| {
             add_vec(&mut entry.raw, value);
             add_vec(&mut entry.diag, &diag);
+            entry.inc |= inc;
+            entry.inc_diag |= inc_diag;
         })
         .is_none()
     {
@@ -138,6 +147,8 @@ fn add_at(tree: &mut PartTree, key: i32, value: &[u64]) {
             PartEntry {
                 raw: value.to_vec(),
                 diag,
+                inc,
+                inc_diag,
             },
         );
     }
@@ -162,6 +173,43 @@ fn m_apply(key: i32, value: &[u64]) -> SizeVector {
         .collect()
 }
 
+/// Slot index (0..=LEVEL_CAP+1) used for `level` in an incident mask.
+fn level_slot(level: i32) -> u32 {
+    (find_size_level(level) + 1) as u32
+}
+
+/// A mask with the single bit for `level` set. Levels outside `-1..=LEVEL_CAP`
+/// are clamped to the nearest represented slot, as they are for FindSize.
+fn level_bit(level: i32) -> u64 {
+    1u64 << level_slot(level)
+}
+
+/// Keep the incident bits for levels `<= level` (bitwise analogue of `m_apply`).
+fn inc_m_apply(level: i32, bits: u64) -> u64 {
+    let slot = level_slot(level);
+    if slot >= u64::BITS - 1 {
+        bits
+    } else {
+        bits & ((1u64 << (slot + 1)) - 1)
+    }
+}
+
+fn total_inc(tree: &PartTree) -> u64 {
+    tree.aggregate().inc
+}
+
+fn total_inc_diag(tree: &PartTree) -> u64 {
+    tree.aggregate().inc_diag
+}
+
+fn range_inc(tree: &PartTree, klo: i32, khi: i32) -> u64 {
+    tree.range_aggregate(klo..=khi).inc
+}
+
+fn range_inc_diag(tree: &PartTree, klo: i32, khi: i32) -> u64 {
+    tree.range_aggregate(klo..=khi).inc_diag
+}
+
 fn diagonal_sum(tree: &PartTree, klo: i32, khi: i32) -> SizeVector {
     tree.range_aggregate(klo..=khi).diag
 }
@@ -176,8 +224,9 @@ fn clean_tree(tree: &PartTree, pending: CoverTag) -> PartTree {
     // higher keys retain their original cover value.
     let low_keys = restrict(tree, -1, low);
     let sum = total_sum(&low_keys);
+    let inc = total_inc(&low_keys);
     let mut cleaned = restrict(tree, low + 1, LEVEL_CAP);
-    add_at(&mut cleaned, constant, &sum);
+    add_at(&mut cleaned, constant, &sum, inc);
     cleaned
 }
 
@@ -219,11 +268,7 @@ fn endpoint_child(
 /// slot rather than assuming it is still slot zero.
 /// The unused slot is empty, while every stored boundary tree must be
 /// non-empty so this test continues to identify the unused slot.
-fn boundary_tree<'a>(
-    parts: &'a [PartTree; 2],
-    boundary: top_tree::Boundary,
-    vertex: usize,
-) -> &'a PartTree {
+fn boundary_tree(parts: &[PartTree; 2], boundary: top_tree::Boundary, vertex: usize) -> &PartTree {
     let slot = match boundary {
         top_tree::Boundary::Two { left, .. } if vertex == left => 0,
         top_tree::Boundary::Two { left: _, right } if vertex == right => 1,
@@ -339,12 +384,15 @@ fn along_path_find_size(
         );
         let cover_x = find_size_level(child_summaries[x_child].cover);
         let suffix = range_sum(y_tree, cover_x, LEVEL_CAP);
+        let suffix_inc = range_inc(y_tree, cover_x, LEVEL_CAP);
         let at_cover = x_tree
             .get(&cover_x)
             .map(|entry| entry.raw.clone())
             .unwrap_or_else(zero_vector);
+        let at_cover_inc = x_tree.get(&cover_x).map(|entry| entry.inc).unwrap_or(0);
         let mut part_at_cover = at_cover.clone();
         add_vec(&mut part_at_cover, &suffix);
+        let part_at_cover_inc = at_cover_inc | suffix_inc;
         let mut diag_at_cover = m_apply(cover_x, &at_cover);
         add_vec(&mut diag_at_cover, &m_apply(cover_x, &suffix));
 
@@ -360,10 +408,10 @@ fn along_path_find_size(
         if y != ctx.central {
             let prefix = restrict(y_tree, -1, cover_x - 1);
             for (key, entry) in prefix.iter() {
-                add_at(&mut result, *key, &entry.raw);
+                add_at(&mut result, *key, &entry.raw, entry.inc);
             }
         }
-        add_at(&mut result, cover_x, &part_at_cover);
+        add_at(&mut result, cover_x, &part_at_cover, part_at_cover_inc);
         // `diag_at_cover` is represented implicitly as M(key) * partsize.
         // Keep the calculation explicit here to follow the paper's recurrence
         // and to make its invariant easy to audit.
@@ -378,7 +426,7 @@ fn off_path_find_size(
     left: &CoverLevel,
     right: &CoverLevel,
     ctx: &MergeContext,
-) -> (SizeVector, [PartTree; 2]) {
+) -> (SizeVector, u64, [PartTree; 2]) {
     let mut a = match ctx.parent_vertices {
         top_tree::Boundary::One(vertex) if vertex != ctx.central => Some(vertex),
         top_tree::Boundary::Two { left, right } => {
@@ -431,19 +479,33 @@ fn off_path_find_size(
         &m_apply(summaries[a_child].cover, &summaries[b_child].size),
     );
 
+    let diag_inc = range_inc_diag(a_tree, low + 1, LEVEL_CAP);
+    let prefix_inc = range_inc(a_tree, -1, low);
+    let incident = diag_inc
+        | inc_m_apply(summaries[a_child].pending.constant, prefix_inc)
+        | inc_m_apply(summaries[a_child].cover, summaries[b_child].incident);
+
     let mut parts = [PartTree::new(), PartTree::new()];
     set_boundary_tree(
         &mut parts,
         ctx.parent_vertices,
         a,
-        single_key_tree(LEVEL_CAP, &size),
+        single_key_tree(LEVEL_CAP, &size, incident),
     );
-    (size, parts)
+    (size, incident, parts)
 }
 
 /// A stable handle to a user label added with [`FindBridge::add_label`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LabelId(pub usize);
+
+/// Identifies the single label object attached to a vertex. The vertex's
+/// user-label levels are stored in the label's summary, not in this key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LabelKey {
+    /// The vertex owning this label.
+    pub vertex: usize,
+}
 
 /// An undirected edge, stored as the pair of endpoints passed to
 /// [`FindBridge::link`].
@@ -543,6 +605,8 @@ pub struct CoverLevel {
     pub min_path_edge: Option<Edge>,
     /// An edge off the cluster path attaining `global_cover`.
     pub min_global_edge: Option<Edge>,
+    /// User-label levels incident to this cluster's path or point boundary.
+    pub incident: u64,
     /// The composed lazy cover operation. The vectors below remain raw while
     /// this operation is pending.
     pending: CoverTag,
@@ -556,6 +620,32 @@ pub struct CoverLevel {
     leaf: LeafKind,
 }
 
+impl CoverLevel {
+    /// Sets the bitmask of user-label levels stored on this vertex label.
+    fn set_vertex_levels(&mut self, levels: u64) {
+        self.incident = levels;
+        let size = self.size.clone();
+        self.part = [single_key_tree(LEVEL_CAP, &size, levels), PartTree::new()];
+    }
+}
+
+/// Whether `summary.incident` has the bit for `level`.
+fn incident_has(summary: &CoverLevel, level: i32) -> bool {
+    summary.incident & level_bit(level) != 0
+}
+
+/// `pointincident_{C,v}[level]` computed on demand from the part tree and
+/// pending tag.
+fn pointincident_has(
+    summary: &CoverLevel,
+    boundary: top_tree::Boundary,
+    vertex: usize,
+    level: i32,
+) -> bool {
+    let raw = boundary_tree(&summary.part, boundary, vertex);
+    total_inc_diag(&clean_tree(raw, summary.pending)) & level_bit(level) != 0
+}
+
 /// Picks the smaller of two `(level, edge)` candidates, preferring the first
 /// on ties.
 fn min_candidate(left: (i32, Option<Edge>), right: (i32, Option<Edge>)) -> (i32, Option<Edge>) {
@@ -564,19 +654,20 @@ fn min_candidate(left: (i32, Option<Edge>), right: (i32, Option<Edge>)) -> (i32,
 
 impl Summary<()> for CoverLevel {
     type Tag = CoverTag;
-    type LabelKey = usize;
+    type LabelKey = LabelKey;
 
     fn tree_edge(_weight: &(), u: usize, v: usize) -> Self {
         // A freshly linked tree edge is a bridge: its cover level is -1. The
         // same value is stored as the global cover so that an edge leaf can
         // serve as the root of an `expose`; whether the edge is on or off the
         // cluster path is decided by the parent (or by the root query).
-        let zero_tree = single_key_tree(LEVEL_CAP, &zero_vector());
+        let zero_tree = single_key_tree(LEVEL_CAP, &zero_vector(), 0);
         CoverLevel {
             cover: -1,
             global_cover: -1,
             min_path_edge: Some((u, v)),
             min_global_edge: Some((u, v)),
+            incident: 0,
             pending: CoverTag::identity(),
             size: zero_vector(),
             // An edge path contains both endpoint vertices.
@@ -586,14 +677,15 @@ impl Summary<()> for CoverLevel {
         }
     }
 
-    fn label(_key: &usize, _v: usize) -> Self {
+    fn label(_key: &LabelKey, _v: usize) -> Self {
         let size = vec![1; SLOTS];
-        let tree = single_key_tree(LEVEL_CAP, &size);
+        let tree = single_key_tree(LEVEL_CAP, &size, 0);
         CoverLevel {
             cover: NO_COVER,
             global_cover: NO_COVER,
             min_path_edge: None,
             min_global_edge: None,
+            incident: 0,
             pending: CoverTag::identity(),
             size: size.clone(),
             path_vertices: 1,
@@ -640,22 +732,28 @@ impl Summary<()> for CoverLevel {
                 (child.cover, child.min_path_edge)
             }
         };
+
         let (global_cover, min_global_edge) = min_candidate(
             candidate(left, left_is_path),
             candidate(right, right_is_path),
         );
 
-        let (size, path_vertices, part) = if parent_is_path {
-            along_path_find_size(left, right, ctx)
+        let (size, path_vertices, incident, part) = if parent_is_path {
+            let (size, path_vertices, part) = along_path_find_size(left, right, ctx);
+
+            (size, path_vertices, left.incident | right.incident, part)
         } else {
-            let (size, part) = off_path_find_size(left, right, ctx);
-            (size, ctx.parent_vertices.count() as u64, part)
+            let (size, incident, part) = off_path_find_size(left, right, ctx);
+
+            (size, ctx.parent_vertices.count() as u64, incident, part)
         };
+
         CoverLevel {
             cover,
             global_cover,
             min_path_edge,
             min_global_edge,
+            incident,
             pending: CoverTag::identity(),
             size,
             path_vertices,
@@ -688,11 +786,12 @@ impl Summary<()> for CoverLevel {
 /// cover level `-1` (they are bridges). [`FindBridge::cover`] and
 /// [`FindBridge::uncover`] update the cover levels of a whole path lazily.
 pub struct FindBridge {
-    top_tree: top_tree::TopTree<usize, usize, CoverLevel>,
-    /// Adjacency of the forest, used by the brute-force FindFirstLabel query.
-    adj: Vec<BTreeSet<usize>>,
+    top_tree: top_tree::TopTree<usize, LabelKey, CoverLevel>,
+    /// User-label levels attached to each vertex, encoded as a bitmask.
+    vertex_levels: Vec<u64>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
     labels: BTreeMap<LabelId, (usize, i32)>,
+    /// The next label handle to allocate.
     next_label: usize,
 }
 
@@ -707,7 +806,7 @@ impl FindBridge {
     pub fn new() -> Self {
         FindBridge {
             top_tree: top_tree::TopTree::new(),
-            adj: Vec::new(),
+            vertex_levels: Vec::new(),
             labels: BTreeMap::new(),
             next_label: 0,
         }
@@ -719,12 +818,10 @@ impl FindBridge {
             return index;
         }
         let index = self.top_tree.add_vertex(key);
-        while self.adj.len() <= index {
-            self.adj.push(BTreeSet::new());
-        }
-        // One internal label per vertex makes every vertex contribute exactly
-        // once to FindSize and supplies the point cluster for that vertex.
-        self.top_tree.attach(index, index);
+        self.vertex_levels.resize(index + 1, 0);
+        // One label per vertex makes every vertex contribute exactly once to
+        // FindSize and supplies the point cluster for that vertex.
+        self.top_tree.attach(index, LabelKey { vertex: index });
         index
     }
 
@@ -741,23 +838,24 @@ impl FindBridge {
     /// Links two vertices that are in different trees with a new tree edge.
     pub fn link(&mut self, u: usize, v: usize) {
         self.top_tree.link(u, v);
-        self.adj[u].insert(v);
-        self.adj[v].insert(u);
     }
 
     /// Cuts the tree edge between `u` and `v`, returning whether it existed.
     pub fn cut(&mut self, u: usize, v: usize) -> bool {
-        if self.top_tree.cut(u, v).is_none() {
-            return false;
-        }
-        self.adj[u].remove(&v);
-        self.adj[v].remove(&u);
-        true
+        self.top_tree.cut(u, v).is_some()
     }
 
     /// Returns whether `u` and `v` are in the same tree.
     pub fn connected(&mut self, u: usize, v: usize) -> bool {
         self.top_tree.connected(u, v)
+    }
+
+    #[cfg(test)]
+    fn debug_root_incident(&mut self, v: usize, w: usize) -> u64 {
+        let summary = self.top_tree.expose_path(v, w);
+        self.top_tree.deexpose(w);
+        self.top_tree.deexpose(v);
+        summary.map_or(0, |s| s.incident)
     }
 
     /// Applies `Cover(u, v, level)`: every edge on the `u`-`v` path whose
@@ -840,57 +938,6 @@ impl FindBridge {
         }
     }
 
-    /// The vertices on the tree path from `u` to `v`, in order, or `None` if
-    /// the two are not connected.
-    fn path_vertices(&self, u: usize, v: usize) -> Option<Vec<usize>> {
-        if u == v {
-            return Some(vec![u]);
-        }
-        let mut prev: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut seen = BTreeSet::from([u]);
-        let mut queue = VecDeque::from([u]);
-        while let Some(x) = queue.pop_front() {
-            if x == v {
-                let mut path = vec![v];
-                let mut cur = v;
-                while cur != u {
-                    cur = prev[&cur];
-                    path.push(cur);
-                }
-                path.reverse();
-                return Some(path);
-            }
-            for &y in &self.adj[x] {
-                if seen.insert(y) {
-                    prev.insert(y, x);
-                    queue.push_back(y);
-                }
-            }
-        }
-        None
-    }
-
-    /// For every vertex in the component of the vertices of `path`, its
-    /// projection (nearest vertex) onto `path`.
-    fn projections(&self, path: &[usize]) -> BTreeMap<usize, usize> {
-        let mut projection: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut queue = VecDeque::new();
-        for &m in path {
-            projection.insert(m, m);
-            queue.push_back(m);
-        }
-        while let Some(x) = queue.pop_front() {
-            let px = projection[&x];
-            for &y in &self.adj[x] {
-                if let std::collections::btree_map::Entry::Vacant(slot) = projection.entry(y) {
-                    slot.insert(px);
-                    queue.push_back(y);
-                }
-            }
-        }
-        projection
-    }
-
     /// `FindSize(v, w, i)`: the number of vertices `u` with
     /// `CoverLevel(u, meet(u, v, w)) >= i`.
     ///
@@ -920,38 +967,157 @@ impl FindBridge {
         let id = LabelId(self.next_label);
         self.next_label += 1;
         self.labels.insert(id, (v, level));
+        let bit = level_bit(level);
+        let new = self.vertex_levels[v] | bit;
+        if new != self.vertex_levels[v] {
+            self.vertex_levels[v] = new;
+            self.top_tree
+                .update_label_summary(&LabelKey { vertex: v }, |sum| sum.set_vertex_levels(new));
+        }
         id
     }
 
     /// `RemoveLabel(l)`: removes a user label.
     pub fn remove_label(&mut self, label: LabelId) -> Option<(usize, i32)> {
-        self.labels.remove(&label)
+        let (v, level) = self.labels.remove(&label)?;
+        let bit = level_bit(level);
+        let still_present = self.labels.values().any(|&(u, l)| u == v && l == level);
+        if !still_present {
+            let new = self.vertex_levels[v] & !bit;
+            self.vertex_levels[v] = new;
+            self.top_tree
+                .update_label_summary(&LabelKey { vertex: v }, |sum| sum.set_vertex_levels(new));
+        }
+        Some((v, level))
     }
 
-    /// `FindFirstLabel(v, w, i)`: a label at level `i` whose vertex `u`
-    /// satisfies `CoverLevel(u, meet(u, v, w)) >= i`, minimizing the distance
-    /// from `v` to `meet(u, v, w)`.
+    /// `FindFirstLabel(v, w, i)`.
+    ///
+    /// Returns a label at level `i` whose vertex `u` satisfies
+    /// `CoverLevel(u, meet(u, v, w)) >= i`, minimizing the distance from `v`
+    /// to `meet(u, v, w)`. Correctness is guaranteed for levels in
+    /// `-1..=LEVEL_CAP`, the range represented by the incident masks.
     pub fn find_first_label(&mut self, v: usize, w: usize, i: i32) -> Option<LabelId> {
         if !self.connected(v, w) {
             return None;
         }
-        let path = self.path_vertices(v, w)?;
-        let projection = self.projections(&path);
-        for &m in &path {
-            let candidates: Vec<LabelId> = self
-                .labels
-                .iter()
-                .filter(|&(_, &(u, level))| level == i && projection.get(&u) == Some(&m))
-                .map(|(&id, _)| id)
-                .collect();
-            for id in candidates {
-                let (u, _) = self.labels[&id];
-                if self.cover_level_between(u, m) >= i {
-                    return Some(id);
-                }
+        let root = self.top_tree.expose_path_node(v, w)?;
+        let vertex = if v == w {
+            self.find_label_vertex(root, v, i)
+        } else {
+            self.first_path(root, v, i)
+        };
+        self.top_tree.deexpose(w);
+        self.top_tree.deexpose(v);
+        vertex.and_then(|u| self.smallest_label_at(u, i))
+    }
+
+    /// The smallest live label id at `vertex` with the given exact level.
+    fn smallest_label_at(&self, vertex: usize, level: i32) -> Option<LabelId> {
+        self.labels
+            .iter()
+            .find(|&(_, &(u, l))| u == vertex && l == level)
+            .map(|(&id, _)| id)
+    }
+
+    /// Descends a path cluster to the valid level-`i` label whose projection
+    /// onto the cluster path is closest to `near` (`near` is a boundary of
+    /// `node`).
+    fn first_path(&mut self, node: top_tree::NodeId, near: usize, level: i32) -> Option<usize> {
+        self.top_tree.push_node_tag(node);
+
+        if !incident_has(self.top_tree.node_summary(node), level) {
+            return None;
+        }
+
+        if !matches!(
+            self.top_tree.node_leaf_data(node),
+            top_tree::NodeData::Internal
+        ) {
+            return None;
+        }
+
+        let (left, right) = self.top_tree.node_children(node).expect("internal node");
+
+        let central = self.top_tree.node_central(node).expect("internal node");
+
+        if self.top_tree.node_is_path(left) && self.top_tree.node_is_path(right) {
+            let (near_child, far_child) =
+                if boundary_contains(self.top_tree.node_boundary(left), near) {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+
+            self.first_path(near_child, near, level)
+                .or_else(|| self.first_path(far_child, central, level))
+        } else {
+            let (path_child, point_child) = if self.top_tree.node_is_path(left) {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            if central == near {
+                self.find_label_vertex(point_child, central, level)
+                    .or_else(|| self.first_path(path_child, near, level))
+            } else {
+                self.first_path(path_child, near, level)
+                    .or_else(|| self.find_label_vertex(point_child, central, level))
             }
         }
-        None
+    }
+
+    /// Finds any valid level-`i` label reachable from `boundary_vertex`, which
+    /// must be a boundary vertex of `node`.
+    fn find_label_vertex(
+        &mut self,
+        node: top_tree::NodeId,
+        boundary_vertex: usize,
+        level: i32,
+    ) -> Option<usize> {
+        let boundary = self.top_tree.node_boundary(node);
+        // NOTE: this must be evaluated BEFORE pushing `node`'s tag, because
+        // `push_tag` consumes the label's own `pending` state used by clean_tree.
+        if !pointincident_has(
+            self.top_tree.node_summary(node),
+            boundary,
+            boundary_vertex,
+            level,
+        ) {
+            return None;
+        }
+        match self.top_tree.node_leaf_data(node) {
+            top_tree::NodeData::Label(_) => {
+                return self.top_tree.node_label_key(node).map(|key| key.vertex);
+            }
+            top_tree::NodeData::Edge(_) => return None,
+            top_tree::NodeData::Internal => {}
+        }
+        self.top_tree.push_node_tag(node);
+        let (left, right) = self.top_tree.node_children(node).expect("internal node");
+        let central = self.top_tree.node_central(node).expect("internal node");
+        if boundary_vertex == central {
+            return self
+                .find_label_vertex(left, boundary_vertex, level)
+                .or_else(|| self.find_label_vertex(right, boundary_vertex, level));
+        }
+        if boundary_contains(self.top_tree.node_boundary(left), boundary_vertex) {
+            if let Some(found) = self.find_label_vertex(left, boundary_vertex, level) {
+                return Some(found);
+            }
+            if self.top_tree.node_summary(left).cover >= level {
+                return self.find_label_vertex(right, central, level);
+            }
+            None
+        } else {
+            if let Some(found) = self.find_label_vertex(right, boundary_vertex, level) {
+                return Some(found);
+            }
+            if self.top_tree.node_summary(right).cover >= level {
+                return self.find_label_vertex(left, central, level);
+            }
+            None
+        }
     }
 }
 
