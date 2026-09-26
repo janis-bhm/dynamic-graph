@@ -1,4 +1,5 @@
 #![feature(ptr_as_uninit, cast_maybe_uninit)]
+#![allow(dead_code)]
 
 use std::{
     mem,
