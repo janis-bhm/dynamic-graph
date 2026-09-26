@@ -25,6 +25,7 @@ use std::{
     cmp::Ordering,
     marker::PhantomData,
     mem::{self, MaybeUninit},
+    ops::{Bound, RangeBounds},
     ptr::{self, NonNull},
     slice::SliceIndex,
 };
@@ -2202,6 +2203,15 @@ impl<K, V: Aggregate> BTree<K, V> {
         self.root.reborrow().aggregate()
     }
 
+    /// The reduction of every value whose key lies in `range`, in key order.
+    /// Returns `V::identity()` when the range is empty.
+    pub fn range_aggregate<R: RangeBounds<K>>(&self, range: R) -> V
+    where
+        K: Ord,
+    {
+        range_aggregate_node(self.root.reborrow(), range.start_bound(), range.end_bound())
+    }
+
     /// Inserts a key-value pair, returning the previous value if the key was
     /// already present.
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
@@ -2417,6 +2427,112 @@ impl<K, V: Aggregate> BTree<K, V> {
     /// An iterator over the values in ascending key order.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
+    }
+}
+
+fn range_aggregate_node<'a, K: Ord + 'a, V: Aggregate + 'a>(
+    node: NodeRef<marker::Immut<'a>, K, V, marker::Either>,
+    lower: Bound<&K>,
+    upper: Bound<&K>,
+) -> V {
+    match node.force() {
+        Force::Leaf(leaf) => {
+            let len = leaf.len();
+            let mut acc = V::identity();
+
+            for i in 0..len {
+                let (k, v) = unsafe { Handle::new_kv(leaf, i) }.into_kv();
+
+                if in_range(k, lower, upper) {
+                    acc = acc.reduce(v);
+                }
+            }
+            acc
+        }
+        Force::Internal(internal) => {
+            let len = internal.len();
+            let keys = internal.keys();
+            let mut acc = V::identity();
+
+            for i in 0..=len {
+                let child = unsafe { Handle::new_edge(internal, i) }.descend();
+
+                let lower_ok = if i == 0 {
+                    matches!(lower, Bound::Unbounded)
+                } else {
+                    key_at_least(&keys[i - 1], lower)
+                };
+
+                let upper_ok = if i == len {
+                    matches!(upper, Bound::Unbounded)
+                } else {
+                    key_at_most(&keys[i], upper)
+                };
+
+                let fully_in = lower_ok && upper_ok;
+                let fully_below = i < len && key_at_or_below(&keys[i], lower);
+                let fully_above = i > 0 && key_at_or_above(&keys[i - 1], upper);
+
+                if fully_in {
+                    acc = acc.reduce(child.aggregate());
+                } else if !fully_below && !fully_above {
+                    acc = acc.reduce(&range_aggregate_node(child, lower, upper));
+                }
+
+                if i < len {
+                    let (k, v) = unsafe { Handle::new_kv(internal, i) }.into_kv();
+                    if in_range(k, lower, upper) {
+                        acc = acc.reduce(v);
+                    }
+                }
+            }
+
+            acc
+        }
+    }
+}
+
+fn in_range<K: Ord>(k: &K, lower: Bound<&K>, upper: Bound<&K>) -> bool {
+    let lower_ok = match lower {
+        Bound::Included(v) => k >= v,
+        Bound::Excluded(v) => k > v,
+        Bound::Unbounded => true,
+    };
+    let upper_ok = match upper {
+        Bound::Included(v) => k <= v,
+        Bound::Excluded(v) => k < v,
+        Bound::Unbounded => true,
+    };
+    lower_ok && upper_ok
+}
+
+fn key_at_least<K: Ord>(k: &K, lower: Bound<&K>) -> bool {
+    match lower {
+        Bound::Included(v) => k >= v,
+        Bound::Excluded(v) => k > v,
+        Bound::Unbounded => true,
+    }
+}
+
+fn key_at_most<K: Ord>(k: &K, upper: Bound<&K>) -> bool {
+    match upper {
+        Bound::Included(v) => k <= v,
+        Bound::Excluded(v) => k < v,
+        Bound::Unbounded => true,
+    }
+}
+
+fn key_at_or_below<K: Ord>(k: &K, lower: Bound<&K>) -> bool {
+    match lower {
+        Bound::Included(v) | Bound::Excluded(v) => k <= v,
+        Bound::Unbounded => false,
+    }
+}
+
+fn key_at_or_above<K: Ord>(k: &K, upper: Bound<&K>) -> bool {
+    match upper {
+        Bound::Included(v) | Bound::Excluded(v) => k >= v,
+        Bound::Unbounded => false,
     }
 }
 
