@@ -219,6 +219,136 @@ impl Rng {
     }
 }
 
+#[test]
+fn size_vector_trims_trailing_zeros() {
+    let empty = SizeVector::empty();
+    assert_eq!(empty.0.len(), 0);
+    assert_eq!(empty.get(0), 0);
+
+    let vector = SizeVector::from_vec(vec![0, 0, 3, 0, 0]);
+    assert_eq!(vector.0.len(), 3);
+    assert_eq!(vector.get(0), 0);
+    assert_eq!(vector.get(1), 0);
+    assert_eq!(vector.get(2), 3);
+    assert_eq!(vector.get(3), 0);
+
+    // With direct slot indexing, this is the input whose first three slots
+    // are 0, 3, 0.
+    let vector = SizeVector::from_vec(vec![0, 3, 0, 0, 0]);
+    assert_eq!(vector.get(0), 0);
+    assert_eq!(vector.get(1), 3);
+    assert_eq!(vector.get(2), 0);
+}
+
+#[test]
+fn size_vector_add_and_mask() {
+    let left = SizeVector::from_vec(vec![1, 0, 0]);
+    let right = SizeVector::from_vec(vec![0, 2, 0, 4]);
+    let sum = left.add(&right);
+    assert_eq!(
+        (0..4).map(|slot| sum.get(slot)).collect::<Vec<_>>(),
+        vec![1, 2, 0, 4]
+    );
+
+    let masked = sum.masked(-1);
+    assert_eq!(
+        (0..3).map(|slot| masked.get(slot)).collect::<Vec<_>>(),
+        vec![1, 0, 0]
+    );
+
+    let masked = sum.masked(0);
+    assert_eq!(
+        (0..3).map(|slot| masked.get(slot)).collect::<Vec<_>>(),
+        vec![1, 2, 0]
+    );
+}
+
+fn assert_size_vector_matches_dense(
+    vector: &SizeVector,
+    dense: &[u64; SLOTS],
+    case: usize,
+    operation: &str,
+) {
+    for (slot, &expected) in dense.iter().enumerate() {
+        assert_eq!(
+            vector.get(slot),
+            expected,
+            "{operation} mismatch in case {case}, slot {slot}"
+        );
+    }
+    assert_eq!(
+        vector.get(SLOTS),
+        0,
+        "{operation} should read zero beyond the logical slots in case {case}"
+    );
+}
+
+fn random_size_vector_data(rng: &mut Rng) -> (Vec<u64>, [u64; SLOTS]) {
+    let len = (rng.next() as usize) % (SLOTS + 1);
+    let trailing_zeros = if len == 0 {
+        0
+    } else {
+        (rng.next() as usize) % (len + 1)
+    };
+    let nonzero_prefix = len - trailing_zeros;
+    let data: Vec<_> = (0..len)
+        .map(|slot| {
+            if slot < nonzero_prefix {
+                rng.next() % 8
+            } else {
+                0
+            }
+        })
+        .collect();
+    let mut dense = [0; SLOTS];
+    for (slot, &value) in data.iter().enumerate() {
+        dense[slot] = value;
+    }
+    (data, dense)
+}
+
+#[test]
+fn size_vector_matches_dense_randomized_reference() {
+    let mut rng = Rng(0x51_2e_5eed);
+    for case in 0..200 {
+        let (left_data, left_dense) = random_size_vector_data(&mut rng);
+        let (right_data, right_dense) = random_size_vector_data(&mut rng);
+        let left = SizeVector::from_vec(left_data);
+        let right = SizeVector::from_vec(right_data);
+        assert_size_vector_matches_dense(&left, &left_dense, case, "from_vec(left)");
+        assert_size_vector_matches_dense(&right, &right_dense, case, "from_vec(right)");
+
+        let sum = left.add(&right);
+        let mut sum_dense = [0; SLOTS];
+        for ((sum, &left), &right) in sum_dense.iter_mut().zip(&left_dense).zip(&right_dense) {
+            *sum = left + right;
+        }
+        assert_size_vector_matches_dense(&sum, &sum_dense, case, "add");
+
+        let key = match rng.next() % 8 {
+            0 => i32::MIN,
+            1 => -2,
+            2 => -1,
+            3 => LEVEL_CAP + 1,
+            4 => NO_COVER,
+            5 => i32::MAX,
+            _ => (rng.next() % (SLOTS as u64 + 8)) as i32 - 4,
+        };
+        let masked_key = if key == NO_COVER {
+            LEVEL_CAP
+        } else {
+            key.clamp(-1, LEVEL_CAP)
+        };
+        let max_slots = (masked_key + 2).clamp(0, SLOTS as i32) as usize;
+        let mut masked_dense = sum_dense;
+        for slot in &mut masked_dense[max_slots..] {
+            *slot = 0;
+        }
+        let masked = sum.masked(key);
+        assert_size_vector_matches_dense(&masked, &masked_dense, case, "masked");
+    }
+}
+
 fn check_against_naive(fb: &mut FindBridge, naive: &Naive, n: usize) {
     for v in 0..n {
         assert_eq!(

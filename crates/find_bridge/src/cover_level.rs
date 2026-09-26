@@ -77,7 +77,56 @@ impl From<Level> for i32 {
     }
 }
 
-type SizeVector = Vec<u64>;
+/// A size vector over slots `0..SLOTS` (slot = level + 1). Trailing zero slots
+/// are implicit: the backing slice ends at the last nonzero slot and `get`
+/// returns 0 beyond it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SizeVector(Box<[u64]>);
+
+impl SizeVector {
+    /// Canonical form: drop trailing zeros.
+    fn from_vec(mut data: Vec<u64>) -> Self {
+        while data.last() == Some(&0) {
+            data.pop();
+        }
+        SizeVector(data.into_boxed_slice())
+    }
+
+    fn empty() -> Self {
+        Self(Box::new([]))
+    }
+
+    fn get(&self, slot: usize) -> u64 {
+        self.0.get(slot).copied().unwrap_or(0)
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let new_len = self.0.len().max(other.0.len());
+        let mut out = Box::new_uninit_slice(new_len);
+        for slot in 0..new_len {
+            out[slot].write(self.get(slot) + other.get(slot));
+        }
+        Self(unsafe { out.assume_init() })
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        if self.0.len() < other.0.len() {
+            *self = self.add(other);
+        } else {
+            for slot in 0..other.0.len() {
+                self.0[slot] += other.0[slot];
+            }
+        }
+    }
+
+    /// Keep slots `0..=key+1` (`m_apply`), then re-trim.
+    fn masked(&self, key: i32) -> Self {
+        let key = cover_key(key);
+        let max_slots = (key + 2).clamp(0, SLOTS as i32) as usize;
+        let n = self.0.len().min(max_slots);
+        Self(Box::from(&self.0[..n]))
+    }
+}
 
 /// One entry of a boundary part tree: the raw size vector stored at a cover
 /// level, together with its diagonal `M(level) * raw`, cached so that a range
@@ -151,18 +200,18 @@ fn inc_m_apply(cover: i32, bits: u64) -> u64 {
 }
 
 fn zero_vector() -> SizeVector {
-    vec![0; SLOTS]
+    SizeVector::empty()
 }
 
-fn add_vectors(left: &[u64], right: &[u64]) -> SizeVector {
-    left.iter().zip(right).map(|(a, b)| a + b).collect()
+fn add_vectors(left: &SizeVector, right: &SizeVector) -> SizeVector {
+    left.add(right)
 }
 
 fn zero_tree() -> PartTree {
     PartTree::new()
 }
 
-fn single_key_tree(key: i32, value: &[u64], inc: u64) -> PartTree {
+fn single_key_tree(key: i32, value: &SizeVector, inc: u64) -> PartTree {
     let mut tree = zero_tree();
     add_at(&mut tree, key, value, inc);
     tree
@@ -189,14 +238,14 @@ fn restrict(tree: &PartTree, klo: i32, khi: i32) -> PartTree {
     restricted
 }
 
-fn add_at(tree: &mut PartTree, key: i32, value: &[u64], inc: u64) {
+fn add_at(tree: &mut PartTree, key: i32, value: &SizeVector, inc: u64) {
     let key = cover_key(key);
     let diag = m_apply(key, value);
     let inc_diag = inc_m_apply(key, inc);
     if tree
         .update(&key, |entry| {
-            add_vec(&mut entry.raw, value);
-            add_vec(&mut entry.diag, &diag);
+            entry.raw = add_vectors(&entry.raw, value);
+            entry.diag = add_vectors(&entry.diag, &diag);
             entry.inc |= inc;
             entry.inc_diag |= inc_diag;
         })
@@ -205,7 +254,7 @@ fn add_at(tree: &mut PartTree, key: i32, value: &[u64], inc: u64) {
         tree.insert(
             key,
             PartEntry {
-                raw: value.to_vec(),
+                raw: value.clone(),
                 diag,
                 inc,
                 inc_diag,
@@ -214,23 +263,13 @@ fn add_at(tree: &mut PartTree, key: i32, value: &[u64], inc: u64) {
     }
 }
 
-fn add_vec(dst: &mut [u64], src: &[u64]) {
-    for (dst, src) in dst.iter_mut().zip(src) {
-        *dst += *src;
-    }
+fn add_vec(dst: &mut SizeVector, src: &SizeVector) {
+    dst.add_assign(src);
 }
 
 /// Apply the diagonal mask `M(key)`: keep level slots `j` with `j <= key`.
-fn m_apply(key: i32, value: &[u64]) -> SizeVector {
-    let key = cover_key(key);
-    value
-        .iter()
-        .enumerate()
-        .map(|(slot, &entry)| {
-            let level = slot as i32 - 1;
-            if level <= key { entry } else { 0 }
-        })
-        .collect()
+fn m_apply(key: i32, value: &SizeVector) -> SizeVector {
+    value.masked(key)
 }
 
 fn total_inc(tree: &PartTree) -> u64 {
@@ -354,7 +393,7 @@ fn along_path_find_size(
     ctx: &MergeContext,
 ) -> (SizeVector, u64, [PartTree; 2]) {
     let mut size = left.size.clone();
-    add_vec(&mut size, &right.size);
+    size.add_assign(&right.size);
 
     let mut parts = [PartTree::new(), PartTree::new()];
     let mut children_parts = [left.part.clone(), right.part.clone()];
@@ -430,7 +469,7 @@ fn along_path_find_size(
             .unwrap_or_else(zero_vector);
         let at_cover_inc = x_tree.get(&cover_x).map(|entry| entry.inc).unwrap_or(0);
         let mut part_at_cover = at_cover.clone();
-        add_vec(&mut part_at_cover, &suffix);
+        part_at_cover.add_assign(&suffix);
         let part_at_cover_inc = at_cover_inc | suffix_inc;
         let mut diag_at_cover = m_apply(cover_x, &at_cover);
         add_vec(&mut diag_at_cover, &m_apply(cover_x, &suffix));
@@ -509,14 +548,8 @@ fn off_path_find_size(
     let diagonal = diagonal_sum(a_tree, low + 1, LEVEL_CAP);
     let prefix = range_sum(a_tree, -1, low);
     let mut size = diagonal;
-    add_vec(
-        &mut size,
-        &m_apply(summaries[a_child].pending.constant, &prefix),
-    );
-    add_vec(
-        &mut size,
-        &m_apply(summaries[a_child].cover, &summaries[b_child].size),
-    );
+    size.add_assign(&m_apply(summaries[a_child].pending.constant, &prefix));
+    size.add_assign(&m_apply(summaries[a_child].cover, &summaries[b_child].size));
 
     let diag_inc = range_inc_diag(a_tree, low + 1, LEVEL_CAP);
     let prefix_inc = range_inc(a_tree, -1, low);
@@ -718,7 +751,7 @@ impl Summary<()> for CoverLevel {
     }
 
     fn label(_key: &LabelKey, _v: usize) -> Self {
-        let size = vec![1; SLOTS];
+        let size = SizeVector::from_vec(vec![1; SLOTS]);
         let tree = single_key_tree(LEVEL_CAP, &size, 0);
         CoverLevel {
             cover: NO_COVER,
@@ -990,8 +1023,8 @@ impl FindBridge {
         self.top_tree.deexpose(w);
         self.top_tree.deexpose(v);
         match summary {
-            Some(summary) if i <= -1 => summary.size[0],
-            Some(summary) if i <= LEVEL_CAP => summary.size[(i + 1) as usize],
+            Some(summary) if i <= -1 => summary.size.get(0),
+            Some(summary) if i <= LEVEL_CAP => summary.size.get((i + 1) as usize),
             Some(_) if i > LEVEL_CAP && v == w => {
                 // Only v itself has the sentinel cover level; all real edge covers are capped.
                 1
