@@ -1527,36 +1527,18 @@ where
         // context, which a plain path-based decrement cannot account for.
         let _ = self.expose_vertex(vertex);
 
-        // labels are never path components, so removing them can never disconnect the tree.
-        // instead of removing the ancestors, we want to replace the label's parent with its sibling in the grandparent node, if it exists, and then delete the label and parent nodes.
-
+        // Labels are never path components. Splay this leaf next to the root
+        // so removing its parent leaves the rest of the component as one root
+        // cluster.
+        self.full_splay(label_node);
         if let Some(parent) = self.parent(label_node) {
+            self.push_flip(parent);
             let sibling = self.sibling(label_node).expect("label has sibling");
-
-            if let Some(grandparent) = self.parent(parent) {
-                let parent_is_left = self
-                    .is_left_child(parent)
-                    .expect("parent with grandparent has side");
-                let sibling_is_left = self
-                    .is_left_child(sibling)
-                    .expect("sibling with parent has side");
-
-                let flip_sibling = (sibling_is_left != parent_is_left) ^ self.cl(parent).flipped;
-                if flip_sibling {
-                    self.toggle_flipped(sibling);
-                }
-                self.set_child(grandparent, sibling, parent_is_left);
-                let mut node = grandparent;
-                loop {
-                    self.recompute(node);
-                    let Some(parent) = self.parent(node) else {
-                        break;
-                    };
-                    node = parent;
-                }
-            } else {
-                self.set_parent(sibling, None);
-            }
+            assert!(
+                self.parent(parent).is_none(),
+                "splayed label parent must be root"
+            );
+            self.set_parent(sibling, None);
             self.dealloc(parent);
         }
         self.dealloc(label_node);
