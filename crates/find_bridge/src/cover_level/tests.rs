@@ -334,6 +334,44 @@ fn path_cover_and_uncover() {
 }
 
 #[test]
+fn randomized_cover_uncover_no_naive() {
+    for seed in 0..8 {
+        let n = 9;
+        let levels = 6;
+        let mut rng = Rng(seed);
+        let mut fb = FindBridge::new();
+        for i in 0..n {
+            fb.add_vertex(i);
+        }
+
+        // Build a growing tree.
+        for v in 1..n {
+            let u = (rng.next() as usize) % v;
+            fb.link(u, v);
+        }
+
+        for _ in 0..60 {
+            let op = rng.next() % 2;
+            let u = (rng.next() as usize) % n;
+            let v = (rng.next() as usize) % n;
+            if u != v && fb.connected(u, v) {
+                match op {
+                    0 => {
+                        let level = (rng.next() % levels) as i32;
+                        fb.cover(u, v, level);
+                    }
+                    1 => {
+                        let level = (rng.next() % levels) as i32;
+                        fb.uncover(u, v, level);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn randomized_cover_uncover() {
     for seed in 0..8 {
         let n = 9;
