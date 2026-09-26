@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Bound};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Sum(i64);
@@ -563,5 +563,133 @@ fn drops_values_exactly_once() {
         LIVE.load(AtomicOrdering::SeqCst),
         0,
         "leaked or double-dropped values"
+    );
+}
+
+fn naive_range_aggregate(tree: &BTree<i32, Sum>, lower: Bound<i32>, upper: Bound<i32>) -> Sum {
+    tree.iter()
+        .filter(|(key, _)| {
+            let lower_ok = match lower {
+                Bound::Included(value) => **key >= value,
+                Bound::Excluded(value) => **key > value,
+                Bound::Unbounded => true,
+            };
+            let upper_ok = match upper {
+                Bound::Included(value) => **key <= value,
+                Bound::Excluded(value) => **key < value,
+                Bound::Unbounded => true,
+            };
+            lower_ok && upper_ok
+        })
+        .fold(Sum(0), |acc, (_, value)| acc.reduce(value))
+}
+
+#[test]
+fn range_aggregate_matches_naive() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    for i in 0..40 {
+        tree.insert(i, Sum(i as i64));
+    }
+
+    for lo in -5..45 {
+        for hi in lo..45 {
+            assert_eq!(
+                tree.range_aggregate(lo..=hi),
+                naive_range_aggregate(&tree, Bound::Included(lo), Bound::Included(hi)),
+                "inclusive {lo}..={hi}"
+            );
+        }
+    }
+    for lo in -5..45 {
+        for hi in lo..45 {
+            assert_eq!(
+                tree.range_aggregate((Bound::Excluded(lo), Bound::Excluded(hi))),
+                naive_range_aggregate(&tree, Bound::Excluded(lo), Bound::Excluded(hi)),
+                "exclusive ({lo}, {hi})"
+            );
+        }
+    }
+
+    assert_eq!(
+        tree.range_aggregate(..),
+        naive_range_aggregate(&tree, Bound::Unbounded, Bound::Unbounded)
+    );
+    assert_eq!(
+        tree.range_aggregate(..10),
+        naive_range_aggregate(&tree, Bound::Unbounded, Bound::Excluded(10))
+    );
+    assert_eq!(
+        tree.range_aggregate(30..),
+        naive_range_aggregate(&tree, Bound::Included(30), Bound::Unbounded)
+    );
+
+    {
+        #![expect(clippy::reversed_empty_ranges)]
+        assert_eq!(tree.range_aggregate(10..=5), Sum(0));
+    }
+
+    let empty: BTree<i32, Sum> = BTree::new();
+    assert_eq!(empty.range_aggregate(..), Sum::identity());
+    assert_eq!(empty.range_aggregate(-5..=5), Sum::identity());
+    assert_eq!(
+        empty.range_aggregate((Bound::Excluded(10), Bound::Included(-10))),
+        Sum::identity()
+    );
+
+    let mut single = BTree::new();
+    single.insert(7, Sum(17));
+    assert_eq!(single.range_aggregate(..), Sum(17));
+    assert_eq!(single.range_aggregate(7..=7), Sum(17));
+    assert_eq!(
+        single.range_aggregate((Bound::Excluded(7), Bound::Unbounded)),
+        Sum(0)
+    );
+    assert_eq!(single.range_aggregate(8..), Sum(0));
+
+    let mut large: BTree<i32, Sum> = BTree::new();
+    for i in 0..300 {
+        large.insert(i, Sum(i as i64 - 100));
+    }
+    let mut rng = Rng(0x517c_c1b7_2722_0a95);
+    for _ in 0..64 {
+        let first = (rng.next() % 400) as i32 - 50;
+        let second = (rng.next() % 400) as i32 - 50;
+        let (lo, hi) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(
+            large.range_aggregate(lo..=hi),
+            naive_range_aggregate(&large, Bound::Included(lo), Bound::Included(hi)),
+            "large inclusive {lo}..={hi}"
+        );
+        assert_eq!(
+            large.range_aggregate((Bound::Excluded(lo), Bound::Excluded(hi))),
+            naive_range_aggregate(&large, Bound::Excluded(lo), Bound::Excluded(hi)),
+            "large exclusive ({lo}, {hi})"
+        );
+    }
+}
+
+#[test]
+fn btree_debug_and_equality() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    let mut equal_tree: BTree<i32, Sum> = BTree::new();
+    for i in 0..20 {
+        tree.insert(i, Sum(i as i64));
+    }
+    for i in (0..20).rev() {
+        equal_tree.insert(i, Sum(i as i64));
+    }
+
+    assert_eq!(tree, equal_tree);
+
+    let mut different_tree = equal_tree.clone();
+    different_tree.insert(10, Sum(-1));
+    assert_ne!(tree, different_tree);
+    assert_eq!(
+        format!("{:?}", tree),
+        "{0: Sum(0), 1: Sum(1), 2: Sum(2), 3: Sum(3), 4: Sum(4), 5: Sum(5), 6: Sum(6), 7: Sum(7), 8: Sum(8), 9: Sum(9), 10: Sum(10), 11: Sum(11), 12: Sum(12), 13: Sum(13), 14: Sum(14), 15: Sum(15), 16: Sum(16), 17: Sum(17), 18: Sum(18), 19: Sum(19)}"
     );
 }
