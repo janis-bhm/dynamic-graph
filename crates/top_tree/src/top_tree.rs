@@ -16,7 +16,7 @@ use std::{hash::Hash, marker::PhantomData};
 
 use crate::{
     NonMaxUsize, Tree,
-    summary::{MergeContext, Summary},
+    summary::{Boundary, MergeContext, Summary},
     tree::SwapResult,
 };
 
@@ -312,6 +312,28 @@ impl BoundaryVertices {
             },
         }
     }
+
+    fn to_boundary(self) -> Boundary {
+        match self {
+            Self::None => Boundary::None,
+            Self::One(v) => Boundary::One(v.get()),
+            Self::Two { left, right } => Boundary::Two {
+                left: left.get(),
+                right: right.get(),
+            },
+        }
+    }
+}
+
+fn shared(a: Boundary, b: Boundary) -> usize {
+    let b_slots = b.slots();
+    a.slots()
+        .into_iter()
+        .flatten()
+        .find(|vertex| b_slots.contains(&Some(*vertex)))
+        .unwrap_or_else(|| {
+            panic!("clusters must share a boundary vertex (left: {a:?}, right: {b:?})")
+        })
 }
 
 /// A stable handle to a label attached with [`TopTree::attach`].
@@ -327,7 +349,7 @@ pub struct LabelId(pub usize);
 /// the edge/label and vertex weights of the underlying [`Tree`].
 pub struct TopTree<N, L, S>
 where
-    S: Summary,
+    S: Summary<LabelKey = L>,
 {
     tree: Tree<N, L, usize, ()>,
     nodes: Vec<Option<Cluster<S>>>,
@@ -338,7 +360,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary,
+    S: Summary<LabelKey = L>,
 {
     /// Creates an empty top tree.
     pub fn new() -> Self {
@@ -368,7 +390,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary,
+    S: Summary<LabelKey = L>,
     N: Eq + Hash,
 {
     /// Adds a vertex with the given key and weight and returns its index.
@@ -426,7 +448,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary + Clone,
+    S: Summary<LabelKey = L> + Clone,
 {
     /// Exposes `v`, making it an external boundary vertex, and returns the
     /// summary of the resulting root cluster.
@@ -500,7 +522,7 @@ where
 
 impl<N, L, S> Default for TopTree<N, L, S>
 where
-    S: Summary,
+    S: Summary<LabelKey = L>,
 {
     fn default() -> Self {
         Self::new()
@@ -510,7 +532,7 @@ where
 /// Low level cluster tree operations.
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary,
+    S: Summary<LabelKey = L>,
 {
     #[inline]
     fn cl(&self, node: usize) -> &Cluster<S> {
@@ -860,10 +882,17 @@ where
     fn recompute(&mut self, node: usize) {
         self.push_tag(node);
         let (left, right) = self.flipped_children(node);
+        let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
+        let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
+        let parent_vertices = self.cl(node).flipped_boundary_vertices().to_boundary();
         let ctx = MergeContext {
-            left_boundary: self.cl(left).boundary_vertices.count(),
-            right_boundary: self.cl(right).boundary_vertices.count(),
-            boundary: self.cl(node).boundary_vertices.count(),
+            left_boundary: left_vertices.count(),
+            right_boundary: right_vertices.count(),
+            boundary: parent_vertices.count(),
+            left_vertices,
+            right_vertices,
+            parent_vertices,
+            central: shared(left_vertices, right_vertices),
         };
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);
         self.cl_mut(node).sum = sum;
@@ -875,10 +904,17 @@ where
         right: usize,
         boundary_vertices: BoundaryVertices,
     ) -> Cluster<S> {
+        let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
+        let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
+        let parent_vertices = boundary_vertices.to_boundary();
         let ctx = MergeContext {
-            left_boundary: self.cl(left).boundary_vertices.count(),
-            right_boundary: self.cl(right).boundary_vertices.count(),
-            boundary: boundary_vertices.count(),
+            left_boundary: left_vertices.count(),
+            right_boundary: right_vertices.count(),
+            boundary: parent_vertices.count(),
+            left_vertices,
+            right_vertices,
+            parent_vertices,
+            central: shared(left_vertices, right_vertices),
         };
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);
         Cluster {
@@ -934,8 +970,14 @@ where
         self.alloc(cluster)
     }
 
-    fn new_leaf_label(&mut self, label: usize, vertex: usize, boundary: BoundaryVertices) -> usize {
-        let sum = S::label(&(), vertex);
+    fn new_leaf_label(
+        &mut self,
+        key: &L,
+        label: usize,
+        vertex: usize,
+        boundary: BoundaryVertices,
+    ) -> usize {
+        let sum = S::label(key, vertex);
         let cluster = Cluster {
             parent: None,
             children: None,
@@ -1460,7 +1502,7 @@ where
         }
         self.set_exposed(vertex, false);
 
-        let leaf = self.new_leaf_label(self.tree.label_count(), vertex, unsafe {
+        let leaf = self.new_leaf_label(&label, self.tree.label_count(), vertex, unsafe {
             BoundaryVertices::from_option(root_v.map(|_| NonMaxUsize::new_unchecked(vertex)))
         });
 

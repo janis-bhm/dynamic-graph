@@ -19,7 +19,46 @@
 //! boundary vertices each child and the resulting cluster have. From this a
 //! summary can recover the case it is in:
 
-/// Describes the boundary sizes involved in a join.
+/// The boundary vertices of a cluster, in its logical frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boundary {
+    /// The cluster has no boundary vertices.
+    None,
+    /// The cluster has one boundary vertex.
+    One(usize),
+    /// The cluster has two boundary vertices, ordered from left to right.
+    Two { left: usize, right: usize },
+}
+
+impl Boundary {
+    /// Returns the number of boundary vertices.
+    pub fn count(self) -> u8 {
+        match self {
+            Boundary::None => 0,
+            Boundary::One(_) => 1,
+            Boundary::Two { .. } => 2,
+        }
+    }
+
+    /// Returns whether the cluster is a path cluster.
+    pub fn is_path(self) -> bool {
+        matches!(self, Boundary::Two { .. })
+    }
+
+    /// Returns the boundary vertices in left-to-right slots.
+    ///
+    /// A one-vertex cluster repeats its vertex in both slots so that set-
+    /// intersection helpers can treat point and path clusters uniformly.
+    pub fn slots(self) -> [Option<usize>; 2] {
+        match self {
+            Boundary::None => [None, None],
+            Boundary::One(v) => [Some(v), Some(v)],
+            Boundary::Two { left, right } => [Some(left), Some(right)],
+        }
+    }
+}
+
+/// Describes the boundaries involved in a join.
 ///
 /// A cluster has at most two boundary vertices. A cluster with two boundary
 /// vertices is called a *path cluster*; a cluster with fewer is a *point
@@ -32,6 +71,14 @@ pub struct MergeContext {
     pub right_boundary: u8,
     /// Number of boundary vertices of the merged cluster.
     pub boundary: u8,
+    /// Left child's boundary vertices, in the logical frame of `left.sum`.
+    pub left_vertices: Boundary,
+    /// Right child's boundary vertices, in the logical frame of `right.sum`.
+    pub right_vertices: Boundary,
+    /// Merged cluster's boundary vertices, in the logical frame of the new sum.
+    pub parent_vertices: Boundary,
+    /// The vertex shared by the two children (their central vertex).
+    pub central: usize,
 }
 
 impl MergeContext {
@@ -75,13 +122,16 @@ pub trait Summary<W = ()>: Sized {
     /// propagation is needed.
     type Tag: Clone + Default;
 
+    /// Key type stored with labels in the underlying tree.
+    type LabelKey;
+
     /// Summary of the leaf representing the tree edge `u`-`v`.
     ///
     /// `u` and `v` are given in the orientation stored in the leaf.
     fn tree_edge(weight: &W, u: usize, v: usize) -> Self;
 
     /// Summary of the leaf representing the label at `v`.
-    fn label(weight: &W, v: usize) -> Self;
+    fn label(key: &Self::LabelKey, v: usize) -> Self;
 
     /// Combine the summaries of the left and right child of a cluster.
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;

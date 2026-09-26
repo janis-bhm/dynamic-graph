@@ -49,12 +49,13 @@
 //!
 //! impl Summary<()> for PathLen {
 //!     type Tag = ();
+//!     type LabelKey = u32;
 //!
 //!     fn tree_edge(_weight: &(), _u: usize, _v: usize) -> Self {
 //!         PathLen { len: 1 }
 //!     }
 //!
-//!     fn label(_weight: &(), _v: usize) -> Self {
+//!     fn label(_key: &u32, _v: usize) -> Self {
 //!         PathLen { len: 0 }
 //!     }
 //!
@@ -86,7 +87,7 @@ mod summary;
 mod top_tree;
 mod tree;
 
-pub use summary::{MergeContext, Summary};
+pub use summary::{Boundary, MergeContext, Summary};
 pub use top_tree::{LabelId, TopTree};
 pub use tree::{Edge, Label, Node, Tree};
 
