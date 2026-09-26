@@ -129,32 +129,29 @@ impl SizeVector {
 }
 
 /// One entry of a boundary part tree: the raw size vector stored at a cover
-/// level, together with its diagonal `M(level) * raw`, cached so that a range
-/// query over the augmented tree can return both the raw and diagonal sums.
+/// level, and the OR of its parts' incident level masks.
+///
+/// The diagonal `M(key) * raw` and its incident analogue are not stored: a
+/// part tree has at most `SLOTS` distinct (clamped) cover-level keys, so those
+/// aggregates are recomputed on demand by a bounded scan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PartEntry {
     raw: SizeVector,
-    diag: SizeVector,
     inc: u64,
-    inc_diag: u64,
 }
 
 impl Aggregate for PartEntry {
     fn reduce(&self, other: &Self) -> Self {
         PartEntry {
             raw: add_vectors(&self.raw, &other.raw),
-            diag: add_vectors(&self.diag, &other.diag),
             inc: self.inc | other.inc,
-            inc_diag: self.inc_diag | other.inc_diag,
         }
     }
 
     fn identity() -> Self {
         PartEntry {
             raw: zero_vector(),
-            diag: zero_vector(),
             inc: 0,
-            inc_diag: 0,
         }
     }
 }
@@ -240,14 +237,10 @@ fn restrict(tree: &PartTree, klo: i32, khi: i32) -> PartTree {
 
 fn add_at(tree: &mut PartTree, key: i32, value: &SizeVector, inc: u64) {
     let key = cover_key(key);
-    let diag = m_apply(key, value);
-    let inc_diag = inc_m_apply(key, inc);
     if tree
         .update(&key, |entry| {
             entry.raw = add_vectors(&entry.raw, value);
-            entry.diag = add_vectors(&entry.diag, &diag);
             entry.inc |= inc;
-            entry.inc_diag |= inc_diag;
         })
         .is_none()
     {
@@ -255,9 +248,7 @@ fn add_at(tree: &mut PartTree, key: i32, value: &SizeVector, inc: u64) {
             key,
             PartEntry {
                 raw: value.clone(),
-                diag,
                 inc,
-                inc_diag,
             },
         );
     }
@@ -277,7 +268,8 @@ fn total_inc(tree: &PartTree) -> u64 {
 }
 
 fn total_inc_diag(tree: &PartTree) -> u64 {
-    tree.aggregate().inc_diag
+    tree.iter()
+        .fold(0, |acc, (key, entry)| acc | inc_m_apply(*key, entry.inc))
 }
 
 fn range_inc(tree: &PartTree, klo: i32, khi: i32) -> u64 {
@@ -285,11 +277,19 @@ fn range_inc(tree: &PartTree, klo: i32, khi: i32) -> u64 {
 }
 
 fn range_inc_diag(tree: &PartTree, klo: i32, khi: i32) -> u64 {
-    tree.range_aggregate(klo..=khi).inc_diag
+    tree.iter()
+        .filter(|(key, _)| **key >= klo && **key <= khi)
+        .fold(0, |acc, (key, entry)| acc | inc_m_apply(*key, entry.inc))
 }
 
 fn diagonal_sum(tree: &PartTree, klo: i32, khi: i32) -> SizeVector {
-    tree.range_aggregate(klo..=khi).diag
+    let mut sum = zero_vector();
+    for (key, entry) in tree.iter() {
+        if *key >= klo && *key <= khi {
+            sum.add_assign(&entry.raw.masked(*key));
+        }
+    }
+    sum
 }
 
 /// Materialize the effect of a child's pending cover tag on the keys of its

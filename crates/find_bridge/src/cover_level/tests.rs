@@ -349,6 +349,91 @@ fn size_vector_matches_dense_randomized_reference() {
     }
 }
 
+#[test]
+fn part_tree_diagonal_aggregates_are_recomputed() {
+    let mut tree = PartTree::new();
+    add_at(
+        &mut tree,
+        -4,
+        &SizeVector::from_vec(vec![2, 3, 5, 7]),
+        (1u64 << 0) | (1u64 << 2),
+    );
+    add_at(
+        &mut tree,
+        -1,
+        &SizeVector::from_vec(vec![11, 13, 17]),
+        (1u64 << 0) | (1u64 << 3),
+    );
+    add_at(
+        &mut tree,
+        0,
+        &SizeVector::from_vec(vec![1, 4, 9, 16]),
+        (1u64 << 1) | (1u64 << 3),
+    );
+    add_at(
+        &mut tree,
+        4,
+        &SizeVector::from_vec(vec![6, 7, 8, 9, 10, 11, 12]),
+        (1u64 << 0) | (1u64 << 5) | (1u64 << 6),
+    );
+    add_at(
+        &mut tree,
+        8,
+        &SizeVector::from_vec(vec![3, 5, 7, 11, 13, 17, 19, 23, 29, 31]),
+        (1u64 << 4) | (1u64 << 9) | (1u64 << 10),
+    );
+    add_at(
+        &mut tree,
+        LEVEL_CAP,
+        &SizeVector::from_vec((0..SLOTS).map(|slot| (slot as u64 + 1) * 3).collect()),
+        (1u64 << 32) | (1u64 << 33),
+    );
+    add_at(
+        &mut tree,
+        NO_COVER,
+        &SizeVector::from_vec(vec![23, 29, 31, 37, 41, 43]),
+        (1u64 << 1) | (1u64 << 30),
+    );
+
+    // The negative keys and the cap/sentinel keys each coalesce into one entry.
+    assert_eq!(tree.iter().count(), 5);
+
+    let ranges = [(-1, -1), (0, 4), (5, LEVEL_CAP - 1), (-1, LEVEL_CAP)];
+    for (klo, khi) in ranges {
+        let mut dense = [0; SLOTS];
+        let mut expected_inc = 0;
+        for (key, entry) in tree.iter() {
+            if *key >= klo && *key <= khi {
+                let masked = entry.raw.masked(*key);
+                for (slot, sum) in dense.iter_mut().enumerate() {
+                    *sum += masked.get(slot);
+                }
+                expected_inc |= inc_m_apply(*key, entry.inc);
+            }
+        }
+
+        let diagonal = diagonal_sum(&tree, klo, khi);
+        for (slot, expected) in dense.iter().enumerate() {
+            assert_eq!(
+                diagonal.get(slot),
+                *expected,
+                "diagonal sum mismatch in range [{klo}, {khi}], slot {slot}"
+            );
+        }
+        assert_eq!(diagonal.get(SLOTS), 0);
+        assert_eq!(
+            range_inc_diag(&tree, klo, khi),
+            expected_inc,
+            "incident diagonal mismatch in range [{klo}, {khi}]"
+        );
+    }
+
+    let expected_total_inc = tree
+        .iter()
+        .fold(0, |acc, (key, entry)| acc | inc_m_apply(*key, entry.inc));
+    assert_eq!(total_inc_diag(&tree), expected_total_inc);
+}
+
 fn check_against_naive(fb: &mut FindBridge, naive: &Naive, n: usize) {
     for v in 0..n {
         assert_eq!(
