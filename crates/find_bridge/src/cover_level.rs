@@ -1054,6 +1054,8 @@ impl FindBridge {
     pub fn remove_label(&mut self, label: LabelId) -> Option<(usize, Level)> {
         let (v, level) = self.labels.remove(&label)?;
         let bit = level_bit(level);
+
+        // search for any other label at the same vertex and level.
         let still_present = self.labels.values().any(|&(u, l)| u == v && l == level);
         if !still_present {
             let new = self.vertex_levels[v] & !bit;
