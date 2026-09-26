@@ -343,6 +343,19 @@ fn shared(a: Boundary, b: Boundary) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LabelId(pub usize);
 
+/// An opaque handle to a node of a top tree, valid only while the tree is not
+/// structurally modified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeId(usize);
+
+/// What a cluster node represents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeData {
+    Edge(usize),
+    Label(usize),
+    Internal,
+}
+
 /// A dynamic top tree over a forest of trees.
 ///
 /// `N` is the vertex key type, `S` the user supplied [`Summary`] and `W`/`V`
@@ -443,6 +456,95 @@ where
     {
         self.detach_internal(label);
         Some(())
+    }
+}
+
+impl<N, L, S> TopTree<N, L, S>
+where
+    S: Summary<LabelKey = L>,
+    L: Eq + Hash,
+{
+    /// Mutates the summary of the live label identified by `key` and recomputes
+    /// all of its ancestors. The label node itself is not re-linked, so the top
+    /// tree's structure is unchanged.
+    pub fn update_label_summary(&mut self, key: &L, update: impl FnOnce(&mut S)) {
+        let node = *self.tree.label_weight(key).expect("label must exist");
+        assert!(
+            matches!(self.cl(node).data, ClusterData::Label(_)),
+            "update_label_summary expects a label node"
+        );
+        update(&mut self.cl_mut(node).sum);
+        let mut current = self.parent(node);
+        while let Some(parent) = current {
+            self.recompute(parent);
+            current = self.parent(parent);
+        }
+    }
+}
+
+impl<N, L, S> TopTree<N, L, S>
+where
+    S: Summary<LabelKey = L>,
+{
+    /// Exposes `u` and `v` and returns the resulting root cluster node.
+    pub fn expose_path_node(&mut self, u: usize, v: usize) -> Option<NodeId> {
+        self.expose_vertex(u);
+        self.expose_vertex(v).map(NodeId)
+    }
+
+    /// The summary of `node`.
+    pub fn node_summary(&self, node: NodeId) -> &S {
+        &self.cl(node.0).sum
+    }
+
+    /// Whether `node` is a path cluster.
+    pub fn node_is_path(&self, node: NodeId) -> bool {
+        self.is_path(node.0)
+    }
+
+    /// The logical (flipped) boundary vertices of `node`.
+    pub fn node_boundary(&self, node: NodeId) -> Boundary {
+        self.cl(node.0).flipped_boundary_vertices().to_boundary()
+    }
+
+    /// The logical children of an internal `node`.
+    pub fn node_children(&self, node: NodeId) -> Option<(NodeId, NodeId)> {
+        self.cl(node.0).children?;
+        let (left, right) = self.flipped_children(node.0);
+        Some((NodeId(left), NodeId(right)))
+    }
+
+    /// The vertex shared by the two children of an internal `node`.
+    pub fn node_central(&self, node: NodeId) -> Option<usize> {
+        self.cl(node.0).children?;
+        let (left, right) = self.flipped_children(node.0);
+        let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
+        let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
+        Some(shared(left_vertices, right_vertices))
+    }
+
+    /// What `node` represents.
+    pub fn node_leaf_data(&self, node: NodeId) -> NodeData {
+        match self.cl(node.0).data {
+            ClusterData::Edge(edge) => NodeData::Edge(edge),
+            ClusterData::Label(index) => NodeData::Label(index),
+            ClusterData::Internal => NodeData::Internal,
+        }
+    }
+
+    /// The key of the label represented by `node`, if it is a label leaf.
+    pub fn node_label_key(&self, node: NodeId) -> Option<&L> {
+        match self.cl(node.0).data {
+            ClusterData::Label(index) => self.tree.label_key(index),
+            _ => None,
+        }
+    }
+
+    /// Pushes `node`'s pending lazy tag to its path children. This does not
+    /// change the top tree's structure and is used by traversal code that
+    /// needs up-to-date child summaries.
+    pub fn push_node_tag(&mut self, node: NodeId) {
+        self.push_tag(node.0);
     }
 }
 

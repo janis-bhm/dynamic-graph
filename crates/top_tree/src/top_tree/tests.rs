@@ -73,6 +73,32 @@ impl Summary for PathLen {
     }
 }
 
+/// An aggregate that includes every leaf, so a label summary mutation is
+/// visible from an exposed path containing that label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LabelValue {
+    value: u64,
+}
+
+impl Summary for LabelValue {
+    type Tag = ();
+    type LabelKey = u32;
+
+    fn tree_edge(_w: &(), _u: usize, _v: usize) -> Self {
+        LabelValue { value: 0 }
+    }
+
+    fn label(_key: &u32, _v: usize) -> Self {
+        LabelValue { value: 1 }
+    }
+
+    fn combine(left: &Self, right: &Self, _ctx: &MergeContext) -> Self {
+        LabelValue {
+            value: left.value + right.value,
+        }
+    }
+}
+
 /// The sum of the edge weights on the cluster path, with a lazy "add `x` to
 /// every edge on the path" tag. This is the mechanism used by cover-level
 /// style algorithms.
@@ -675,6 +701,44 @@ fn path_summary() {
         h.cut(i - 1, i);
         check_invariants(&h);
     }
+}
+
+#[test]
+fn update_label_summary_recomputes_ancestors_without_relinking() {
+    let mut h = Harness::<LabelValue>::new(2);
+    h.link(0, 1);
+    h.tt.attach(0, 7);
+
+    let roots_before = live_roots(&h.tt);
+    let structure_before: Vec<_> =
+        h.tt.nodes
+            .iter()
+            .map(|node| {
+                node.as_ref()
+                    .map(|cluster| (cluster.parent, cluster.children, cluster.data))
+            })
+            .collect();
+
+    h.tt.update_label_summary(&7, |summary| summary.value = 7);
+
+    assert_eq!(live_roots(&h.tt), roots_before);
+    let structure_after: Vec<_> =
+        h.tt.nodes
+            .iter()
+            .map(|node| {
+                node.as_ref()
+                    .map(|cluster| (cluster.parent, cluster.children, cluster.data))
+            })
+            .collect();
+    assert_eq!(structure_after, structure_before);
+    check_invariants(&h);
+
+    assert_eq!(
+        h.tt.expose_path(0, 1),
+        Some(LabelValue { value: 7 }),
+        "the exposed path aggregate must include the updated label summary"
+    );
+    check_invariants(&h);
 }
 
 #[test]

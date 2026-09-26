@@ -88,7 +88,7 @@ mod top_tree;
 mod tree;
 
 pub use summary::{Boundary, MergeContext, Summary};
-pub use top_tree::{LabelId, TopTree};
+pub use top_tree::{LabelId, NodeData, NodeId, TopTree};
 pub use tree::{Edge, Label, Node, Tree};
 
 macro_rules! impl_nonmax_type {
