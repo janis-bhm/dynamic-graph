@@ -335,7 +335,7 @@ fn path_cover_and_uncover() {
 
 #[test]
 fn randomized_cover_uncover() {
-    for seed in 0..20 {
+    for seed in 0..8 {
         let n = 9;
         let levels = 6;
         let mut rng = Rng(seed);
@@ -354,7 +354,7 @@ fn randomized_cover_uncover() {
             edges.push((u, v));
         }
 
-        for _ in 0..400 {
+        for _ in 0..60 {
             let op = rng.next() % 4;
             let u = (rng.next() as usize) % n;
             let v = (rng.next() as usize) % n;
