@@ -71,18 +71,18 @@ impl<'a, K, V> Entry<'a, K, V> {
 impl<'a, K: Ord, V: Aggregate> Entry<'a, K, V> {
     /// Ensures a value is present, inserting `default` when vacant, and returns
     /// a guard over the value.
-    pub fn or_insert(self, default: V) -> OccupiedValue<'a, K, V> {
+    pub fn or_insert(self, default: V) -> OccupiedEntry<'a, K, V> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry,
             Entry::Vacant(entry) => entry.insert(default),
         }
     }
 
     /// Ensures a value is present, inserting the result of `default` when
     /// vacant, and returns a guard over the value.
-    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> OccupiedValue<'a, K, V> {
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> OccupiedEntry<'a, K, V> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry,
             Entry::Vacant(entry) => entry.insert(default()),
         }
     }
@@ -92,9 +92,9 @@ impl<'a, K: Ord, V: Aggregate> Entry<'a, K, V> {
     ///
     /// The function receives the entry's key, so key-derived values can be
     /// produced without cloning the key.
-    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> OccupiedValue<'a, K, V> {
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> OccupiedEntry<'a, K, V> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry,
             Entry::Vacant(entry) => {
                 let value = default(entry.key());
                 entry.insert(value)
@@ -116,14 +116,32 @@ impl<'a, K: Ord, V: Aggregate> Entry<'a, K, V> {
             Entry::Vacant(entry) => Entry::Vacant(entry),
         }
     }
+
+    /// Calls `update` on the value if the entry is occupied, or inserts the result of `default` if vacant, and returns the occupied entry.
+    pub fn update_or_insert_with<F: FnOnce(&mut V), D: FnOnce() -> V>(
+        self,
+        update: F,
+        default: D,
+    ) -> OccupiedEntry<'a, K, V> {
+        match self {
+            Entry::Occupied(mut entry) => {
+                {
+                    let mut guard = entry.get_mut();
+                    update(guard.get_mut());
+                }
+                entry
+            }
+            Entry::Vacant(entry) => entry.insert(default()),
+        }
+    }
 }
 
 impl<'a, K: Ord, V: Aggregate + Default> Entry<'a, K, V> {
     /// Ensures a value is present, inserting [`Default::default`] when vacant,
     /// and returns a guard over the value.
-    pub fn or_default(self) -> OccupiedValue<'a, K, V> {
+    pub fn or_default(self) -> OccupiedEntry<'a, K, V> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry,
             Entry::Vacant(entry) => entry.insert(Default::default()),
         }
     }
@@ -144,7 +162,7 @@ impl<'a, K, V> VacantEntry<'a, K, V> {
 
 impl<'a, K: Ord, V: Aggregate> VacantEntry<'a, K, V> {
     /// Inserts `value` at this entry's key and returns a guard over it.
-    pub fn insert(self, value: V) -> OccupiedValue<'a, K, V> {
+    pub fn insert(self, value: V) -> OccupiedEntry<'a, K, V> {
         let VacantEntry {
             key,
             handle,
@@ -161,19 +179,20 @@ impl<'a, K: Ord, V: Aggregate> VacantEntry<'a, K, V> {
                 .push(ins.kv.0, ins.kv.1, ins.right);
         });
 
-        let Handle { node, index, .. } = handle;
-        let ptr = node.node;
-        let height = node.height;
-        node.forget_type().recompute_and_ascend();
+        unsafe {
+            core::ptr::read(&handle.node)
+                .forget_type()
+                .recompute_and_ascend()
+        };
 
-        // SAFETY: the insertion handle is no longer used.
-        let map = unsafe { dormant_map.awaken() };
-        map.length += 1;
+        // SAFETY: modifying the length doesn't invalidate handles to any nodes.
+        unsafe {
+            dormant_map.reborrow().length += 1;
+        }
 
-        OccupiedValue {
-            node: ptr,
-            height,
-            index,
+        OccupiedEntry {
+            handle: handle.forget_node_type(),
+            dormant_map,
             _marker: PhantomData,
         }
     }

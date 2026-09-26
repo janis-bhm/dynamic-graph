@@ -237,21 +237,16 @@ fn restrict(tree: &PartTree, klo: i32, khi: i32) -> PartTree {
 
 fn add_at(tree: &mut PartTree, key: i32, value: &SizeVector, inc: u64) {
     let key = cover_key(key);
-    if tree
-        .update(&key, |entry| {
+    tree.entry(key).update_or_insert_with(
+        |entry| {
             entry.raw = add_vectors(&entry.raw, value);
             entry.inc |= inc;
-        })
-        .is_none()
-    {
-        tree.insert(
-            key,
-            PartEntry {
-                raw: value.clone(),
-                inc,
-            },
-        );
-    }
+        },
+        || PartEntry {
+            raw: value.clone(),
+            inc,
+        },
+    );
 }
 
 fn add_vec(dst: &mut SizeVector, src: &SizeVector) {

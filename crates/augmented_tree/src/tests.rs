@@ -215,7 +215,7 @@ fn entry_or_insert_and_modify() {
     // Occupied: the existing value is kept, and mutating the guard updates
     // the aggregate when the guard drops.
     {
-        let mut guard = tree.entry(1).or_insert(Sum(999));
+        let mut guard = tree.entry(1).or_insert(Sum(999)).into_mut();
         assert_eq!(guard.get(), &Sum(10));
         guard.get_mut().0 += 5;
     }
