@@ -47,20 +47,19 @@
 //!     len: u32,
 //! }
 //!
-//! impl Summary<()> for PathLen {
+//! impl Summary for PathLen {
 //!     type Tag = ();
-//!     type LabelKey = u32;
 //!
-//!     fn tree_edge(_weight: &(), _u: usize, _v: usize) -> Self {
+//!     fn tree_edge(_u: usize, _v: usize) -> Self {
 //!         PathLen { len: 1 }
 //!     }
 //!
-//!     fn label(_key: &u32, _v: usize) -> Self {
+//!     fn label(_v: usize) -> Self {
 //!         PathLen { len: 0 }
 //!     }
 //!
 //!     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
-//!         if ctx.boundary == 2 {
+//!         if ctx.boundary.is_path() {
 //!             PathLen {
 //!                 len: u32::from(ctx.left_is_path_child()) * left.len
 //!                     + u32::from(ctx.right_is_path_child()) * right.len,

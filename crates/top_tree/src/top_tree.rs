@@ -12,7 +12,7 @@
 //! information (connectivity, bridge/cover levels, biconnectivity data, ...)
 //! over a fully dynamic forest.
 
-use std::{hash::Hash, marker::PhantomData};
+use std::hash::Hash;
 
 use crate::{
     NonMaxUsize, Tree,
@@ -91,7 +91,7 @@ impl Children {
 }
 
 /// A node of the top tree.
-struct Cluster<S: Summary<W>, W = ()> {
+struct Cluster<S: Summary> {
     parent: Option<NonMaxUsize>,
     children: Option<Children>,
     /// Whether the logical orientation of the cluster is reversed.
@@ -104,10 +104,9 @@ struct Cluster<S: Summary<W>, W = ()> {
     sum: S,
     /// A lazy tag waiting to be pushed to this cluster's descendants.
     tag: S::Tag,
-    _marker: PhantomData<fn() -> W>,
 }
 
-impl<S: Summary<W>, W> Cluster<S, W> {
+impl<S: Summary> Cluster<S> {
     fn flipped_boundary_vertices(&self) -> BoundaryVertices {
         if self.flipped {
             self.boundary_vertices.flipped()
@@ -362,7 +361,7 @@ pub enum NodeData {
 /// the edge/label and vertex weights of the underlying [`Tree`].
 pub struct TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
 {
     tree: Tree<N, L, usize, ()>,
     nodes: Vec<Option<Cluster<S>>>,
@@ -373,7 +372,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
 {
     /// Creates an empty top tree.
     pub fn new() -> Self {
@@ -403,7 +402,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
     N: Eq + Hash,
 {
     /// Adds a vertex with the given key and weight and returns its index.
@@ -461,7 +460,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
     L: Eq + Hash,
 {
     /// Mutates the summary of the live label identified by `key` and recomputes
@@ -484,7 +483,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
 {
     /// Exposes `u` and `v` and returns the resulting root cluster node.
     pub fn expose_path_node(&mut self, u: usize, v: usize) -> Option<NodeId> {
@@ -550,7 +549,7 @@ where
 
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L> + Clone,
+    S: Summary + Clone,
 {
     /// Exposes `v`, making it an external boundary vertex, and returns the
     /// summary of the resulting root cluster.
@@ -624,7 +623,7 @@ where
 
 impl<N, L, S> Default for TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
 {
     fn default() -> Self {
         Self::new()
@@ -634,7 +633,7 @@ where
 /// Low level cluster tree operations.
 impl<N, L, S> TopTree<N, L, S>
 where
-    S: Summary<LabelKey = L>,
+    S: Summary,
 {
     #[inline]
     fn cl(&self, node: usize) -> &Cluster<S> {
@@ -1026,7 +1025,6 @@ where
             data: ClusterData::Internal,
             sum,
             tag: S::Tag::default(),
-            _marker: PhantomData,
         }
     }
 
@@ -1051,7 +1049,7 @@ where
         v: usize,
         boundary_vertices: BoundaryVertices,
     ) -> usize {
-        let sum = S::tree_edge(&(), u, v);
+        let sum = S::tree_edge(u, v);
         let cluster = Cluster {
             parent: None,
             children: None,
@@ -1060,20 +1058,13 @@ where
             data: ClusterData::Edge(edge),
             sum,
             tag: S::Tag::default(),
-            _marker: PhantomData,
         };
 
         self.alloc(cluster)
     }
 
-    fn new_leaf_label(
-        &mut self,
-        key: &L,
-        label: usize,
-        vertex: usize,
-        boundary: BoundaryVertices,
-    ) -> usize {
-        let sum = S::label(key, vertex);
+    fn new_leaf_label(&mut self, label: usize, vertex: usize, boundary: BoundaryVertices) -> usize {
+        let sum = S::label(vertex);
         let cluster = Cluster {
             parent: None,
             children: None,
@@ -1082,7 +1073,6 @@ where
             data: ClusterData::Label(label),
             sum,
             tag: S::Tag::default(),
-            _marker: PhantomData,
         };
 
         self.alloc(cluster)
@@ -1598,7 +1588,7 @@ where
         }
         self.set_exposed(vertex, false);
 
-        let leaf = self.new_leaf_label(&label, self.tree.label_count(), vertex, unsafe {
+        let leaf = self.new_leaf_label(self.tree.label_count(), vertex, unsafe {
             BoundaryVertices::from_option(root_v.map(|_| NonMaxUsize::new_unchecked(vertex)))
         });
 

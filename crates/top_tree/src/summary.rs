@@ -107,26 +107,19 @@ impl MergeContext {
 /// Implementors describe how to summarize a single edge or label leaf and how
 /// to combine the summaries of two children. The top tree takes care of
 /// calling these in the right order as it rebalances.
-///
-/// `W` is the weight type stored on the underlying [`Tree`](crate::Tree)
-/// edges and labels, so that a summary may depend on application data such as
-/// edge levels.
-pub trait Summary<W = ()>: Sized {
+pub trait Summary: Sized {
     /// A lazy tag that can be applied to a whole cluster, e.g. to add a common
     /// value to every edge on an exposed path. Use `()` if no lazy
     /// propagation is needed.
     type Tag: Clone + Default;
 
-    /// Key type stored with labels in the underlying tree.
-    type LabelKey;
-
     /// Summary of the leaf representing the tree edge `u`-`v`.
     ///
     /// `u` and `v` are given in the orientation stored in the leaf.
-    fn tree_edge(weight: &W, u: usize, v: usize) -> Self;
+    fn tree_edge(u: usize, v: usize) -> Self;
 
     /// Summary of the leaf representing the label at `v`.
-    fn label(key: &Self::LabelKey, v: usize) -> Self;
+    fn label(v: usize) -> Self;
 
     /// Combine the summaries of the left and right child of a cluster.
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
