@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use augmented_tree::{Aggregate, BTree};
 use top_tree::{MergeContext, Summary};
 
 /// Sentinel used for "there is no such edge" and for the cover level of a
@@ -43,8 +44,35 @@ const LEVEL_CAP: i32 = 32;
 const SLOTS: usize = LEVEL_CAP as usize + 2;
 
 type SizeVector = Vec<u64>;
-/// A dense map from cover-level keys -1..=`LEVEL_CAP` to size vectors.
-type PartTree = Vec<SizeVector>;
+
+/// One entry of a boundary part tree: the raw size vector stored at a cover
+/// level, together with its diagonal `M(level) * raw`, cached so that a range
+/// query over the augmented tree can return both the raw and diagonal sums.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PartEntry {
+    raw: SizeVector,
+    diag: SizeVector,
+}
+
+impl Aggregate for PartEntry {
+    fn reduce(&self, other: &Self) -> Self {
+        PartEntry {
+            raw: add_vectors(&self.raw, &other.raw),
+            diag: add_vectors(&self.diag, &other.diag),
+        }
+    }
+
+    fn identity() -> Self {
+        PartEntry {
+            raw: zero_vector(),
+            diag: zero_vector(),
+        }
+    }
+}
+
+/// A map from cover-level keys to size vectors, augmented with the sum of its
+/// values so that whole-tree and range sums are cheap.
+type PartTree = BTree<i32, PartEntry>;
 
 /// Clamps a cover level to the FindSize key/level domain. The no-cover
 /// sentinel is above every real level and therefore shares the cap slot.
@@ -56,16 +84,16 @@ fn find_size_level(level: i32) -> i32 {
     }
 }
 
-fn level_slot(level: i32) -> usize {
-    (find_size_level(level) + 1) as usize
-}
-
 fn zero_vector() -> SizeVector {
     vec![0; SLOTS]
 }
 
+fn add_vectors(left: &[u64], right: &[u64]) -> SizeVector {
+    left.iter().zip(right).map(|(a, b)| a + b).collect()
+}
+
 fn zero_tree() -> PartTree {
-    (0..SLOTS).map(|_| zero_vector()).collect()
+    PartTree::new()
 }
 
 fn single_key_tree(key: i32, value: &[u64]) -> PartTree {
@@ -74,53 +102,44 @@ fn single_key_tree(key: i32, value: &[u64]) -> PartTree {
     tree
 }
 
-/// Sum every key's vector in a dense part tree.
-fn total_sum(tree: &[SizeVector]) -> SizeVector {
-    let mut sum = zero_vector();
-    for value in tree {
-        add_vec(&mut sum, value);
-    }
-    sum
-}
-
-fn key_range(klo: i32, khi: i32) -> Option<std::ops::RangeInclusive<usize>> {
-    if khi < -1 || klo > LEVEL_CAP {
-        return None;
-    }
-    let low = level_slot(klo);
-    let high = level_slot(khi);
-    (low <= high).then_some(low..=high)
+/// Sum every key's vector in a part tree.
+fn total_sum(tree: &PartTree) -> SizeVector {
+    tree.aggregate().raw.clone()
 }
 
 /// Sum the vectors whose keys lie in the inclusive range `[klo, khi]`.
-fn range_sum(tree: &[SizeVector], klo: i32, khi: i32) -> SizeVector {
-    let mut sum = zero_vector();
-    if let Some(range) = key_range(klo, khi) {
-        for key in range {
-            if let Some(value) = tree.get(key) {
-                add_vec(&mut sum, value);
-            }
-        }
-    }
-    sum
+fn range_sum(tree: &PartTree, klo: i32, khi: i32) -> SizeVector {
+    tree.range_aggregate(klo..=khi).raw
 }
 
 /// Keep only keys in the inclusive range `[klo, khi]`.
-fn restrict(tree: &[SizeVector], klo: i32, khi: i32) -> PartTree {
-    let mut restricted = zero_tree();
-    if let Some(range) = key_range(klo, khi) {
-        for key in range {
-            if let (Some(dst), Some(src)) = (restricted.get_mut(key), tree.get(key)) {
-                dst.clone_from(src);
-            }
+fn restrict(tree: &PartTree, klo: i32, khi: i32) -> PartTree {
+    let mut restricted = PartTree::new();
+    for (key, entry) in tree.iter() {
+        if *key >= klo && *key <= khi {
+            restricted.insert(*key, entry.clone());
         }
     }
     restricted
 }
 
-fn add_at(tree: &mut [SizeVector], key: i32, value: &[u64]) {
-    if let Some(slot) = tree.get_mut(level_slot(key)) {
-        add_vec(slot, value);
+fn add_at(tree: &mut PartTree, key: i32, value: &[u64]) {
+    let key = find_size_level(key);
+    let diag = m_apply(key, value);
+    if tree
+        .update(&key, |entry| {
+            add_vec(&mut entry.raw, value);
+            add_vec(&mut entry.diag, &diag);
+        })
+        .is_none()
+    {
+        tree.insert(
+            key,
+            PartEntry {
+                raw: value.to_vec(),
+                diag,
+            },
+        );
     }
 }
 
@@ -143,22 +162,13 @@ fn m_apply(key: i32, value: &[u64]) -> SizeVector {
         .collect()
 }
 
-fn diagonal_sum(tree: &[SizeVector], klo: i32, khi: i32) -> SizeVector {
-    let mut sum = zero_vector();
-    if let Some(range) = key_range(klo, khi) {
-        for key_slot in range {
-            if let Some(value) = tree.get(key_slot) {
-                let key = key_slot as i32 - 1;
-                add_vec(&mut sum, &m_apply(key, value));
-            }
-        }
-    }
-    sum
+fn diagonal_sum(tree: &PartTree, klo: i32, khi: i32) -> SizeVector {
+    tree.range_aggregate(klo..=khi).diag
 }
 
 /// Materialize the effect of a child's pending cover tag on the keys of its
 /// boundary part tree. The unmodified (raw) tree remains stored in the child.
-fn clean_tree(tree: &[SizeVector], pending: CoverTag) -> PartTree {
+fn clean_tree(tree: &PartTree, pending: CoverTag) -> PartTree {
     let threshold = find_size_level(pending.threshold);
     let constant = find_size_level(pending.constant);
     let low = threshold.max(constant);
@@ -207,6 +217,8 @@ fn endpoint_child(
 /// Get the per-boundary tree for `vertex`. A single-boundary cluster's tree
 /// can be in either slot after a lazy orientation flip, so use its populated
 /// slot rather than assuming it is still slot zero.
+/// The unused slot is empty, while every stored boundary tree must be
+/// non-empty so this test continues to identify the unused slot.
 fn boundary_tree<'a>(
     parts: &'a [PartTree; 2],
     boundary: top_tree::Boundary,
@@ -245,7 +257,7 @@ fn set_boundary_tree(
         top_tree::Boundary::Two { right, .. } if vertex == right => parts[1] = tree,
         top_tree::Boundary::One(v) if vertex == v => {
             parts[0] = tree;
-            parts[1] = Vec::new();
+            parts[1] = PartTree::new();
         }
         top_tree::Boundary::None => parts[0] = tree,
         _ => panic!("vertex {vertex} is not a boundary of {boundary:?}"),
@@ -260,7 +272,7 @@ fn along_path_find_size(
     let mut size = left.size.clone();
     add_vec(&mut size, &right.size);
 
-    let mut parts = [Vec::new(), Vec::new()];
+    let mut parts = [PartTree::new(), PartTree::new()];
     let mut children_parts = [left.part.clone(), right.part.clone()];
     let child_boundaries = [ctx.left_vertices, ctx.right_vertices];
     let child_summaries = [left, right];
@@ -327,7 +339,10 @@ fn along_path_find_size(
         );
         let cover_x = find_size_level(child_summaries[x_child].cover);
         let suffix = range_sum(y_tree, cover_x, LEVEL_CAP);
-        let at_cover = x_tree[level_slot(cover_x)].clone();
+        let at_cover = x_tree
+            .get(&cover_x)
+            .map(|entry| entry.raw.clone())
+            .unwrap_or_else(zero_vector);
         let mut part_at_cover = at_cover.clone();
         add_vec(&mut part_at_cover, &suffix);
         let mut diag_at_cover = m_apply(cover_x, &at_cover);
@@ -344,8 +359,8 @@ fn along_path_find_size(
         };
         if y != ctx.central {
             let prefix = restrict(y_tree, -1, cover_x - 1);
-            for (dst, src) in result.iter_mut().zip(prefix) {
-                add_vec(dst, &src);
+            for (key, entry) in prefix.iter() {
+                add_at(&mut result, *key, &entry.raw);
             }
         }
         add_at(&mut result, cover_x, &part_at_cover);
@@ -416,7 +431,7 @@ fn off_path_find_size(
         &m_apply(summaries[a_child].cover, &summaries[b_child].size),
     );
 
-    let mut parts = [Vec::new(), Vec::new()];
+    let mut parts = [PartTree::new(), PartTree::new()];
     set_boundary_tree(
         &mut parts,
         ctx.parent_vertices,
@@ -582,7 +597,7 @@ impl Summary<()> for CoverLevel {
             pending: CoverTag::identity(),
             size: size.clone(),
             path_vertices: 1,
-            part: [tree, Vec::new()],
+            part: [tree, PartTree::new()],
             leaf: LeafKind::Label,
         }
     }
