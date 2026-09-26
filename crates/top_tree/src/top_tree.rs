@@ -1506,13 +1506,11 @@ where
             BoundaryVertices::from_option(root_v.map(|_| NonMaxUsize::new_unchecked(vertex)))
         });
 
-        let label = self.tree.add_label(vertex, label, leaf);
+        self.tree.add_label(vertex, label, leaf);
 
         if let Some(root_v) = root_v {
             self.new_internal(root_v, leaf, BoundaryVertices::None);
         }
-
-        label
     }
 
     fn detach_internal(&mut self, label: &L)
