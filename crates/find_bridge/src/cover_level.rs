@@ -720,11 +720,10 @@ fn min_candidate(left: (i32, Option<Edge>), right: (i32, Option<Edge>)) -> (i32,
     if right.0 < left.0 { right } else { left }
 }
 
-impl Summary<()> for CoverLevel {
+impl Summary for CoverLevel {
     type Tag = CoverTag;
-    type LabelKey = LabelKey;
 
-    fn tree_edge(_weight: &(), u: usize, v: usize) -> Self {
+    fn tree_edge(u: usize, v: usize) -> Self {
         // A freshly linked tree edge is a bridge: its cover level is -1. The
         // same value is stored as the global cover so that an edge leaf can
         // serve as the root of an `expose`; whether the edge is on or off the
@@ -745,7 +744,7 @@ impl Summary<()> for CoverLevel {
         }
     }
 
-    fn label(_key: &LabelKey, _v: usize) -> Self {
+    fn label(_v: usize) -> Self {
         let size = SizeVector::from_vec(vec![1; SLOTS]);
         let tree = single_key_tree(LEVEL_CAP, &size, 0);
         CoverLevel {
