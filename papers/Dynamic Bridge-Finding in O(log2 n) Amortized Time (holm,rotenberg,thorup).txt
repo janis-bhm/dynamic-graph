@@ -1,0 +1,1535 @@
+                                                                                   2
+                                                   Dynamic Bridge-Finding in O(log
+                                                                             e       n) Amortized Time
+                                                                 Jacob Holm∗, Eva Rotenberg, and Mikkel Thorup∗
+
+                                                                       University of Copenhagen (DIKU),
+                                                                jaho@di.ku.dk, roden@di.ku.dk, mthorup@di.ku.dk
+
+
+
+
+arXiv:1707.06311v2 [cs.DS] 22 Aug 2017
+                                                                                     August 23, 2017
+
+
+
+                                                                                          Abstract
+                                                   We present a deterministic fully-dynamic data structure for maintaining information about
+                                               the bridges in a graph. We support updates in e     O((log n)2 ) amortized time, and can find a
+                                               bridge in the component of any given vertex, or a bridge separating any two given vertices,
+                                               in O(log n/ log log n) worst case time. Our bounds match the current best for bounds for
+                                               deterministic fully-dynamic connectivity up to log log n factors.
+                                                   The previous best dynamic bridge finding was an O((log
+                                                                                                       e      n)3 ) amortized time algorithm by
+                                               Thorup [STOC2000], which was a bittrick-based improvement on the O((log n)4 ) amortized time
+                                               algorithm by Holm et al.[STOC98, JACM2001].
+                                                   Our approach is based on a different and purely combinatorial improvement of the algorithm
+                                               of Holm et al., which by itself gives a new combinatorial O((log
+                                                                                                          e      n)3 ) amortized time algorithm.
+                                               Combining it with Thorup’s bittrick, we get down to the claimed e    O((log n)2 ) amortized time.
+                                                   Essentially the same new trick can be applied to the biconnectivity data structure from
+                                               [STOC98, JACM2001], improving the amortized update time to e        O((log n)3 ).
+                                                   We also offer improvements in space. We describe a general trick which applies to both of our
+                                               new algorithms, and to the old ones, to get down to linear space, where the previous best use
+                                               O(m + n log n log log n). Finally, we show how to obtain O(log n/ log log n) query time, matching
+                                               the optimal trade-off between update and query time.
+                                                   Our result yields an improved running time for deciding whether a unique perfect matching
+                                               exists in a static graph.
+
+
+
+
+                                           ∗
+                                             This research is supported by Mikkel Thorup’s Advanced Grant DFF-0602-02499B from the Danish Council for
+                                         Independent Research under the Sapere Aude research career programme.
+1     Introduction
+In graphs and networks, connectivity between vertices is a fundamental property. In real life, we
+often encounter networks that change over time, subject to insertion and deletion of edges. We call
+such a graph fully dynamic. Dynamic graphs call for dynamic data structures that maintain just
+enough information about the graph in its current state to be able to promptly answer queries.
+    Vertices of a graph are said to be connected if there exists a path between them, and k-edge
+connected if no sequence of k − 1 edge deletions can disconnect them. A bridge is an edge whose
+deletion would disconnect the graph. In other words, a pair of connected vertices are 2-edge
+connected if they are not separated by a bridge. By Menger’s Theorem [17], this is equivalent to
+saying that a pair of connected vertices are two-edge connected if there exist two edge-disjoint paths
+between them. By edge-disjoint is meant that no edge appears in both paths.
+    For dynamic graphs, the first and most fundamental property to be studied was that of dynamic
+connectivity. In general, we can assume the graph has a fixed set of n vertices, and we let m denote
+                                                                                           √
+the current number of edges in the graph. The first data structure with sublinear O( n) update
+time is due to Frederickson [5] and Eppstein et al. [4]. Later, Frederickson [6] and Eppstein et
+                                       √
+al. [4] gave a data structure with O( n) update time for two-edge connectivity. Henzinger and
+King achieved poly-logarithmic expected amortized time [8], that is, an expected amortized update
+time of O((log n)3 ), and O(log n/ log log n) query time for connectivity. And in [9], O((log n)5 )
+expected amortized update time and O(log n) worst case query time for 2-edge connectivity. The
+first polylogarithmic deterministic result was by Holm et al in [10]; an amortized deterministic
+update time of O((log n)2 ) for connectivity, and O((log n)4 ) for 2-edge connectivity. The update
+time for deterministic dynamic connectivity has later been improved to O((log n)2 / log log n) by
+Wulff-Nilsen [21]. Sacrificing determinism, an O(log n(log log n)3 ) structure for connectivity was
+presented by Thorup [20], and later improved to O(log n(log log n)2 ) by Huang et al. [12]. In the
+same paper, Thorup obtains an update time of O((log n)3 log log n) for deterministic two-edge
+connectivity. Interestingly, Kapron et al. [13] gave a Monte Carlo-style randomized data structure
+with polylogarithmic worst case update time for dynamic connectivity, namely, O((log n)4 ) per edge
+insertion, O((log n)5 ) per edge deletion, and O(log n/ log log n) per query. We know of no similar
+result for bridge finding. The best lower bound known is by Pǎtraşcu et al. [18], which shows a
+                                                                                     t
+trade-off between update time tu and query time tq of tq lg ttuq = Ω(lg n) and tu lg tuq = Ω(lg n).
+
+1.1    Our results
+We obtain an update time of O((log n)2 (log log n)2 ) and a query time of O(log n/ log log n) for the
+bridge finding problem:
+
+Theorem 1. There exists a deterministic data structure for dynamic multigraphs in the word RAM
+model with Ω(log n) word size, that uses O(m + n) space, and can handle the following updates, and
+queries for arbitrary vertices v or arbitrary connected vertices v, u:
+
+    • insert and delete edges in O((log n)2 (log log n)2 ) amortized time,
+
+    • find a bridge in v’s connected component or determine that none exists, or find a bridge that
+      separates u from v or determine that none exists. Both in O(log n/ log log n) worst-case time
+      for the first bridge, or O(log n/ log log n + k) worst case time for the first k bridges.
+
+
+
+                                                   1
+   • find the size of v’s connected component in O(log n/ log log n) worst-case time, or the size of
+     its 2-edge connected component in O(log n(log log n)2 ) worst-case time.
+
+   Since a pair of connected vertices are two-edge connected exactly when there is no bridge
+separating them, we have the following corollary:
+
+Corollary 2. There exists a data structure for dynamic multigraphs in the word RAM model with
+Ω(log n) word size, that can answer two-edge connectivity queries in O(log n/ log log n) worst case
+time and handle insertion and deletion of edges in O((log n)2 (log log n)2 ) amortized time, with space
+consumption O(m + n).
+
+   Note that the query time is optimal with respect to the trade-off by Pǎtraşcu et al. [18]
+   As a stepping stone on the way to our main theorem, we show the following:
+
+Theorem 3. There exists a combinatorial deterministic data structure for dynamic multigraphs
+on the pointer-machine without the use of bit-tricks, that uses O(m + n) space, and can handle
+insertions and deletions of edges in O((log n)3 log log n) amortized time, find bridges and determine
+connected component sizes in O(log n) worst-case time, and find 2-edge connected component sizes
+in O((log n)2 log log n) worst-case time.
+
+    Our results are based on modifications to the 2-edge connectivity data structure from [11].
+Applying the analoguous modification to the biconnectivity data structure from the same paper
+yields a structure with O((log n)3 (log log n)2 ) amortized update time and O((log n)2 (log log n)2 )
+worst case query time. The details of this modification are beyond the scope of this paper.
+
+1.2   Applications
+While dynamic graphs are interesting in their own right, many algorithms and theorem proofs for
+static graphs rely on decremental or incremental graphs. Take for example the problem of whether
+or not a graph has a unique perfect matching? The following theorem by Kotzig immediately yields
+a near-linear algorithm if implemented together with a decremental two-edge connectivity data
+structure with poly-logarithmic update time:
+
+Theorem 4 (A. Kotzig ’59 [16]). Let G be a connected graph with a unique perfect matching M .
+Then G has a bridge that belongs to M .
+
+    The near-linear algorithm for finding a unique perfect matching by Gabow, Kaplan, and Tarjan [7]
+is straight-forward: Find a bridge and delete it. If deleting it yields connected components of odd
+size, it must belong to the matching, and all edges incident to its endpoints may be deleted—if the
+components have even size, the bridge cannot belong to the matching. Recurse on the components.
+Thus, to implement Kotzig’s Theorem, one has to implement three operations: One that finds a
+bridge, a second that deletes an edge, and a third returning the size of a connected component.
+    Another example is Petersen’s theorem [19] which states that any cubic, two-edge connected
+graph contains a perfect matching. An algorithm by Biedl et al. [2] finds a perfect matching in
+such graphs in O(n log4 n) time, by using the Holm et al two-edge connectivity data structure as a
+subroutine. In fact, one may implement their algorithm and obtain running time O(nf (n)), by using
+as subroutine a data structure for amortized decremental two-edge connectivity with update-time
+f (n). Here, we thus improve the running time from O(n(log n)3 log log n) to O(n(log n)2 (log log n)2 ).
+
+
+                                                   2
+    In 2010, Diks and Stanczyk [3] improved Biedl et al.’s algorithm for perfect matchings in
+two-edge connected cubic graphs, by having it rely only on dynamic connectivity, not two-edge
+connectivity, and thus obtaining a running time of O(n(log n)2 / log log n) for the deterministic
+version, or O(n log n(log log n)2 ) expected running time for the randomized version. However, our
+data structure still yields a direct improvement to the original algorithm by Biedl et al.
+    Note that all applications to static graphs have in common that it is no disadvantage that our
+running time is amortized.
+
+1.3   Techniques
+As with the previous algorithms, our result is based on top trees [1] which is a hierarchical tree
+structure used to represent information about a dynamic tree — in this case, a certain spanning
+tree of the dynamic graph. The original O((log n)4 ) algorithm of Holm et al. [11] stores O((log n)2 )
+counters with each top tree node, where each counter represent the size of a certain subgraph. Our
+new O((log n)3 ) algorithm applies top trees the same way, representing the same O((log n)2 ) sizes
+with each top tree node, but with a much more efficient implicit representation of the sizes.
+     Reanalyzing the algorithm of Holm et al. [11], we show that many of the sizes represented in
+the top nodes are identical, which implies that that they can be represented more efficiently as
+a list of actual differences. We then need additional data structures to provide the desired sizes,
+and we have to be very careful when we move information around as the the top tree changes, but
+overall, we gain almost a log-factor in the amortized time bound, and the algorithm remains purely
+combinatorial.
+     Our combinatorial improvement can be composed with the bittrick improvement of Thorup [20].
+Thorup represents the same sizes as the original algorithm of Holm et al., but observes that we
+don’t need the exact sizes, but just a constant factor approximation. Each approximate size can
+be represented with only O(log log n) bits, and we can therefore pack Ω(log n/ log log n) of them
+together in a single Ω(log n)-bit word. This can be used to reduce the cost of adding two O(log n)-
+dimensional vectors of approximate sizes from O(log n) time to O(log log n) time. It may not be
+obvious from the current presentation, but it was a significant technical difficulty when developing
+our O((log n)3 log log n) algorithm to make sure we could apply this technique and get the associated
+speedup to O((log n)2 (log log n)2 ).
+     The “natural” query time of our algorithm is the same as its update time. In order to reduce
+the query time, we observe that we can augment the main algorithm to maintain a secondary
+structure that can answer queries much faster. This can be used to reduce the query time for the
+combinatorial algorithm to O(log n), and for the full algorithm to the optimal O(log n/ log log n).
+     The secondary structure needed for the optimal O(log n/ log log n) query time uses top trees of
+degree O(log n/ log log n). While the use of non-binary trees is nothing new, we believe we are the
+first to show that such top trees can be maintained in the “natural” time.
+     Finally, we show a general technique for getting down to linear space, using top trees whose
+base clusters have size Θ(logc n).
+
+1.4   Article outline
+In Section 2, we recall how [11] fundamentally solves two-edge connectivity via a reduction to a
+certain set of operations on a dynamic forest. In Section 3, we recall how top trees can be used to
+maintain information in a dynamic forest, as shown in [1]. In Sections 4, 5, and 6, we describe how
+
+
+                                                  3
+to support the operations on a dynamic tree needed to make a combinatorial O((log n)3 log log n)
+algorithm for bridge finding, as stated in Theorem 3. Then, in Section 7, we show how to use
+Approximate Counting to get down to O((log n)2 (log log n)2 ) update time, thus, reaching the update
+time of Theorem 1. We then revisit top trees in Section 8, and introduce the notion of B-ary top
+trees, as well as a general trick to save space in complex top tree applications. We proceed to show
+how to obtain the optimal Θ(log n/ log log n) query time in Section 9. Finally, in Section 10, we
+show how to achieve optimal space, by only storing cluster information with large clusters, and
+otherwise calculating it from scratch when needed.
+
+
+2     Reduction to operations on dynamic trees
+In [11], two-edge connectivity was maintained via operations on dynamic trees, as follows. For each
+edge e of the graph, the algorithm explicitly maintains a level, `(e), between 0 and `max = blog2 nc
+such that the edges at level `max form a spanning forest T , and such that the    2-edge-connected
+components in the subgraph induced by edges at level at least i have at most n/2i vertices. For
+                                                                                      
+
+each edge e in the spanning forest, define the cover level, c(e), as the maximum level of an edge
+crossing the cut defined by removing e from T , or −1 if no such edge exists. The cover levels are
+only maintained implicitly, because each edge insertion and deletion can change the cover levels of
+Ω(n) edges. Note that the bridges are exactly the edges in the spanning forest with cover level −1.
+The algorithm explicitly maintains the spanning forest T using a dynamic tree structure supporting
+the following operations:
+   1. Link(v, w). Add the edge (v, w) to the dynamic tree, implicitly setting its cover level to −1.
+    2. Cut(v, w). Remove the edge (v, w) from the dynamic tree.
+    3. Connected(v, w). Returns true if v and w are in the same tree, false otherwise.
+    4. Cover(v, w, i). For each edge e on the tree path from v to w whose cover level is less than i,
+       implicitly set the cover level to i.
+    5. Uncover(v, w, i). For each edge e on the tree path from v to w whose cover level is at most i,
+       implicitly set the cover level to −1.
+    6. CoverLevel(v). Return the minimal cover level of any edge in the tree containing v.
+    7. CoverLevel(v, w). Return the minimal cover level of an edge on the path from v to w. If
+       v = w, we define CoverLevel(v, w) = `max .
+    8. MinCoveredEdge(v). Return any edge in the tree containing v with minimal cover level.
+    9. MinCoveredEdge(v, w). Returns a tree-edge on the path from v to w whose cover level is
+       CoverLevel(v, w).
+ 10. AddLabel(v, l, i). Associate the user label l to the vertex v at level i.
+ 11. RemoveLabel(l). Remove the user label l from its vertex vertex(l).
+ 12. FindFirstLabel(v, w, i). Find a user label at level i such that the associated vertex u has
+     CoverLevel(u, meet(u, v, w)) ≥ i and minimizes the distance from v to meet(u, v, w).
+ 13. FindSize(v, w, i). Find the number of vertices u such that CoverLevel(u, meet(u, v, w)) ≥ i.
+     Note that FindSize(v, v, −1) is just the number of vertices in the tree containing v.
+
+
+
+
+                                                  4
+Lemma 5 (Essentially the high level algorithm from [11]). There exists a deterministic reduction
+for dynamic graphs with n nodes, that, when starting with an empty graph, supports any sequence
+of m Insert or Delete operations using:
+
+   • O(m) calls to Link, Cut, Uncover, and CoverLevel.
+
+   • O(m log n) calls to Connected, Cover, AddLabel, RemoveLabel, FindFirstLabel, and FindSize.
+
+And that can answer FindBridge queries using a constant number of calls to Connected, CoverLevel,
+and MinCoveredEdge.
+
+Proof. See Appendix A for a proof and pseudocode.
+
+                                        Asymptotic worst case time per call, using structure in section
+   #    Operation
+                                   4              5                6                  7               9
+    1   Link(v, w, e)                                                                                  f (n) log n
+    2   Cut(e)                                                                                          log f (n)
+
+    3   Connected(v, w)
+    4   Cover(v, w, i)
+    5   Uncover(v, w, i)          log n     (log n)2 log log n   log n log log n   log n(log log n)2
+                                                                                                          log n
+    6   CoverLevel(v)                                                                                   log f (n)
+    7   CoverLevel(v, w)
+    8   MinCoveredEdge(v)
+    9   MinCoveredEdge(v, w)
+   10   AddLabel(v, l, i)
+   11   RemoveLabel(l)              -               -            log n log log n           -               -
+   12   FindFirstLabel(v, w, i)
+        FindSize(v, w, i)           -       (log n)2 log log n         -           log n(log log n)2       -
+   13                                                                                                     log n
+        FindSize(v, v, −1)        log n           log n              log n               log n          log f (n)
+
+Table 1: Overview of the worst case times achieved for each tree operation by the data structures
+presented in this paper. In the last column, f (n) ∈ O( logloglogn n ) can be chosen arbitrarily.
+
+    The algorithm in [11] used a dynamic tree structure supporting all the operations in O((log n)3 )
+time, leading to an O((log n)4 ) algorithm for bridge finding. Thorup [20] showed how to improve
+the time for the dynamic tree structure to O((log n)2 log log n) leading to an O((log n)3 log log n)
+algorithm for bridge finding.
+    Throughout this paper, we will show a number of data structures for dynamic trees, implementing
+various subsets of these operations while ignoring the rest (See Table 1). Define a CoverLevel
+structure to be one that implements operations 1–9, and a FindSize structure to be a CoverLevel
+structure that additionally implements the FindSize operation. Finally, we define a FindFirstLabel
+structure to be one that implements operations 1–12 (all except for FindSize).
+    The point is that we can get different trade-offs between the operation costs in the different
+structures, and that we can combine them into a single structure supporting all the operations using
+the following
+
+Lemma 6 (Folklore). Given two data structures S and S 0 for the same problem consisting of a set
+U of update operations and a set Q of query operations. If the respective update times are fu (n) and
+fu0 (n) for u ∈ U , and the query times are gq (n) and gq0 (n) for q ∈ Q, we can create a combined data
+
+                                                        5
+structure running in O(fu (n) + fu0 (n)) time for update operation u ∈ U , and O(min gq (n), gq0 (n) )
+                                                                                    
+
+time for query operation q ∈ Q.
+
+Proof. Simply maintain both structures in parallel. Call all update operations on both structures,
+and call only the fastest structure for each query.
+
+Proof of Theorem 3. Use the CoverLevel structure from Section 4, the FindSize structure from
+Section 5, and the FindFirstLabel structure from Section 6, and combine them into a single structure
+using Lemma 6. Then the reduction from Lemma 5 gives the correct running times but uses
+O(m + n log n) space. To get linear space, modify the FindSize and FindFirstLabel structures as
+described in Section 10.
+
+Proof of Theorem 1. Use the CoverLevel structure from Section 9, the FindSize structure from
+Section 5, as modified in Section 7 and 10, and the FindFirstLabel structure from Section 6, and
+combine them into a single structure using Lemma 6. Then the reduction from Lemma 5 gives the
+required bounds.
+
+
+3    Top trees
+A top tree is a data structure for maintaining information about a dynamic forest. Given a tree T ,
+a top tree T is a rooted tree over subtrees of T , such that each non-leaf node is the union of its
+children. The root of T is T , its leaves are the edges of T , and its nodes are clusters, which we will
+define in two steps. For any subgraph H of a graph G, the boundary ∂H consists of the vertices of
+H that have a neighbour in G \ H. A cluster is a connected subgraph with a boundary of size no
+larger than 2. We denote them by point clusters if the boundary has size ≤ 1, and path clusters
+otherwise. For a path cluster C with boundary ∂C = {u, v}, denote by π(C) the tree path between
+u and v, also denoted the cluster path of C. Similarly, for a point cluster C with boundary vertex v,
+π(C) is the trivial path consisting solely of v. The top forest supports dynamic changes to the forest:
+insertion (link) or deletion (cut) of edges. Furthermore, it supports the expose operation: expose(v),
+or expose(v1 , v2 ), returns a top tree where v, or v1 , v2 , are considered boundary vertices of every
+cluster containing them, including the root cluster. All operations are supported by performing
+a series of destroy, create, split, and merge operations: split destroys a node of the top tree and
+replaces it with its two children, while merge creates a parent as a union of its children. Destroy and
+create are the base cases for split and merge, respectively. Note that clusters can only be merged if
+their union has a boundary of size at most 2.
+     A top tree is binary if each node has at most two children. We call a non-leaf node heterogeneous
+if it has both a point cluster and a path cluster among its children, and homogeneous otherwise.
+
+Theorem 7 (Alstrup, Holm, de Lichtenberg, Thorup [1]). For a dynamic forest on n vertices we
+can maintain binary top trees of height O(log n) supporting each link, cut or expose with a sequence
+of O(1) calls to create or destroy, and O(log n) calls to merge or split. These top tree modifications
+are identified in O(log n) time. The space usage of the top trees is linear in the size of the dynamic
+forest.
+
+
+
+
+                                                   6
+4        A CoverLevel structure
+In this section we show how to maintain a top tree supporting the CoverLevel operations. This part
+is is essentially the same as in [10,11] (with minor corrections), but is included here for completeness
+because the rest of the paper builds on it. Pseudocode for maintaining this structure is given in
+Appendix B.
+     For each cluster C we want to maintain the following two integers and up to two edges:
+
+                                   coverC := min {c(e) | e ∈ π(C)} ∪ {`max }
+                            globalcoverC := min {c(e) | e ∈ C \ π(C)} ∪ {`max }
+                          minpathedgeC := arg min c(e) if |∂C| = 2, and nil otherwise
+                                                 e∈π(C)
+
+                        minglobaledgeC := arg min c(e) if C 6= π(C), and nil otherwise
+                                                e∈C\π(C)
+
+Then
+                                                      )
+              CoverLevel(v) = globalcoverC
+                                                          where C is the point cluster returned by Expose(v)
+    MinCoveredEdge(v) = minglobaledgeC
+                                                      )
+            CoverLevel(v, w) = coverC
+                                                          where C is the path cluster returned by Expose(v, w)
+ MinCoveredEdge(v, w) = minpathedgeC
+
+    The problem is that when handling Cover or Uncover we cannot afford to propagate the
+information all the way down to the edges. When these operations are called on a path cluster
+C, we instead implement them directly in C, and then store “lazy information” in C about what
+should be propagated down in case we want to look at the descendants of C. The exact additional
+information we store for a path cluster C is
+
+                                 cover−
+                                      C := max level of a pending Uncover, or −1
+                                 cover+
+                                      C := max level of a pending Cover, or −1
+                                                                         −
+We maintain the invariant that coverC ≥ cover+                                                +
+                                               C , and if coverC ≤ coverC then coverC = coverC .
+    This allows us to implement Cover(v, w, i) by first calling Expose(v, w), and then updating the
+returned path cluster C as follows:
+
+                                                           cover+               +
+                                                                         
+                coverC = max {coverC , i}                       C = max coverC , i
+
+Similarly, we can implement Uncover(v, w, i) by first calling Expose(v, w), and then updating the
+returned path cluster C as follows if coverC ≤ i:
+
+                                     cover+                   cover−              −
+                                                                            
+            coverC = −1                   C = −1                   C = max coverC , i
+                      −             +
+    Together, cover   C and coverC represent the fact that for each path descendant D of C, if
+coverD ≤ max cover−              + 1                                +
+               
+                        C , coverC   , we need to set cover
+                                                          D = coverC . −In particular whenever a path
+cluster C is split, for each path child D of C, if max coverD , coverD ≤ cover−     C we need to set
+
+                              cover−        −
+                                   D = coverC
+    1
+        In [10, 11] this condition is erroneously stated as coverD ≤ cover−
+                                                                          C.
+
+
+
+                                                              7
+Furthermore, if coverD ≤ max cover−        +
+                            
+                                  C , coverC we need to set
+
+                              coverD = cover+
+                                            C                               cover+        +
+                                                                                 D = coverC
+
+Note that only coverD is affected. None of globalcoverD , minpathedgeD , or minglobaledgeD depend
+directly on the lazy information.
+    Now suppose we have k clusters2 A1 , . . . , Ak that we want to merge into a single new cluster C.
+For 1 ≤ i ≤ k define
+                              (
+                      0         globalcoverAi        if ∂Ai ⊆ π(C) or globalcoverAi ≤ coverAi
+           globalcoverC,Ai :=
+                                coverAi              otherwise
+                              (
+                                minglobaledgeAi if ∂Ai ⊆ π(C) or globalcoverAi ≤ coverAi
+        minglobaledge0C,Ai :=
+                                minpathedgeAi        otherwise
+
+Note that for a point-cluster Ai , globalcoverAi is always ≤ coverAi = lmax .
+   We then have the following relations between the data of the parent and the data of its children:
+
+                coverC = `max if |∂C| < 2, otherwise                min         coverAi
+                                                              1≤i<k,∂Ai ⊆π(C)
+
+    minpathedgeC = nil if |∂C| < 2, otherwise minpathedgeAj where j =                          arg min        coverAi
+                                                                                            1≤i<k,∂Ai ⊆π(C)
+
+        globalcoverC = min globalcover0C,Ai
+                           1≤i<k
+ minglobaledgeC = minglobaledge0C,Aj                 where j = arg min globalcover0C,Ai
+                                                                   1≤i<k
+                cover−
+                     C = −1
+                cover+
+                     C = −1
+
+
+Analysis For any constant-degree top tree, Merge and Split with this information takes constant
+time, and thus, all operations in the CoverLevel structure in this section take O(log n) time. Each
+cluster uses O(1) space, so the total space used is O(n).
+    Note that we can extend this so for each cluster C, if all the least-covered edges (on or off the
+cluster path) lie in the same child of C, we have a pointer to the closest descendant D of C that is
+either a base cluster or has more than one child containing least-covered edges. We can use this
+structure to find the first k bridges in O(log n + k) time.
+
+
+5        A FindSize Structure
+We now proceed to show how to extend the CoverLevel structure from Section 4 to support FindSize
+in O(log n log log n) time per Merge and Split. Later, in Section 7 we will show how to reduce this
+to O((log log n)2 ) time per Merge and Split. See Appendix C for pseudocode.
+    We will use the idea of having a single vertex label for each vertex, which is a point cluster with
+no edges, having that vertex as boundary vertex and containing all relevant information about the
+vertex. The advantage of this is that it simplifies handling of the common boundary vertex during a
+merge by making sure it is uniquely assigned to (and accounted for by) one of the children.
+    2
+        k = 2 for now, but we will reuse this in section 9 with a higher-degree top tree.
+
+
+                                                              8
+      Let C be a cluster in T , let v be a vertex in C, and let 0 ≤ i < `max . Define
+
+                               pointsizeC,v,i := {u ∈ C | CoverLevel(u, v) ≥ i}
+
+For convenience, we will combine all the O(log n) levels together into a single vector3
+                                                        
+                          pointsizeC,v := pointsizeC,v,i {0≤i<` }
+                                                                            max
+
+
+   Let (Cv ){v∈π(C)} be the point clusters that would result from deleting the edges of π(C) from C.
+Then we can define the vector
+                                              X
+                                   sizeC :=        pointsizeCm ,m
+                                                     m∈π(C)
+
+Note that with this definition, if ∂C = {v} then pointsizeC,v = sizeC so even when v = w we have
+
+                           FindSize(v, w, i) = sizeC,i          where C = Expose(v, w)
+
+So for any cluster C, the sizeC vector is what we want to maintain.
+    The main difficulty turns out be computing the sizeC vector for the heterogeneous point clusters.
+To help with that we will for each cluster C and boundary vertex v ∈ ∂C additionally maintain the
+following two size vectors for each −1 ≤ i ≤ `max :
+                            X
+           partsizeC,v,i :=    pointsizeCm ,m          diagsizeC,v,i := M(i) · partsizeC,v,i
+                               m∈π(C)
+                          CoverLevel(v,m)=i
+
+Where M(i) is a diagonal matrix whose entries are defined (using Iverson brackets, see [14]) by
+
+                                                   M(i)jj = [i ≥ j]
+
+Note that these vectors are independent of cover−                +
+                                                     C and coverC as defined in Section 4. The
+corresponding “clean” vectors are not explicitly stored, but computed when needed as follows
+                                                             
+                   partsize
+                            C,v,i              if i > `      
+                                                              
+           0        P`                                       +
+                                                              
+   partsizeC,v,i =    j=−1  partsize C,v,j      if i = cover  
+                                                             C
+                                                              
+                                                             
+                    0                           otherwise 
+                                                             
+                                                                where ` = max cover−        +
+                                                                             
+                                                                                  C , coverC
+                   diagsize                    if i > `      
+                            C,v,i                            
+                                                              
+           0               P`                                 
+                                                             +
+   diagsizeC,v,i = M(i) · j=−1 partsizeC,v,j if i = coverC   
+                                                              
+                                                             
+                    0                           otherwise
+                                                             
+
+    The point of these definitions is that each path cluster inherits most of its partsize and diagsize
+vectors from its children, and we can use this fact to get an O(`max / log `max ) = O(log n/ log log n)
+speedup compared to [11].
+  3
+      All vectors and matrices in this section have indices ranging from 0 to `max − 1.
+
+
+
+
+                                                           9
+Merging along a path (the general case) Let A, B be clusters that we want to merge into a
+new cluster C, and suppose ∂A ∪ ∂B ⊆ π(C). This covers all types of merge in a normal binary top
+tree, except for the heterogeneous point clusters. Let ∂A ∩ ∂B = {c}. If |∂C| = 1, let a = b = c,
+otherwise let ∂C = {a, b} with a ∈ ∂A, b ∈ ∂B. Then
+                     sizeC = sizeA + sizeB
+                             
+                                        0
+                             partsizeA,a,i P
+                                                                                  if i > coverA
+              partsizeC,a,i = partsize0A,a,i + `j=i
+                                                 max
+                                                     partsize0B,c,j                if i = coverA
+                             
+                               partsize0B,c,i                                      if i < coverA
+                             
+
+                                        0
+                             
+                             diagsizeA,a,i
+                                                                                  if i > coverA
+              diagsizeC,a,i = diagsize0A,a,i +M(i) · `j=i  partsize0B,c,j
+                                                    P max
+                                                                                   if i = coverA
+                               diagsize0B,c,i
+                             
+                                                                                   if i < coverA
+                             
+
+
+Merging off the path (heterogeneous point clusters) Now let A be a path cluster with
+∂A = {a, b}, let B be a point cluster with ∂B = {b}, and suppose we want to merge A, B into a
+new point cluster C with ∂C = {a}. Then
+                                      `X
+                                                        !
+                                       max
+                                                   0
+                            sizeC =        diagsizeA,a,i + M(coverA ) · sizeB
+                                        i=−1
+                                      (
+                                       sizeC     if i = `max
+                      partsizeC,a,i =
+                                       0         otherwise
+                      diagsizeC,a,i = partsizeC,a,i
+
+Analysis The advantage of our new approach is that each merge or split is a constant number of
+splits, concatenations, searches, and sums over O(`max )-length lists of `max -dimensional vectors. By
+representing each list as an augmented balanced binary search tree (see e.g. [15, pp. 471–475]), we
+can implement each of these operations in O(`max log `max ) time, and using O(`max ) space per cluster,
+as follows. Let C be a cluster and let v ∈ ∂C. The tree has one node for each key i, −1 ≤ i ≤ `max
+such that partsizeC,v,i is nonzero, augmented with the following additional information:
+                                      key := i
+                                  partsize := partsizeC,v,i
+                                 diagsize := diagsizeC,v,i
+                                                  X
+                             partsizesum :=                partsizeC,v,j
+                                               j descendant of i
+                                                      X
+                             diagsizesum :=                        partsizeC,v,j
+                                               j descendant of i
+
+Each split, concatenate, search, or sum operation can be implemented such that it touches O(log `max )
+nodes, and the time for each node update is dominated by the time it takes to add two `max -
+dimensional vectors, which is O(`max ). The total time for each Cover, Uncover, Link, Cut, or
+FindSize is therefore O(log n · `max · log `max ) = O((log n)2 log log n), and the total space used for
+the structure is O(n · `max ) = O(n log n).
+
+                                                   10
+Comparison to previous algorithms For any path cluster C and vertex v ∈ ∂C, let SC,v be
+the matrix whose jth column 0 ≤ j < `max is defined by
+                                                            `X
+                                                             max
+                                                T
+                                              (SC,v )j :=          partsize0C,v,k
+                                                            k=j
+
+Then SC,v is essentially the size matrix maintained for path clusters in [10, 11, 20]. Notice that
+
+                                                             `X
+                                                              max
+
+                                            diag(SC,v ) =            diagsize0C,v,k
+                                                            k=−1
+
+which explains our choice of the “diag” prefix.
+
+
+6        A FindFirstLabel Structure
+We will show how to maintain information that allows us to implement FindFirstLabel; the function
+that allows us to inspect the replacement edge candidates at a given level. The implementation uses
+a “destructive binary search, with undo” strategy, similar to the non-local search introduced in [1].
+    The idea is to maintain enough information in each cluster to determine if there is a result.
+Then we can start by using Expose(v, w), and repeatedly split the root containing the answer until
+we arrive at the correct label. After that, we simply undo the splits (using the appropriate merges),
+and finally undo the Expose.
+    Just as in the FindSize structure, we will use vertex labels to store all the information pertinent
+to a vertex. We store all the added user labels for each vertex in the label object for that vertex in
+the base level of the top tree. For each level where the vertex has an associated user label, we keep
+a doubly linked list of those labels, and we keep a singly-linked list of these nonempty lists. Thus,
+FindFirstLabel(v, w, i) boils down to finding the first vertex label that has an associated user label
+at the right level. Once we have that vertex label, the desired user label can be found in O(`max )
+time.
+    Let C be a cluster in T , and let v ∈ ∂C. Define bit vectors4
+                                  "                                             #!
+                                                  CoverLevel(v, vertex(l)) = i
+           pointincidentC,v :=     ∃label l ∈ C :
+                                                          ∧ `(l) = i
+                                                                                   {0≤i<`max }
+                                  _
+                   incidentC :=        pointincidentCm ,m
+                                        m∈π(C)
+
+    Maintaining the incidentC bit vectors, and the corresponding partincidentC,v and diagincidentC,v
+bit vectors, can be done completely analogous to the way we maintain the size vectors used for
+FindSize, with the minor change that we use bitwise OR on bit vectors instead of vector addition.
+    Updating the vertex label cluster C in the top tree during AddLabel(v, l, i), or a RemoveLabel(l)
+where v = vertex(l) and `(l) = i can be done by first calling detach(C), then updating the linked
+                     (
+    4                 1   if P is true
+        Here, [P ] =                   is the Iverson Bracket (see [14]), and ∨ denotes bitwise OR.
+                      0   otherwise
+
+
+
+                                                             11
+lists containing the user labels and setting
+
+                           incidentC = ([v has associated labels at level j]){0≤j<`max }
+                                           (
+                                            incidentC if i = `max
+               partincidentC,vertex(l),i =
+                                            0         otherwise
+                diagincidentC,vertex(l) = partincidentC
+
+and then reattaching C. Finally FindFirstLabel(v,w,i) can be implemented in the way already
+described, by examining pointincidentC,v,i for each cluster. Note that even though we don’t explicitly
+maintain it, for any cluster C and any v ∈ ∂C we can easily compute
+                             `_
+                              max
+
+        pointincidentC,v =          diagincident0C,v,i
+                             i=−1
+                               `_                                                `
+                                                           !                                               !
+                                max                                              _
+                         =            diagincidentC,v,i        + M(cover+
+                                                                        C) ·           partincidentC,v,i
+                              i=`+1                                             i=−1
+                              Where ` := max cover−        +
+                                            
+                                                  C , coverC
+
+    In general, let A1 , . . . Ak be the clusters resulting from an expose or split, let v, w ∈ ki=1 ∂Ai
+                                                                                                  S
+(not necessarily distinct). Then we can define
+                                                (
+                                                 Ax                                      if Ax is a label
+  FindFirstLabel((A1 , · · · , Ak ); v, w, i) =
+                                                 FindFirstLabel(Split(Ax ); vx , wx , i) otherwise
+                                     where for 1 ≤ j ≤ k
+                                          vj = arg min dist(v, u)
+                                                 u∈∂Aj
+
+                                         wj = arg max dist(u, w)
+                                                 u∈∂Aj
+
+                                       and
+                                                (                                                  )
+                                                                        CoverLevel(v, vj ) ≥ i
+                                           I=     1≤j≤k
+                                                                    ∧     pointincidentAj ,vj ,i = 1
+                                           x = arg min (3 · dist(v, meet(vj , v, w)) + |∂Aj ∩ v · · · w|)
+                                                    j∈I
+
+                 FindFirstLabel(v, w, i) = FindFirstLabel(Expose(v, w); v, w, i)
+
+Analysis By the method described in this section, AddLabel, RemoveLabel, and FindFirstLabel
+are maintained in O(log n · `max · log `max ) = O((log n)2 log log n) worst-case time.
+    This can be reduced to O(log n · log `max ) = O(log n log log n) by realizing that each `max -
+dimensional bit vector fits into O(1) words, and that each bitwise OR therefore only takes constant
+time.
+    The total space used for a FindFirstLabel structure with n vertices and m labels is O(m + n)
+plus the space for O(n) bit vectors. If we assume a word size of Ω(log n), this is just O(m + n) in
+total. If we disallow bit packing tricks, we may have to use O(m + n · `max ) = O(m + n log n) space.
+
+                                                          12
+7    Approximate counting
+As noted in [20], we don’t need to use the exact component sizes at each level. If s is the actual
+correct size, it is sufficient to store an approximate value s0 such that s0 ≤ s ≤ e s0 , for some constant
+0 <  < ln 2. Then we are no longer guaranteed that component sizes drop by a factor of 12 at each
+                                       
+level, but rather get a factor of e2 . This increases the number of levels to `max = bln n/(ln 2 − )c
+(which is still O(log n)), but leaves the algorithm otherwise unchanged. Suppose we represent each
+size as a floating point value with a b-bit mantissa, for some b to be determined later. For each
+addition of such numbers the relative error increases. The relative error at the root of a tree of
+                                             −b
+additions of height h is (1 + 2−b )h ≤ e2 h , thus to get the required precision it is sufficient to set
+b = log2 h . In our algorithm(s) the depth of calculation is clearly upper bounded by h ≤ h(n) · `max ,
+where h(n) = O(log n) is the height of the top tree. It follows that some b ∈ O(log log n) is sufficient.
+Since the maximum size of a component is n, the exponent has size at most dlog2 ne, and can be
+represented in dlog2 dlog2 nee bits. Thus storing the sizes as O(log log n) bit floating point values is
+sufficient to get the required precision. Assuming a word size of Ω(log n) this lets us store O logloglogn n
+sizes in a single word, and to add them in parallel in constant time.
+
+Analysis We will show how this applies to our FindSize structure from Section 5. The bottlenecks
+in the algorithm all have to do with operations on `max -dimensional size vectors. In particular, the
+amortized update time is dominated by the time to do O(log n · log `max ) vector additions, and
+O(log n) multiplications of a vector by the M(i) matrix. With approximate counting, the vector
+additions each take O(log log n) time. Multiplying a size vector x by M(i) we get:
+                                                 (
+                                                  xj if i ≥ j
+                                   (M(i) · x)j =
+                                                  0 otherwise
+
+And clearly this operation can also be done on O logloglogn n sizes in parallel when they are packed
+                                                             
+
+into a single word. With approximate counting, each multiplication by M(i) therefore also takes
+O(log log n) time. Thus the time per operation is reduced to O(log n(log log n)2 ).
+    The space consumption of the data structure is O(n) plus the space needed to store O(n) of the
+`max -dimensional size vectors. With approximate counting that drops to O(log log n) per vector, or
+O(n log log n) in total.
+
+Comparison to previous algorithms Combining the modified FindSize structure with the
+CoverLevel structure from Section 4 and the FindFirstLabel structure from Section 6 gives us
+the first bridge-finding structure with O((log n)2 (log log n)2 ) amortized update time. This struc-
+ture uses O(m + n log log n) space, and uses O(log n) time for FindBridge and Size queries, and
+O(log n(log log n)2 ) for 2-size queries.
+    For comparison, applying this trick in the obvious way to the basic O((log n)4 ) time and
+O(m + n(log n)2 ) algorithm from [10,11] gives the O((log n)3 log n) time and O(m + n log n log log n)
+algorithm briefly mentioned in [20].
+
+
+8    Top trees revisited
+We can combine the tree data structures presented so far to build a data structure for bridge-finding
+that has update time O((log n)2 (log log n)2 ), query time O(log n), and uses O(m + n log log n) space.
+
+                                                    13
+   In order to get faster queries and linear space, we need to use top-trees in an even smarter way.
+For this, we need the full generality of the top trees described in [1].
+
+8.1    Level-based top trees, labels, and fat-bottomed trees
+As described in [1], we may associate a level with each cluster, such that the leaves of the top tree
+have level 0, and such that the parent of a level i cluster is on level i + 1. As observed in Alstrup et
+al. [1, Theorem 5.1], one may also associate one or more labels with each vertex. For any vertex,
+v, we may handle the label(s) of v as point clusters with v as their boundary vertex and no edges.
+Furthermore, as described in [1], we need not have single edges on the bottom most level. We may
+generalize this to instead have clusters of size Q as the leaves of the top tree.
+
+Theorem 8 (Alstrup, Holm, de Lichtenberg, Thorup [1]). Consider a fully dynamic forest and let
+Q be a positive integer parameter. For the trees in the forest, we can maintain levelled top trees
+whose base clusters are
+                      i
+                         of size at most Q and such that if a tree has size s, it has height h = O(log s)
+and O(s/(Q(1 + ε) )) clusters on level i ≤ h. Here, ε is a positive constant. Each link, cut, attach,
+detach, or expose operation is supported with O(1) creates and destroys, and O(1) joins and splits on
+each positive level. If the involved trees have total size s, this involves O(log s) top tree modifications,
+all of which are identified in O(Q + log s) time. For a composite sequence of k updates, each of the
+above bounds are multiplied by k. As a variant, if we have parameter S bounding the size of each
+underlying tree, then we can choose to let all top roots be on the same level H = O(log S).
+
+8.2    High degree top trees
+Top trees of degree two are well described and often used. However, it turns out to be useful to also
+consider top trees of higher degree B, especially for B ∈ ω(1).
+
+Lemma 9. Given any B ≥ 2, one can maintain top trees of degree B and height O(log n/ log B).
+Each expose, link, or cut is handled by O(1) calls to create or destroy and O(log n/ log B) calls to
+split or merge. The operations are identified in O(B(log n/ log B)) time.
+
+Proof. Given a binary levelled top tree T2 of height h, we can create a B-ary levelled top tree TB ,
+where the leaves of TB are the leaves of T2 , and where the clusters on level i of TB are the clusters
+on level i · blog2 Bc of T2 . Edges in TB correspond to paths of length blog2 Bc in T2 . Thus, given a
+binary top tree, we may create a B-ary top tree bottom-up in linear time.
+    We may implement link, cut and expose by running the corresponding operation in T2 . Each
+cut, link or expose operation will affect clusters on a constant number of root-paths in T2 . There
+are thus only O(log n/ log B) calls to split or merge of a cluster on a level divisible by blog2 Bc.
+Thus, since each split or merge in TB corresponds to a split or merge of a cluster in T2 whose level
+is divisible by blog2 Bc, we have only O(log n/ log B) calls to split and merge in TB .
+    However, since there are O(B) clusters whose parent pointers need to be updated after a merge,
+the total running time becomes O(B(log n/ log B)).
+
+8.3    Saving space with fat-bottomed top trees
+In this section we present a general technique for reducing the space usage of a top tree based data
+structure to linear. The properties of the technique are captured in the following:
+
+
+                                                    14
+Lemma 10. Given a top tree data structure of height h(n) ∈ O(log n) that uses s(n) space per
+cluster, and t(n) worst case time per merge or split.
+    Suppose that the complete information for a cluster of size q, including information that is
+shared with its children, has total size s0 (q, n) and can be computed directly in time t0 (q, n). Suppose
+further that there exists a function q of n such that s(n) < s0 (q(n), n) ∈ O(q(n)).
+    Then there exists a top tree data structure, maintaining the same information, that uses linear
+space in total and has O(t(n) · h(n) + t0 (q(n), n)) update time for link, cut, and expose.
+
+Proof. This follows directly from Theorem 8 by setting Q = q(n). Then the top tree will have
+O(n/q(n)) clusters of size at most s0 (q(n), n) = O(q(n)) so the total size is linear. The time per
+update follows because the top tree uses O(h(n)) merges of split and O(1) create and destroy per
+link cut and expose. These take t(n) and t0 (q(n), n) time respectively.
+
+
+9    A Faster CoverLevel Structure
+If we allow ourselves to use bit tricks, we can improve the CoverLevel data structure from Section 4.
+The main idea is, for some 0 <  < 1, to use top trees of degree b(n) = (log n) ∈ O(w/ log `max ).
+                                          log n
+Such top trees have height h(n) ∈ O(  log  log n ), and finding the sequence of merges and splits for a
+                                                            1+
+given link, cut or expose takes O(b(n) · h(n)) ∈ O( (log  n)
+                                                      log log n ) ⊆ o((log n)
+                                                                              1+ ) time.
+
+    The high-level algorithm makes at most a constant number of calls to link and cut for each insert
+or delete, so we are fine with the time for these operations. However, we can no longer use Expose
+to implement Cover, Uncover, CoverLevel and MinCoveredEdge, as that would take too long.
+    In this section, we will show how to overcome this limitation by working directly with the
+underlying tree.
+
+The data The basic idea is to maintain a buffer with all the cover, cover− , cover+ and globalcover
+values one level up in the tree, in the parent cluster. Since the degree is O(w/ log `max ), and each
+value uses at most O(log `max ) bits, these fit into a constant number of words, and so we can use
+bit tricks to operate on the values for all children of a node in parallel.
+    Let C be a cluster with children A1 , . . . , Ak . Since k ≤ w/ log `max , we can define the following
+vectors that each fit into a constant number of words.
+
+                                   packedcoverC := (coverAi ){1≤i≤k}
+                                   packedcover−          −
+                                              C := (coverAi ){1≤i≤k}
+                                   packedcover+          +
+                                              C := (coverAi ){1≤i≤k}
+                            packedglobalcoverC := (globalcoverAi ){1≤i≤k}
+
+    The description of Split and Merge from Section 4 still apply, if we think of the “packed” values
+as a separate layer of degree 1 clusters between each pair of “real” clusters.
+    For concreteness, let C be a cluster with children A1 , . . . , Ak , and define operations
+
+    • CleanToBuffer(C). For each 1 ≤ i ≤ k: If Ai is a path child of C and
+      max packedcoverC,i , packedcover−           −
+          
+                                      C,i ≤ coverC , set:
+
+                                           packedcover−          −
+                                                      C,i = coverC
+
+
+                                                   15
+  Then if packedcoverC,i ≤ max cover−        +
+                              
+                                    C , coverC set
+
+                                   packedcoverC,i = cover+
+                                                         C
+                                   packedcover+          +
+                                              C,i = coverC
+
+  After updating all k children, set cover−            +
+                                            C = coverC = −1. Note that this can be done in
+  parallel for all 1 ≤ i ≤ k in constant time using bit tricks.
+
+• CleanToChild(C, i). If Ai is a path child of C and max coverAi , cover−               −
+                                                             
+                                                                        Ai ≤ packedcoverC,i ,
+  set
+
+                                   cover−               −
+                                        Ai = packedcoverC,i
+
+  Then if coverAi ≤ max packedcover−                +
+                       
+                                   C,i , packedcoverC,i set
+
+                                   coverAi = packedcover+
+                                                        C,i
+                                   cover+               +
+                                        Ai = packedcoverC,i
+
+  Finally set packedcover−                +
+                         C,i = packedcoverC,i = −1. Again, note that this takes constant time.
+
+• ComputeFromChild(C, i). Set
+
+                                   packedcoverC,i = coverAi
+                                   packedcover−
+                                              C,i = −1
+                                   packedcover+
+                                              C,i = −1
+                             packedglobalcoverC,i = globalcoverAi
+
+• ComputeFromBuffer(C). For 1 ≤ i ≤ k define
+                          
+                          packedglobalcoverC,i
+                                                  if ∂Ai ⊆ π(C)
+                    0
+   packedglobalcoverC,i =                          or packedglobalcoverC,i ≤ packedcoverC,i
+                          
+                           packedcoverC,i          otherwise
+                          
+                          
+                          minglobaledgeAi
+                                                  if ∂Ai ⊆ π(C)
+                    0
+      minglobaledgeC,i =                           or globalcoverAi ≤ coverAi
+                          
+                           minpathedgeAi           otherwise
+                          
+
+
+
+
+                                           16
+     We can then compute the data for C from the buffer as follows:
+                                 
+                                     min packedcoverC,i
+                                  1≤i<k                                       if |∂C| = 2
+                       coverC = ∂Ai ⊆π(C)
+                                 
+                                 `
+                                    max                                        otherwise
+                                 
+                                 
+                                 
+                                  minpathedgeAj                               if |∂C| = 2
+                                 
+                                  where j = arg min packedcover
+                                                                    C,i
+                 minpathedgeC =                1≤i<k
+                                 
+                                 
+                                             ∂Ai ⊆π(C)
+                                 
+                                 nil                                          otherwise
+                      globalcoverC = min packedglobalcover0C,i
+                                      1≤i<k
+                  minglobaledgeC = minglobaledge0C,j
+                                   where j = arg min packedglobalcover0C,i
+                                               1≤i<k
+                            cover−
+                                 C = −1
+                            cover+
+                                 C = −1
+
+      This can be computed in constant time, because (packedglobalcover0C,i ){1≤i≤k} fits into a
+      constant number of words that can be computed in constant time using bit tricks, and thus
+      each “min” or “arg min” is taken over values packed into a constant number of words.
+
+Then Split(C) can be implemented by first calling CleanToBuffer(C), and then for each 1 ≤ i ≤ k
+calling CleanToChild(C, i). This ensures that all the lazy cover information is propagated down cor-
+rectly. Similarly, Merge(C; A1 , . . . , Ak ) can be implemented by first calling ComputeFromChild(C, i)
+for each 1 ≤ i ≤ k, and then calling ComputeFromBuffer(C). Thus Split and Merge each take
+O(b(n)) time.
+
+Computing CoverLevel(v) and MinCoveredEdge(v) With the data described in the previous
+section, we can now answer the “global” queries as follows
+
+                         CoverLevel(v) = globalcoverC
+                  MinCoveredEdge(v) = minglobaledgeC
+                                 where C is the point cluster returned by root(v)
+
+Note that, for simplicity, we assume the top tree always has a single vertex exposed. This can easily
+be arranged by a constant number of calls to Expose after each link or cut, without affecting the
+asymptotic running time. Computing CoverLevel(v) or MinCoveredEdge(v) therefore takes O(h(n))
+worst case time.
+
+Computing CoverLevel(v, w) and MinCoveredEdge(v, w) Since we can no longer use Expose to
+implement Cover and Uncover, we need a little more machinery.
+    What saves us is that all the information we need to find CoverLevel(v, w) is stored in the
+O(h(n)) clusters that have v or v as internal vertices, and that once we have that, we can find a
+single child X of one of these clusters such that MinCoveredEdge(v, w) = minpathedgeX .
+
+
+                                                  17
+    Before we get there, we have to deal with the complication of cover− and cover+ . Fortunately,
+all we need to do is make O(h(n)) calls to CleanToBuffer and CleanToChild, starting from the root
+and going down towards v and w. Since each of these calls take constant time, we use only O(h(n))
+time on cleaning.
+    Now, the path v · · · w consists of O(h(n)) edge-disjoint fragments, such that:
+
+   • Each fragment f is associated with, and contained in, a single cluster Cf .
+
+   • For each fragment f , the endpoints are either in {v, w} (and then Cf is a base cluster) or are
+     boundary vertices of children of Cf .
+
+    We can find the fragments in O(h(n)) time, and for each fragment f , we can in constant time
+find its cover level by examining packedcoverCf .
+    Let f1 , . . . , fk be the fragments of the path, and for 1 ≤ i ≤ k let vi , wi be the endpoints of the
+fragment closest to v, w respectively. Then
+
+                            CoverLevel(v, w) = min CoverLevel(vi , wi )
+                                                  1≤i≤k
+                      MinCoveredEdge(v, w) = MinCoveredEdge(vj , wj )
+                                               where j = arg min CoverLevel(vi , wi )
+                                                            1≤i≤k
+                    MinCoveredEdge(vj , wj ) = minpathedgeX
+                                               where X =         arg min          coverY
+                                                            Y path child of Cfj
+
+
+   So computing CoverLevel(v, w) or MinCoveredEdge(v, w) takes O(h(n)) worst case time.
+
+Cover and Uncover We are now ready to handle Cover(v, w, i) and Uncover(v, w, i). First we
+make O(h(n)) calls to CleanToBuffer and CleanToChild. Then let f1 , . . . , fk be the fragments of the
+v · · · w path, and for 1 ≤ i ≤ k let vi , wi be the endpoints of the fragment closest to v, w respectively.
+Then for each f ∈ f1 , . . . , fk , and each path child Aj of Cf , Cover(v, w, i) needs to set
+                                                         n                      o
+                                packedcoverCf ,j = max packedcoverCf ,j , i
+                                                         n                      o
+                                packedcover+ Cf ,j = max  packedcover  Cf ,j , i
+
+Similarly, for each f ∈ f1 , . . . , fk , and for each path child Aj of Cf , if packedcoverCf ,j ≤ i,
+Uncover(v, w, i) needs to set
+
+                             packedcoverCf ,j = −1
+                             packedcover+
+                                        Cf ,j = −1
+                                                    n                    o
+                             packedcover−
+                                        Cf ,j = max  packedcover−
+                                                                Cf ,j , i
+
+In each case, we can use bit tricks to make this take constant time per fragment. Finally, we need
+to update all the O(h(n)) ancestors to the clusters we just changed. We can do this bottom-up
+using O(h(n)) calls to ComputeFromChild and ComputeFromBuffer.
+    We conclude that Cover(v, w, i) and Uncover(v, w, i) each take worst case O(h(n)) time.
+
+                                                    18
+                                                                            log n
+Analysis      Choosing any b(n) ∈ O(w/ log `max ) we get height h(n) ∈ O( log b(n) ), so Link and
+Cut take worst case O( b(n) log n
+                        log b(n) ) time with this CoverLevel structure. The remaining operations,
+                                                                                log n
+Connected, Cover, Uncover, CoverLevel and MinCoveredEdge all take O( log          b(n) ) worst case time.
+                                                          √
+For the purpose of our main result, choosing b(n) ∈ Θ( log n) is sufficient. Each cluster uses O(1)
+space, so the total space used is O(n).
+   Note that the pointers that allow us to find the first k least-covered edges can still be maintained
+in O(h) time per update, and allows us to find the first k least-covered edges in O(h + k) time.
+
+
+10      Saving Space
+We now apply the space-saving trick from Lemma 10 to the FindSize structures from Section 5
+and 7. Let D be the number of words used for each size vector in our FindSize structure. This is
+O(log n) for the purely combinatorial version, and O(log log n) in the version using approximate
+counting. As shown previously these use s(n) = O(D) space per cluster and t(n) = O(log n · D)
+worst case time per merge and split.
+Lemma 11. The complete information for a cluster of size q in the FindSize structure, including
+information that would be shared with its children, has total size s0 (q, n) = O(q + `max · D).
+Proof. The complete information for a cluster C with |C| = q consists of
+     • c(e) for all e ∈ C.
+
+     • coverC , cover−        +
+                     C , coverC , globalcoverC , sizeC .
+
+     • partsizeC,v,i and diagsizeC,v,i for v ∈ ∂C and −1 ≤ i ≤ `max .
+The total size for all of these is s0 (q, n) = O(q + `max · D)
+
+   Note that when keeping n fixed, this is clearly O(q). In particular, we can choose q(n) ∈
+Θ(`max · D) such that s(n) < s0 (q(n), n) ∈ O(q(n)).
+Lemma 12. The complete information for a cluster of size q in the FindSize structure, including
+information that would be shared with its children, can be computed directly in time t0 (q, n) =
+O(q log q + `max · D).
+Proof. Let C be the cluster of size |C| = q. For each v ∈ ∂C, we can in O(q) time find and partition
+the cluster path into the at most `max parts such that in part i, each vertex m on the cluster path
+have CoverLevel(v, m) = i. For each part i, run the following algorithm:
+ 1: Vector x ← 0
+ 2: Initialize empty max-queue Q
+ 3: j ← `max
+ 4: for w ← each vertex in the fragment that is on π(C) do
+ 5:     Mark w as visited
+ 6:     xj ← xj + 1
+ 7:     for e ← each edge incident to w that is not on π(C) do
+ 8:         if c(e) ≥ 0 then
+ 9:             Add e to Q with key c(e)
+
+                                                      19
+10: while Q is not empty do
+11:     e ← extract-max(Q)
+12:     while c(e) < j do
+13:         xj−1 = xj
+14:         j ←j−1
+15:     w ← the unvisited vertex at the end of e
+16:     Mark w as visited
+17:     xj ← xj + 1
+18:     for e ← each edge incident to w that has an unvisited end do
+19:         if c(e) ≥ 0 then
+20:             Add e to Q with key c(e)
+21: partsizeC,v,i ← x
+22: diagsizeC,v,i ← M(i) · x
+If the ith part has size qi than it can be processed this way in O(qi log qi + D) time. Summing over
+all O(`max ) parts gives the desired result.
+
+Analysis Applying Lemma 10 with the s(n), t(n), s0 (q, n), t0 (q, n) and q(n) derived in this section
+immediately gives a FindSize structure with O(log n · D · log `max ) worst case time per operation and
+using O(n) space. A completely analogous argument shows that we can convert the bitpacking-free
+version of the FindFirstLabel structure from O(log n · `max · log `max ) time and O(m + n · `max ) space
+to one using linear space. (If bitpacking is allowed the structure already used linear space). In either
+case is the same time per operation as the original versions, so using the modified version here does
+not affect the overall running time, but reduces the total space of each bridge-finding structure to
+O(m + n).
+    Note that we can explicitly store lists with all the least-covered edges for these large base clusters,
+so this does not change the time to report the first k least-covered edges.
+
+
+References
+ [1] Stephen Alstrup, Jacob Holm, Kristian De Lichtenberg, and Mikkel Thorup. Maintaining
+     information in fully dynamic trees with top trees. ACM Trans. Algorithms, 1(2):243–264,
+     October 2005.
+
+ [2] Therese C. Biedl, Prosenjit Bose, Erik D. Demaine, and Anna Lubiw. Efficient algorithms for
+     petersen’s matching theorem. Journal of Algorithms, 38(1):110 – 134, 2001.
+
+ [3] Krzysztof Diks and Piotr Stanczyk. Perfect Matching for Biconnected Cubic Graphs in
+     O(n log2 n) Time, pages 321–333. Springer Berlin Heidelberg, Berlin, Heidelberg, 2010.
+
+ [4] David Eppstein, Zvi Galil, and Giuseppe F. Italiano. Improved sparsification. Technical report,
+     1993.
+
+ [5] Greg N. Frederickson. Data structures for on-line updating of minimum spanning trees, with
+     applications. SIAM Journal on Computing, 14(4):781–798, 1985.
+
+
+
+                                                    20
+ [6] Greg N. Frederickson. Ambivalent data structures for dynamic 2-edge-connectivity and k
+     smallest spanning trees. SIAM J. Comput., 26(2):484–538, 1997.
+ [7] Harold N. Gabow, Haim Kaplan, and Robert Endre Tarjan. Unique maximum matching
+     algorithms. J. Algorithms, 40(2):159–183, 2001. Announced at STOC ’99.
+ [8] Monika R. Henzinger and Valerie King. Maintaining minimum spanning trees in dynamic
+     graphs, pages 594–604. Springer Berlin Heidelberg, Berlin, Heidelberg, 1997.
+ [9] Monika Rauch Henzinger and Valerie King. Fully dynamic 2-edge connectivity algorithm in
+     polylogarithmic time per operation, 1997.
+[10] Jacob Holm, Kristian de Lichtenberg, and Mikkel Thorup. Poly-logarithmic deterministic
+     fully-dynamic algorithms for connectivity, minimum spanning tree, 2-edge, and biconnectivity.
+     In Proceedings of the Thirtieth Annual ACM Symposium on Theory of Computing, STOC ’98,
+     pages 79–89, New York, NY, USA, 1998. ACM.
+[11] Jacob Holm, Kristian de Lichtenberg, and Mikkel Thorup. Poly-logarithmic deterministic
+     fully-dynamic algorithms for connectivity, minimum spanning tree, 2-edge, and biconnectivity.
+     J. ACM, 48(4):723–760, July 2001.
+[12] Shang-En Huang, Dawei Huang, Tsvi Kopelowitz, and Seth Pettie. Fully dynamic connectivity
+     in o(log n(log log n)2) amortized expected time. In Proceedings of the Twenty-Eighth Annual
+     ACM-SIAM Symposium on Discrete Algorithms, SODA ’17, pages 510–520, Philadelphia, PA,
+     USA, 2017. Society for Industrial and Applied Mathematics.
+[13] Bruce M. Kapron, Valerie King, and Ben Mountjoy. Dynamic graph connectivity in polyloga-
+     rithmic worst case time. In Proceedings of the Twenty-fourth Annual ACM-SIAM Symposium
+     on Discrete Algorithms, SODA ’13, pages 1131–1142, Philadelphia, PA, USA, 2013. Society for
+     Industrial and Applied Mathematics.
+[14] Donald E. Knuth. Two notes on notation. The American Mathematical Monthly, 99(5):403–422,
+     1992.
+[15] Donald E. Knuth. The Art of Computer Programming, Volume 3: (2nd Ed.) Sorting and
+     Searching. Addison Wesley Longman Publishing Co., Inc., Redwood City, CA, USA, 1998.
+[16] Anton Kotzig. On the theory of finite graphs with a linear factor II. 1959.
+[17] Karl Menger. Zur allgemeinen Kurventheorie. Fundamenta Mathematicae, 10, 1927.
+[18] Mihai Patrascu and Erik D Demaine. Logarithmic lower bounds in the cell-probe model. SIAM
+     Journal on Computing, 35(4):932–963, 2006.
+[19] Julius Petersen. Die Theorie der regulären graphs. Acta Math., 15:193–220, 1891.
+[20] Mikkel Thorup. Near-optimal fully-dynamic graph connectivity. In Proceedings of the Thirty-
+     second Annual ACM Symposium on Theory of Computing, STOC ’00, pages 343–350, New
+     York, NY, USA, 2000. ACM.
+[21] Christian Wulff-Nilsen. Faster deterministic fully-dynamic graph connectivity. In Encyclopedia
+     of Algorithms, pages 738–741. 2016.
+
+                                                21
+A       Details of the high level algorithm
+Lemma 5 (Essentially the high level algorithm from [11]). There exists a deterministic reduction
+for dynamic graphs with n nodes, that, when starting with an empty graph, supports any sequence
+of m Insert or Delete operations using:
+      • O(m) calls to Link, Cut, Uncover, and CoverLevel.
+
+      • O(m log n) calls to Connected, Cover, AddLabel, RemoveLabel, FindFirstLabel, and FindSize.
+And that can answer FindBridge queries using a constant number of calls to Connected, CoverLevel,
+and MinCoveredEdge.
+Proof. The only part of the high level algorithm from [11] that does not directly and trivially
+translate into a call of the required dynamic tree operations (see pseudocode below) is in the Swap
+method where given a tree edge e = (v, w) we need to find a nontree edge e0 covering e with
+`(e0 ) = i = CoverLevel(e). We can find this e0 by using FindFirstLabel and increasing the level of
+each non-tree edge we examine that does not cover e. For at least one side of (v, w), all non-tree
+edges at level i incident to that side will either cover e or can safely have their level increased
+without violating the size invariant. So we can simply search the side where the level i component
+is smallest until we find the required edge (which must exist since e was covered on level i). The
+amortized cost of all operations remain unchanged with this implementation. Counting the number
+of operations (see Table 2) gives the desired bound.
+
+                                                             #Calls during
+  #     Operation
+                                  Insert+Delete   FindBridge(v) FindBridge(v, w)   Size(v)   2-Size(v)
+  1     Link(v, w, e)                    1             0                 0            0          0
+  2     Cut(e)                           1             0                 0            0          0
+  3     Connected(v, w)                log n           0                 1            0          0
+  4     Cover(v, w, i)                 log n           0                 0            0          0
+  5     Uncover(v, w, i)                 1             0                 0            0          0
+  6     CoverLevel(v)                    0             1                 0            0          0
+  7     CoverLevel(v, w)                 1             0                 1            0          0
+  8     MinCoveredEdge(v)                0             1                 0            0          0
+  9     MinCoveredEdge(v, w)             0             0                 1            0          0
+ 10     AddLabel(v, l, i)              log n           0                 0            0          0
+ 11     RemoveLabel(l)                 log n           0                 0            0          0
+ 12     FindFirstLabel(v, w, i)        log n           0                 0            0          0
+        FindSize(v, w, i)              log n           0                 0            0          1
+ 13
+        FindSize(v, v, −1)               0             0                 0            1          0
+
+Table 2: Overview of how many times each tree operation is called for each graph operation, ignoring
+constant factors. The “Insert+Delete” column is amortized over any sequence starting with an
+empty set of edges. The remaining columns are worst case.
+
+ 1: function 2-edge-connected(v, w)
+ 2:    return T.Connected(v, w) ∧ T.CoverLevel(v, w)≥ 0
+ 3: function FindBridge(v)
+ 4:    if T.CoverLevel(v)= −1 then
+
+                                                    22
+5:         return T.MinCoveredEdge(v)
+ 6:    else
+ 7:        return nil
+ 8: function FindBridge(v, w)
+ 9:    if T.CoverLevel(v, w)= −1 then
+10:        return T.MinCoveredEdge(v, w)
+11:    else
+12:        return nil
+13: function Size(v)
+14:    return T.FindSize(v,v,−1)
+15: function 2-Size(v)
+16:    return T.FindSize(v,v,0)
+17: function Insert(v, w, e)
+18:    if ¬T.Connected(v, w) then
+19:        T.Link(v, w, e)
+20:        `(e) ← `max
+21:    else
+22:        T.AddLabel(v, e.label1, 0)
+23:        T.AddLabel(w, e.label2, 0)
+24:        `(e) ← 0
+25:        T.Cover(v, w, 0)
+26: function Delete(e)
+27:    (v, w) ← e
+28:    α ← `(e)
+29:    if α = `max then
+30:        α ← T.CoverLevel(v, w)
+31:        if α = −1 then
+32:            T.Cut(e)
+33:            return
+34:        Swap(e)
+35:    T.RemoveLabel(e.label1)
+36:    T.RemoveLabel(e.label2)
+37:    T.Uncover(v, w, α)
+38:    for i ← α, . . . , 0 do
+39:        Recover(w,v,i)
+40: function Swap(e)
+41:    (v, w) ← e
+42:    α ← T.CoverLevel(v, w)
+43:    T.Cut(e)
+44:    e0 ←FindReplacement(v,w,α)
+45:    (x, y) ← e0
+46:    T.RemoveLabel(e0 .label1)
+47:    T.RemoveLabel(e0 .label2)
+48:    T.Link(x, y, e0 )
+
+
+                                           23
+49:    `(e0 ) ← `max
+50:    T.AddLabel(v,e.label1, α)
+51:    T.AddLabel(w,e.label2, α)
+52:    `(e) ← α
+53:    T.Cover(v,w,α)
+54: function FindReplacement(v,w,i)
+55:    sv ← T.FindSize(v, v, i)
+56:    sw ← T.FindSize(w, w, i)
+57:    if sv ≤ sw then
+58:        return RecoverPhase(v, v, i, sv )
+59:    else
+60:        return RecoverPhase(w, w, i, sw )
+61: function Recover(v,w,i)
+62:    s ← bT.FindSize(v, w, i)/2c
+63:    RecoverPhase(v,w,i,s)
+64:    RecoverPhase(w,v,i,s)
+65: function RecoverPhase(v, w, i, s)
+66:    l ← T.FindFirstLabel(v, w, i)
+67:    while l 6= nil do
+68:        e ← l.edge
+69:        (q, r) ← e
+70:        if ¬T.Connected(q, r) then
+71:            return e
+72:        if T.FindSize(q, r, i + 1) ≤ s then
+73:            T.RemoveLabel(e.label1)
+74:            T.RemoveLabel(e.label2)
+75:            T.AddLabel(q, e.label1, i + 1)
+76:            T.AddLabel(r, e.label2, i + 1)
+77:            `(e) = i + 1
+78:            T.Cover(q,r,i + 1)
+79:        else
+80:            T.Cover(q,r,i)
+81:            return nil
+82:        l ← T.FindFirstLabel(v, w, i)
+83:    return nil
+
+
+B     Pseudocode for the CoverLevel structure
+ 1: function CL.Cover(v,w,i)
+ 2:   C ← TopTree.Expose(v, w)
+ 3:   coverC ← max {coverC , i}
+      cover+              +
+                   
+ 4:        C ← max  cover C, i
+ 5: function CL.Uncover(v,w,i)
+ 6:   C ← TopTree.Expose(v, w)
+
+
+                                                 24
+ 7:    coverC ← −1
+ 8:    cover+
+            C ← −1 
+ 9:    cover−            −
+            C ← max coverC , i
+10: function CL.CoverLevel(v)
+11:    C ← TopTree.Expose(v)
+12:    return globalcoverC
+13: function CL.CoverLevel(v, w)
+14:    C ← TopTree.Expose(v, w)
+15:    return coverC
+16: function CL.MinCoveredEdge(v)
+17:    C ← TopTree.Expose(v)
+18:    return minglobaledgeC
+19: function CL.MinCoveredEdge(v, w)
+20:    C ← TopTree.Expose(v, w)
+21:    return minpathedgeC
+22: function CL.Split(C)
+23:    for each path
+                   child D of C do
+24:       if max coverD , cover−           −
+                               D ≤ coverC then
+                   −         −
+25:           coverD ← coverC
+          if coverD ≤ max cover−          +
+                           
+26:                              D , coverD then
+                             +
+27:           coverD ← coverC
+                             +
+28:           cover+
+                   D ← coverC
+29: function CL.Merge(C; A1 , . . . , Ak )
+30:    coverC ← `max
+31:    minpathedgeC ← nil
+32:    globalcoverC ← `max
+33:    minglobaledgeC ← nil
+34:    for i ← 1, . . . , k do
+35:       if ∂Ai ⊆ π(C) then
+36:           if coverAi < coverC then
+37:               coverC ← coverAi
+38:               minpathedgeC ← minpathedgeAi
+39:       else
+40:          if coverAi < globalcoverC then
+41:              globalcoverC ← coverAi
+42:              minglobaledgeC ← minpathedgeAi
+43:       if globalcoverAi < globalcoverC then
+44:           globalcoverC ← globalcoverAi
+45:           minglobaledgeC ← minglobaledgeAi
+46:    cover−
+            C ← −1
+47:    cover+
+            C ← −1
+48: function CL.Create(C; edge e)
+49:    coverC ← −1
+
+
+                                             25
+50:    globalcoverC ← −1
+51:    if C is a point cluster then
+52:        minpathedgeC ← nil
+53:        minglobaledgeC ← e
+54:    else
+55:        minpathedgeC ← e
+56:        minglobaledgeC ← nil
+57:    cover−
+            C ← −1
+58:    cover+
+            C ← −1
+
+
+
+C     Pseudocode for the FindSize structure
+In the following, we use the notation
+
+                                        [key : partsize, diagsize]
+
+to denote the root of a new tree consisting of a single node with the given values. And for a given
+tree root and given x, y
+
+                                             (tree{x≤i≤y} )
+
+is the root of the subtree consisting of all nodes whose keys are in the given range. Similarly, for
+any given i, let
+
+                                                 (treei )
+
+denote the node in the tree having the given key.
+ 1: function FS.FindSize(v, w, i)
+ 2:    C ← TopTree.Expose(v, w)
+ 3:    return sizeC,i
+ 4: function FS.Merge(C; A, B)
+ 5:    {c} ← ∂A ∩ ∂B
+ 6:    if c ∈ π(C) then                                                         . Merge along path
+ 7:        if |∂C| <= 1 then
+ 8:            a ← c, b ← c
+ 9:        else
+10:            {a, b} ← ∂C with a ∈ ∂A and b ∈ ∂B.
+11:        sizeC ← sizeA + sizeB
+12:        for (x, X) ← (a, A), (b, B) do
+13:            if x = c then
+14:                tree0X,x ← treeX,x , undo0X,x ← nil
+15:            else
+16:                for v ← x, c do
+17:                    ` ← max cover−            +
+                                        X , coverX
+18:                    s ← (treeX,v ). partsizesum
+19:                    d ← M(cover+  X) ∗ s
+
+
+                                                   26
+20:                  tree0X,v ← treeX,v,{i>`} , undo0X,v ← treeX,v,{i≤`}
+21:                  tree0X,v ← tree0X,v +[cover+X : s, d]
+22:      for (x, X, y, Y ) ← (a, A, b, B), (b, B, a, A) do
+23:         s ← (tree0Y,c,{coverX ≤i≤`max } ). partsizesum
+24:         p ← (tree0X,x,coverX ). partsize +s
+25:         d ← (tree0X,x,coverX ). diagsize +M(coverX ) ∗ s
+26:         if x = c then
+27:             tree00X,x ← [`max : sizeX , sizeX ], undo00X,x ← nil
+28:         else
+29:             tree00X,x ← tree0X,x,{i>coverX } , undo00X,x ← tree0X,x,{i≤coverX }
+30:          if y = c then
+                                      000
+31:              tree000
+                     Y,c ← nil, undoY,c ← [`max : sizeY , sizeY ]
+32:          else
+                                                     000
+33:              tree000       0                               0
+                     Y,c ← treeY,c,{i<coverX } , undoY,c ← treeY,c,{i≥coverX }
+
+34:          treeC,x ← tree00X,x +[coverX : p, d] + tree000
+                                                        Y,c
+35:   else                                                                             . Merge off path
+36:      {a} ← ∂C \ {c}
+37:      if a 6∈ ∂A then
+38:          Swap A and B
+         ` ← max cover−            +
+                   
+39:                      A , coverA
+40:      d ← (treeA,a,{`<i≤`max } ). diagsizesum
+41:      p ← (treeA,a,{−1≤i≤`} ). partsizesum
+42:      sizeC ← d + M(cover+  A ) ∗ p + M(coverA ) ∗ sizeB
+43:      treeC,a ← [`max : sizeC , sizeC ]
+44: function FS.Split(C)
+45:   A, B ← the children of C
+46:   {c} ← ∂A ∩ ∂B
+47:   if c ∈ π(C) then                                                                . Split along path
+48:       if |∂C| <= 1 then
+49:           a ← c, b ← c
+50:       else
+51:           {a, b} ← ∂C with a ∈ ∂A and b ∈ ∂B.
+52:       for (x, X, y, Y ) ← (a, A, b, B), (b, B, a, A) do
+53:           tree00X,x ← treeC,x,{i>coverX } , tree000
+                                                    Y,c ← treeC,x,{i<coverX }
+54:           if y 6= c then
+                                              000
+55:               tree0Y,c ← tree000
+                                 Y,c + undoY,c
+56:          if x 6= c then
+57:              tree0X,x ← tree00X,x + undo00X,x
+58:      for (x, X) ← (a, A), (b, B) do
+59:         if x 6= c then
+60:             for v ← x, c do
+61:                 treeX,v ← tree0X,v, i>cover+ + undo0X,v
+                                       {       X}
+
+
+
+
+                                                     27
+62: function FS.Create(C; edge e)
+63:   sizeC ← 0
+64:   for v ∈ ∂C do
+65:       treeC,v ← [`max : 0, 0]
+66: function FS.Create(C; vertex label l)
+67:   sizeC ← (1){0≤i<`max }
+68:   for v ∈ ∂C do
+69:       treeC,v = [`max : sizeC , sizeC ]
+
+
+
+
+                                              28
+

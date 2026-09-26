@@ -1,0 +1,1546 @@
+                                                                                         Splay Top Trees
+
+                                                                        Jacob Holm* 1 , Eva Rotenberg†2 , and Alice Ryhl‡2
+                                            1
+                                              Department of Computer Science, University of Copenhagen, DK-2100 Copenhagen,
+                                                                                Denmark
+
+
+
+
+arXiv:2210.11918v2 [cs.DS] 6 Feb 2023
+                                             2
+                                               Department of Applied Mathematics and Computer Science, Technical University of
+                                                                    Denmark, DK-2800 Lyngby, Denmark
+
+                                                                                                     Abstract
+
+                                                    The top tree data structure is an important and fundamental tool in dynamic graph algorithms. Top trees
+                                                have existed for decades, and today serve as an ingredient in many state-of-the-art algorithms for dynamic
+                                                graphs. In this work, we give a new direct proof of the existence of top trees, facilitating simpler and more
+                                                direct implementations of top trees, based on ideas from splay trees. This result hinges on new insights into the
+                                                structure of top trees, and in particular the structure of each root path in a top tree. In amortized analysis, our
+                                                top trees match the asymptotic bounds of the state of the art.
+
+                                        1 Introduction
+                                        An interesting topic in graph algorithms is dynamic graphs; graphs that undergo updates or changes. Throughout
+                                        the past half century, fundamental algorithmic questions about graphs such as connectivity, minimum spanning
+                                        tree, shortest paths, matchings, and planarity, have been studied in the dynamic setting, where edges may appear
+                                        and disappear adversarially [20, 18, 27, 46, 34, 48, 38, 32, 40, 16, 47, 26, 1, 35, 41, 39, 44, 6, 9, 8, 25, 24, 19, 17, 29].
+                                        For such problems, researchers engage in the pursuit of a data structure with an (as efficient as possible)
+                                        polylogarithmic algorithm for updates and queries, or (conditional) lower bounds certifying that such algorithms
+                                        are unlikely to exist. For a wide range of problems, polylogarithmic time data structures do indeed exist, and
+                                        often, such algorithms use top trees as a tool towards efficient solutions.
+                                        The top tree [4] is a data structure, which can be used in combination with any (explicitly maintained) dynamic
+                                        spanning forest of the changing graph. The strength of top trees is that they can be used to efficiently store
+                                        concise summaries of information about subtrees of a tree in a way that allows for efficient updates and queries.
+                                        If we think of the dynamic graph problem as a calculation, the top tree stores a tree of summaries of properties
+                                        of subgraphs, and upon changes to the graph, we only need to recompute a logarithmically bounded number of
+                                        subgraph summaries.
+                                        More formally, the basic structure of a top tree can be seen as a binary tree of contractions in the underlying
+                                        tree. The leaf nodes of the top tree are the edges in the underlying tree, and the internal nodes correspond to the
+                                        union, or merge, of the two children. Each node must behave as a “generalized edge” in the sense that it may
+                                        share at most two vertices with the rest of the graph. We denote by cluster the set of edges corresponding to a
+                                        node in the top tree. Top trees build on similar principles as topology trees, which is the tool introduced and
+                                        used by Frederickson [20] to get the first non-trivial update algorithms for connectivity-related questions about
+                                        dynamic graphs [20, 21, 33]. However, top trees and topology trees differ in the fundamental way that while
+                                        top trees use a notion of clusters that generalizes edges, topology trees use a notion of clusters that generalizes
+                                        low-degree vertices.
+
+                                          * Partially supported by the VILLUM Foundation grant 16582, “BARC".
+                                          † Partially supported by Independent Research Fund Denmark grant 2020-2023 (9131-00044B) “Dynamic Network Analysis”, and the
+
+                                        VILLUM Foundation grant 37507 “Efficient Recomputations for Changeful Problems”.
+                                          ‡ Partially supported by the VILLUM Foundation grant 37507 “Efficient Recomputations for Changeful Problems”. Also a Google
+
+                                        employee.
+
+
+
+                                                                                                  Page 1 of 27                                                   Copyright © 2023
+                                                                                                                                This paper is available under the CC-BY 4.0 license
+Not only do top trees build on similar principles as topology trees, the original proof that top trees of logarithmic
+height can be maintained goes via reduction to topology trees [4, Section 6.2]. Most implementations of top trees
+described to date have the form of either an extra interface imposed on topology trees, or are implemented as an
+interface on Sleator and Tarjan’s link-cut trees [45].
+
+In this work, we show a different route to top trees, and provide new proofs of top tree properties. We show that
+top trees with logarithmic amortized update times may be directly implemented in a manner akin to splay trees.
+We claim that such direct implementations are simpler, and provide pseudo-code and C code as proof of concept.
+While our approach is indeed simple to implement, it is not trivial that it has good theoretical guarantees, and
+we give proofs of its efficient amortized update times.
+
+Just like the state-of-the art implementation by Tarjan and Werneck [45], a caveat of our work is that all
+times are only amortized. However there are many results involving top trees for which this is not a
+problem. For one, there are many dynamic problems for which the efficient (polylog-time) solution using
+top trees is already amortized. Examples include biconnectivity, 2-edge connectivity, planarity testing, and
+diameter [27, 46, 30, 28, 29, 4]. Secondly, dynamic algorithms have a range of applications in static problems,
+where the solution to the static problem is computed via a sequence of subproblems, dynamically extracted
+from the original problem [10, 23, 37, 5]. When used as a subroutine this way, amortized running time is just as
+valuable as worst-case.
+
+Related work. Data structures for dynamic forests include link-cut trees that were introduced by Sleator and
+Tarjan [42] and who used it, among other applications, to solve flow-problems. Topology trees were introduced
+by Frederickson [20] and used to obtain the first sublinear-time algorithms for dynamic graph connectivity. Later,
+top trees [4] were introduced and used to give new polylogarithmic update-time algorithms for connectivity and
+related problems [27, 31].
+
+Splay trees were introduced by Sleator and Tarjan [43] under the name of Self-adjusting Binary Search trees, as
+a simple way to obtain efficient amortized time per operation, without guaranteeing that the tree is always
+balanced. The same paper also introduced the notion of semi-splaying as an attempt to reduce the total number of
+rotations by a constant, while still guaranteeing efficient amortized time per operation. In [12] it was confirmed
+empirically that using semi-splaying, “the practical performance is better for a very broad variety of access
+patterns”.
+
+Splay trees have been conjectured to be dynamically optimal [14, 13], meaning that for any sequence of operations,
+they do at most a constant factor more work than an optimal algorithm that knows the whole sequence of
+operations in advance. The subject of dynamic optimality has been addressed also in connection with Tango
+trees [15], and in recent advances on search trees on trees [11, 7].
+
+In practice, the state-of-the-art implementation of top trees is by Tarjan and Werneck [45]. Their implementation
+is based on link-cut trees, that are enhanced with extra information, and their update-times are amortized. An
+experimental evaluation of topology trees in comparison with link-cut-trees is given by Frederickson [22], and
+Albers and Karpinski [2] study splay trees in theory and practice, proposing a randomized variant with fast (i.e.
+O(log n)) expected worst-case time per operation.
+
+Overview of paper. First, in Section 2, we give an overview of the data structure and the operations we support.
+Then, sections 3, 4, 5, 6, and 7 are dedicated to the details of those data structures and operations: In Section 3,
+we describe some very simple local queries in the top tree. In Section 4, we describe the rotation-like subroutine
+that the splay tree uses. Section 5 is devoted to splaying, and we describe and prove structural properties that
+make both semi-splaying and splaying easy to implement in O(log n) amortized time. Section 6 describes an
+important internal operation used as a subroutine by the top tree for several of its fundamental operations.
+Section 7 describes the dynamic operations that are called directly by the user of the top tree: expose, deexpose,
+link, and cut. In Section 8, we provide practical information about our implementation, which is available for
+download. In Appendix A, we describe a more complicated way to implement expose that does not rely on
+full_splay. This reduces the number of changes to the top tree, and we conjecture that it is faster in practice.
+
+
+                                                    Page 2 of 27                                                Copyright © 2023
+                                                                               This paper is available under the CC-BY 4.0 license
+2 Overview of the data structure
+A top tree is a data structure that represents an underlying tree, usually from some underlying forest. A top tree
+can be augmented to store additional information, e.g. edge weights, and to answer various types of queries on
+the underlying tree. It does this by maintaining a hierarchy of summaries of certain connected subgraphs of the
+underlying tree, from which the answers can be efficiently computed. Up to two vertices in each underlying
+tree can be marked as exposed, which affects the structure of the top tree and what summaries are stored, and
+therefore which queries the top tree is ready to answer quickly at any given time. With no exposed vertices this
+could e.g. be the size or diameter of the underlying tree. With one vertex exposed, we can think of the underlying
+tree as rooted in that vertex and we might e.g. answer queries about the height. With two vertices exposed, that
+would typically be some question related to the path between them, e.g. the length or the maximum edge weight.
+See [4] for more details.
+
+2.1 External operations Using Tv to refer to the tree in the underlying forest containing the vertex v, and Tv to
+refer to the corresponding top tree, the operations we support are as follows:
+
+expose(v): Makes v exposed, and returns the root1 of Tv . Requires that the tree Tv containing v has at most 1
+     exposed vertex and that v is not currently exposed. Does not change which node is the root node of Tv .
+
+deexpose(v): Makes v not exposed, and returns the root of Tv . Requires that v is currently exposed in the tree Tv
+     containing it. Does not change which node is the root node of Tv .
+
+link(u, v): Creates a new edge u, v in the forest and returns the root of the top tree for the resulting tree. Requires
+     that u, v are in disjoint trees Tu , Tv and that neither tree has any exposed vertices.
+
+cut(e): Deletes the edge e with endpoints u, v from the forest and returns2 the roots of the two resulting trees
+      Tu , Tv . Requires that the tree containing e has no exposed vertices.
+
+This differs slightly from the standard description of top trees where expose is usually defined to take up to two
+arguments, but it should be clear that it is equivalent in terms of power. We give a direct proof that the amortized
+cost of each operation is O(log n).
+
+2.2 Structure The top tree is itself a rooted binary3 tree of nodes, where each node corresponds to a cluster,
+which is a connected set of edges in the underlying tree. Each leaf in the top tree corresponds to a single edge in
+the underlying tree, and each internal node corresponds to the disjoint union of its two children.
+
+We say that a vertex is a boundary vertex of a cluster if it is incident to an edge in the cluster and either is exposed
+or is also incident to an edge outside the cluster. A cluster is valid if it has at most two boundary vertices.
+Conceptually, the boundary vertices lie on the boundary between the cluster and the rest of the tree, and since
+valid clusters have at most two boundary vertices, valid clusters can be thought of as “generalized edges” with
+the endpoints being the boundary vertices. It is possible for such a generalized edge to have less than two
+endpoints, but we can think of them as normal edges whose “missing” endpoints are irrelevant to us.
+
+The top tree must satisfy the invariant that all clusters are valid. We note that this invariant requires that each
+tree in the underlying forest has at most two exposed vertices, because the root of the top tree would otherwise
+have too many boundary vertices.
+
+We categorize the (valid) clusters in the top tree as either path clusters or point clusters. A path cluster is a cluster
+with two boundary vertices, and a point cluster is a cluster with zero or one boundary vertices. For each internal
+node in the top tree, we also define its central vertex as the vertex shared by its two children. The set of boundary
+vertices in a node is always equal to the union of boundary vertices in its children, with or without the central
+vertex removed.
+
+
+  1 If v is an isolated vertex, we define both T and root(T ) to be null.
+                                                v          v
+  2
+      Our C code does not return the roots of the resulting trees, because returning multiple values is inconvenient in C.
+  3 The definition of top trees makes perfect sense for higher degree nodes, but for simplicity we will restrict ourselves to the binary case.
+
+
+
+
+                                                                 Page 3 of 27                                                      Copyright © 2023
+                                                                                                  This paper is available under the CC-BY 4.0 license
+                                 b6
+                            c6        b5
+                                           c5                                    c3
+                                 b4
+                            b3        c4
+                                                                                 c1                 c5
+                       c3        b2
+                            b1        c2                                       c0        c2       c4       c6
+                       c1        c0                                            (b) The underlying tree.
+        (a) The nodes as they appear in the top tree.
+
+                     Figure 1: An example of a top tree that satisfies the orientation invariant.
+
+
+2.3 Orientation invariant When working with top trees, it is useful to think of the children of each node to
+have a specific left-to-right order, or orientation. (I.e. one child is the left child and the other child is the right
+child.)
+Given the orientation of each node, we can define whether a boundary vertex of a node is to the left, in the
+middle, or to the right. For internal nodes, a boundary vertex is in the middle if it is the central vertex of the node.
+Otherwise, a boundary vertex is to the right if it comes from the right child, and to the left if it comes from the left
+child. The leftmost boundary vertex is then defined as the left boundary vertex if one exists, otherwise the middle
+boundary vertex if one exists. If the node only has a right boundary vertex, then we say that it has no leftmost
+boundary vertex. The definition of rightmost is analogous.
+For leaf nodes, the left boundary vertex is the left endpoint and the right boundary vertex is the right endpoint,
+if those vertices are boundary vertices of the edge. Leaf nodes never have a central or middle vertex.
+Having some convention for what orientation is chosen for each node helps reduce the number of cases that need
+to be considered, both for the operations explored in this paper, and for any augmentations that need to maintain
+additional information as part of the stored summaries. In this paper we require the orientations in the top tree
+to satisfy the following orientation invariant: For any internal node, the leftmost boundary vertex of the right child
+and the rightmost boundary vertex of the left child must both exist and be equal to the central vertex of the node.
+The invariant determines the orientation of every internal non-root node relative to the orientation of its parent,
+except for point clusters whose children are both point clusters.
+A larger example of a top tree that satisfies the orientation invariant can be found in Figure 1. Note that b5 has its
+only boundary vertex in the middle, so the subtree rooted at b5 could be mirrored without breaking the invariant.
+To maintain the orientation invariant as the structure changes, we sometimes have to flip the orientation of a
+whole subtree.
+
+2.4 Internal operations To support the external operations (link, cut, expose, deexpose) we introduce a
+collection of internal operations. Some of these are probably not directly useful for applications using the top tree,
+but form the basis for implementing the external operations.
+is_point(node), is_path(node) Returns whether node is a point cluster or a path cluster.
+flip(node) To maintain the orientation invariant as the structure changes, we sometimes have to flip the orientation
+      of a whole subtree. Flipping can be done by reversing the left-to-right order in every node of the subtree,
+      but for efficiency we need to do this in a lazy fashion. The idea is to just store a boolean flip bit in
+      each node, indicating whether or not to conceptually flip the whole subtree rooted at that node. This
+      operation therefore just inverts that bit, which trivially takes constant time. Since it is literally just that, our
+      pseudocode manipulates that bit directly rather than calling a function to do it.
+push_flip(node) This operation ensures that the flip bit of node is false, by actually swapping and flipping the
+    children of node if necessary. This also takes constant time.
+
+
+                                                        Page 4 of 27                                                 Copyright © 2023
+                                                                                    This paper is available under the CC-BY 4.0 license
+     Since all our logic for the rest of the internal operations is symmetric, calling push_flip on the constant
+     number of nodes where the relative orientation is relevant is sufficient to ensure the part of the top tree we
+     are working on is stored in a way that we can ignore the flip bits in much of the rest of the logic.
+
+has_left_boundary(node), has_middle_boundary(node), has_right_boundary(node)
+     Returns whether node has a left, middle, or right boundary vertex respectively. These functions can be
+     implemented in constant time if we know the number of boundary vertices of each cluster. In practice, it is
+     useful to ignore the flip bits of the proper ancestors of node, but not the flip bit on node itself when defining
+     what left and right means for these functions. In other words, the result is as if push_flip had been called
+     on node first, so it is consistent with the orientation of the parent.
+
+rotate_up(node) This is similar to the rotate operation known from binary search trees. See Figure 2 for an
+      illustration.
+
+     There are two major differences between rotate_up and rotations in binary search trees. One is that rotations
+     are not always allowed. The rotate_up function is only allowed if sibling(node)∪ sibling(parent(node))
+     is a valid cluster. The other difference is that it does not always preserve the ordering of the leaves.
+
+     The operation can be defined in the following way: Swap the parent pointers of node and
+     sibling(parent(node)), then adjust child pointers, orientations, and any other remaining fields in a
+     way such that all invariants are satisfied. It can be shown that this is always possible if sibling(node) ∪
+     sibling(parent(node)) is a valid cluster.
+
+
+ A∪B∪C                                            A∪B∪C                                         A∪B∪C
+                         rotate_up(B)                                rotate_up(A)
+
+
+B        A∪C                                    A∪B        C                                   A          B∪C
+
+
+     A          C                           A         B                                               B             C
+
+
+Figure 2: A top tree containing clusters A, B, and C (middle), and the result of calling either rotate_up(B) (left)
+or rotate_up(A) (right). Note here that in binary search trees, one typically calls the rotate operation on the node
+(A ∪ B), whereas in our case, that would be ambiguous. Instead, we define rotate_up to take the child of (A ∪ B)
+whose depth is reduced.
+
+semi_splay_step(node) This finds and executes one or two rotate_up operations in the top tree that are valid
+     and together reduce the depth of node by one. It returns the root of the changed subtree.
+
+     This is really the core of our new algorithm. We prove that if the depth of node is at least five, this operation
+     always succeeds and only needs to look at a small constant number of nodes.
+
+     Conceptually, the semi-splay step serves the purpose that we use rotations for in binary search trees:
+     decreasing the depth of the given node. We cannot use rotate_up for that directly because we aren’t
+     always allowed to call that function. However, rotate_up is allowed sufficiently often that we can still
+     implement splay trees, and the semi-splay step is best thought of as a procedure that searches for such a
+     rotation — understanding the precise details of how that happens is not important for understanding the
+     rest of the paper.
+
+     This immediately suggests a naïve algorithm similar to the rotate-to-root algorithm by Allen et al.[3] for
+     binary search trees that was a precursor to splay trees. Simply call semi_splay_step repeatedly on node
+     until you get constant depth. This, however does not give the desired amortized O(log n) running time for
+     our external operations.
+
+
+                                                    Page 5 of 27                                                 Copyright © 2023
+                                                                                This paper is available under the CC-BY 4.0 license
+semi_splay(node) This uses semi_splay_step repeatedly but in a slightly less naïve way. The amortized cost
+     of this operation is O(log n) − Ω(depth(node)), which means that it can be used to pay for other operations
+     whose natural cost is O(depth(node)).
+
+      This also guarantees that the depth of node is reduced by a constant factor, and is similar to the balancing
+      operation used in semi-splay trees.
+
+full_splay(node) This also uses semi_splay_step repeatedly. In addition to the guarantees that semi_splay
+      provides, this method also guarantees that node is moved to have depth at most 4.
+
+      It does this by considering two semi_splay_step calls at a time, and is similar to the logic in splay trees
+      where we look for either a Zig, a Zig-Zig, or a Zig-Zag step.
+
+find_consuming_node(v) returns the consuming node of a vertex, defined as the lowest common ancestor in the
+     top tree of all edges incident to the vertex. More details and pseudocode can be found in Section 6. Note
+     that although the query itself does not require any changes to the tree, our implementation will perform a
+     semi-splay in the tree first to make the amortization work. This is similar to a search in a standard splay
+     tree, where you also need to do a splay during or after each search.
+
+2.5 Data structure We store the top tree as a rooted binary tree. For each node, we store the following
+information:
+
+   • A pointer to the parent node, or a null pointer if it has no parent.
+
+   • For internal nodes, a left and right child pointer. Neither pointer may be null.
+
+   • For leaf nodes, a vertex id or pointer for the left and right endpoints of the edge. (Or a pointer to the edge,
+     which in turn stores the left and right endpoints.)
+
+   • A counter storing the number of boundary vertices of the node. This can be zero, one or two.
+
+   • Each node stores a flip bit for the subtree rooted at that node. It represents whether the subtree rooted at
+     the node conceptually needs to be flipped relative to its parent.
+
+It is also necessary to store the underlying tree itself. This can be done by storing the edges adjacent to each vertex
+in a linked list. The necessary operations on the underlying tree are: insert/delete edge, a way to get any edge
+incident to a given vertex, a way to get the endpoints of an edge, and a way to determine whether the degree of
+a vertex is “zero or one” or “at least two”. (We have queries like degree(v) >= 2, but we do not actually need
+the precise number. This is convenient when storing the edges incident to a vertex in a linked list, as we do not
+need a separate counter for its length.)
+
+2.6 User data Most applications of top trees require that you store some kind of user-data in the vertices or
+edges in the underlying tree, and summaries based on that user-data in each cluster of the top tree. Normally,
+this user-data must be computed “bottom-up”, and the user-data usually doesn’t support changes in the middle
+of the top tree (e.g. rotations). However, it turns out that this is not actually a problem for our operations, because
+they always operate on the entire root path, and not only locally in the middle of the top tree. This means that
+when modifying the top tree, you can first destroy the user-data on the nodes of the root path, then you can run
+the algorithm from this paper, and then you can rebuild the user-data on nodes of the new root path. Rebuilding
+can be done either at the end of each operation, or deferred until the data is actually needed. Either way, the
+amortized number of times node user-data must be (re)computed stays O(log n).
+
+3 Detecting boundary vertex positions
+Our other internal operations need to determine whether the boundary vertices are to the left, middle, or to
+the right. This can be done by looking at how many boundary vertices the node and its children have. The
+operations can be implemented as follows:
+
+
+                                                     Page 6 of 27                                                Copyright © 2023
+                                                                                This paper is available under the CC-BY 4.0 license
+fn has_middle_boundary(node) {
+    if is_leaf_node(node) || node.num_boundary_vertices == 0 {
+        return false;
+    } else {
+        return node.num_boundary_vertices
+             - is_path(node.children[0])
+             - is_path(node.children[1]);
+    }
+}
+
+fn has_left_boundary(node) {
+    if is_leaf_node(node) {
+        endpoint = node.endpoints[node.flip];
+        return endpoint.exposed || degree(endpoint) >= 2;
+    } else {
+        return is_path(node.children[node.flip]);
+    }
+}
+
+fn has_right_boundary(node) {
+    if is_leaf_node(node) {
+        endpoint = node.endpoints[!node.flip];
+        return endpoint.exposed || degree(endpoint) >= 2;
+    } else {
+        return is_path(node.children[!node.flip]);
+    }
+}
+
+Checking whether a node has a left boundary vertex can be done by checking whether the appropriate child is a
+path cluster because if the child is a point cluster, then its only boundary vertex is the central vertex of our node,
+and if the child is a path cluster, then it has a boundary vertex different from the central vertex, and that extra
+boundary vertex is also a boundary vertex of the parent. The code for has_middle_boundary works because
+left + middle + right is the total number of boundary vertices. (Using the convention that booleans can be used
+interchangeably with the integers zero and one.)
+
+4 Rotations
+The rotation is one of the basic operations that the top tree algorithms are built on. To move a given node
+up, we swap it with its parent’s sibling. The rotate_up operation is allowed if and only if sibling(node) ∪
+sibling(parent(node)) is a valid cluster. There are no guarantees about which orientations the nodes are given,
+except that they satisfy the orientation invariant.
+
+Pseudocode for rotate_up follows below:
+
+fn rotate_up(node) {
+    parent = node.parent
+    grandparent = parent.parent
+    sibling = sibling(node)
+    uncle = sibling(parent)
+
+     push_flip(grandparent)
+     push_flip(parent)
+
+     uncle_is_left_child = grandparent.children[0] == uncle
+     sibling_is_left_child = parent.children[0] == sibling
+
+
+                                                    Page 7 of 27                                                 Copyright © 2023
+                                                                                This paper is available under the CC-BY 4.0 license
+    to_same_side = uncle_is_left_child == sibling_is_left_child
+    sibling_is_path = is_path(sibling)
+    uncle_is_path = is_path(uncle)
+    gp_is_path = is_path(grandparent)
+
+    if to_same_side && sibling_is_path {
+        // Rotation on path.
+        gp_middle = has_middle_boundary(grandparent)
+        new_parent_is_path = gp_middle || uncle_is_path
+        flip_new_parent = false
+        flip_grandparent = false
+        if gp_middle && !gp_is_path {
+             ggp = grandparent.parent
+             if ggp is not null {
+                 gp_is_left_child = ggp.children[0] == grandparent
+                 flip_grandparent = gp_is_left_child == uncle_is_left_child
+             }
+        }
+    } else {
+        // Rotation on star.
+        if !to_same_side {
+             new_parent_is_path = sibling_is_path || uncle_is_path
+             flip_new_parent = sibling_is_path
+             flip_grandparent = sibling_is_path
+             node.flip = !node.flip
+        } else {
+             new_parent_is_path = uncle_is_path
+             flip_new_parent = false
+             flip_grandparent = false
+             sibling.flip = !sibling.flip
+        }
+    }
+
+    parent.children[uncle_is_left_child] = sibling
+    parent.children[!uncle_is_left_child] = uncle
+    parent.flip = flip_new_parent
+    parent.boundary = if new_parent_is_path { 2 } else { 1 }
+
+    grandparent.children[uncle_is_left_child] = node
+    grandparent.children[!uncle_is_left_child] = parent
+    grandparent.flip = flip_grandparent
+
+    node.parent = grandparent
+    uncle.parent = parent
+}
+
+When performing a rotation, the underlying tree can look in one of two ways as illustrated in Figure 3.
+Additionally, the orientations of the top tree can appear with node and sibling to the same or opposite sides as
+illustrated in Figure 4. Using this, we can analyze the implementation of rotate_up on a case-by-case basis.
+
+First, we should argue that to_same_sides && sibling_is_path is true if and only if we are rotating around a
+path. If we assume that we are rotating around a path, then sibling must be a path cluster, and it follows from
+the orientation invariant that we are in the case of Figure 4a. If we assume that we are rotating around a star and
+sibling is a path cluster, then we can’t be in case Figure 4a because then node and uncle would need to connect
+
+
+                                                   Page 8 of 27                                                Copyright © 2023
+                                                                              This paper is available under the CC-BY 4.0 license
+           e
+                      sib
+                            lin             le                                                uncle
+     nod                          g   unc
+                                                                                          g
+                                                                                    lin                nod
+                              (a) Rotation on a path.                         sib                            e
+
+
+                                                                                                (b) Rotation on a star.
+
+Figure 3: The two possible configurations in the underlying tree of the clusters involved in a rotation. Each
+cluster is drawn as an edge. The labels on the edges refers to variables in the pseudocode for rotate_up.
+
+               grandparent                                                grandparent
+
+
+
+       parent            uncle                                          parent            uncle
+
+
+
+node             sibling                                       sibling           node
+               (a) sibling and uncle to the same side.                   (b) sibling and uncle to different sides.
+
+Figure 4: The two possible configurations in the top tree of sibling and uncle in relation to each other (ignoring
+reflections). The labels on the edges refers to variables in the pseudocode for rotate_up.
+
+
+to opposite sides of sibling due to the orientation invariant.
+
+We now show correctness for rotations around a path like in Figure 3a. We know that we are in Figure 4a, and
+the orientations are updated such that node, sibling, and uncle appear in the same order before and after the
+rotation. This means that the orientations match without having to flip node, sibling, uncle, or parent. The
+line that computes new_parent_is_path needs to be true when {sibling, uncle} has two boundary vertices.
+That cluster always has the boundary vertex between sibling and node, so we just need to check if one of the
+two other vertices are boundary vertices. The vertex between sibling and uncle is a boundary vertex of the
+new parent if and only if it is a boundary vertex of the old grandparent, and it is the central vertex of the old
+grandparent, so we can check that by asking whether grandparent had a middle boundary vertex. The vertex
+at the other end of uncle is a boundary of {sibling, uncle} whenever it is a boundary vertex of uncle. We can
+check this by asking whether uncle has two boundary vertices.
+
+The code that looks at ggp checks for the situation where {node, sibling, uncle} has a single boundary vertex
+in the middle before the rotation, and a single boundary vertex to the left or right after the rotation. If the
+new boundary vertex is to the right, then the grandparent no longer has a leftmost boundary vertex, so if the
+grandparent is a right child, we need to flip it to avoid breaking the orientation invariant at ggp.
+
+We now consider rotations on a star like in Figure 3b. We first consider the case in Figure 4a, where sibling
+must be a point cluster to avoid violating the orientation invariant. Here, we put the nodes together such that
+node, sibling, and uncle appear in the same order before and after the rotation. We flip sibling because it
+changes between being a left and right child. (The flip isn’t necessary when sibling has the boundary vertex in
+the middle, but it is also not incorrect to flip in this case.) The new cluster is a path cluster exactly when uncle is
+a path cluster since we know that sibling is a point cluster. The orientation of the grandparent remains correct
+since the rotation does not change which vertex is to the left, in the middle, and to the right.
+
+
+                                                         Page 9 of 27                                                  Copyright © 2023
+                                                                                      This paper is available under the CC-BY 4.0 license
+Next, we consider rotations on a star like in Figure 4b with sibling being a point cluster. Here, node must be
+a point cluster to avoid violating the orientation invariant. The only two possible boundary vertices of the new
+parent and grandparent are the two endpoints of uncle. Thus, the new parent is a path cluster when uncle is.
+To avoid breaking the orientation invariant above grandparent, we note that the code puts the tree back together
+such that the two endpoints of uncle do not change positions in grandparent.
+The last case to consider is Figure 4b with sibling being a path cluster. Then, both node and uncle must be point
+clusters, because otherwise we have a cluster with three boundary vertices before or after the rotation. Thus,
+the only two possible boundary vertices of the new parent and grandparent are the two endpoints of sibling.
+Thus, parent is a path cluster when sibling is. To avoid breaking the orientation invariant above grandparent,
+we note that the code puts the tree back together such that the two endpoints of sibling do not change positions
+in grandparent.
+The above analysis was based on the two cases in Figure 4, but the two cases can also appear flipped. The
+algorithm also works in those cases because the code only cares about whether things hang off to the same or
+different sides, and not which side is left or right, so it treats the flipped cases identically.
+
+4.1 When are rotations valid? The exact condition for when rotates are allowed is that sibling(node) ∪
+sibling(parent(node)) is a valid cluster, but proving this directly every time we wish to make a rotation quickly
+becomes quite cumbersome. For this reason, we provide two lemmas that provide some cases in which rotations
+are allowed.
+We note that since rotate_up may modify the orientations in any way it wants to as long as the invariants are
+satisfied, there are multiple correct ways to implement it. However, the lemmas below do not look inside our
+implementation, so they hold for any correct implementation of rotate_up.
+However, we first prove some helper lemmas.
+Lemma 4.1. If a and b are valid clusters of a top tree whose intersection is a single vertex v, then the cluster a ∪ b is invalid
+if and only if the following three conditions hold: a is a path cluster, b is a path cluster, v is a boundary vertex of a ∪ b.
+Proof. We have already seen that the boundary vertices of a cluster is the union of the boundary vertices of its
+children, possibly with the central vertex removed. Since a and b are valid and share v, the union of the boundary
+vertices of the children has three elements if and only if both a and b are path clusters. The central vertex of a ∪ b
+is v. The lemma follows from this.
+Lemma 4.2. If a, b, c are valid clusters with c the parent of a and b, and if a is a point cluster, then all boundary vertices of c
+are also boundary vertices of b.
+Proof. All boundary vertices of c are either boundary vertices of a or b. However, all boundary vertices of a are
+also boundary vertices of b because the only boundary vertex of a point cluster is the one it shares with its sibling.
+
+
+In the following we define the phrase “a and b hang off to the same side” as “both a and b are left children, or
+both are right children”. The phrase “a and b hang off to opposite sides” will be its negation.
+Lemma 4.3. Let x, y, z, a, b be valid clusters in a top tree with y the parent of x, a and z the parent of y, b. If a is a path
+cluster and x, y hang off to the same side, then x ∪ b is not a connected set of edges.
+Proof. Assume without loss of generality that a, b are right children. Since a is a path cluster, it has a leftmost
+boundary vertex v and a rightmost boundary vertex w. By the orientation invariant, y has central vertex v and
+right boundary vertex w. Similarly, w is the central vertex of z. It follows that x has boundary vertex v and that
+b has boundary vertex w. If x ∪ b was a connected set of edges, then they would share a vertex u, but this is
+impossible as there would be a path from u to w through b, then from w to v through a, then from v to u through
+x. This is a cycle in a tree. Thus, x ∪ b is not connected.
+Using these helper lemmas, we can prove our lemmas for when rotations are allowed. The variable names in the
+lemmas are defined to match Figure 5.
+
+
+                                                         Page 10 of 27                                                    Copyright © 2023
+                                                                                         This paper is available under the CC-BY 4.0 license
+                                                                    z
+
+                                                                y       b
+
+                                                            x       a
+
+                    Figure 5: An illustration of a tree with the variable names used in Section 4.1.
+
+
+Lemma 4.4. Let x be a valid cluster in a top tree. If x and its grandparent are both point clusters, then it is valid to call
+rotate_up(x).
+
+Proof. Let y be the parent of x and let z be the parent of y. Let also a be the sibling of x and b be the sibling of y. We
+need to prove that a ∪ b is a valid cluster. To do that, we first argue that a and b share a vertex v. By Lemma 4.2,
+all boundary vertices of y are also boundary vertices of a. However, one of the boundary vertices of y is the one
+it shares with its sibling b. Thus, a and b share a boundary vertex.
+
+It remains to show that a ∪ b is valid. Since x ∪ a already exists in the tree, the only boundary vertex in x must be
+the one it shares with a. Thus, the cluster (a ∪ b) ∪ x has at most one fewer boundary vertices than a ∪ b. Since
+(a ∪ b) ∪ x already exists in the tree as the point cluster z, this means that a ∪ b has at most two boundary vertices
+as desired.
+
+Lemma 4.5. Let x, y, z, a, b be valid clusters in a top tree with z the parent of y, b and y the parent of x, a. If y is a path
+cluster and x hangs off to the same side as y, then it is valid to call rotate_up(x).
+
+If z is a path cluster and not the root, then a ∪ b hangs off to the same side as z after the rotation if and only if b hung off to
+the same side as z before the rotation.
+
+If z is a point cluster, then a ∪ b is a point cluster after the rotation.
+
+Proof. We need to show that a ∪ b is a valid cluster. To show that it is connected, let v be the central vertex of z.
+It is a boundary vertex of its children y and b. Since y is a path cluster, it has another boundary vertex w, and
+due to the orientation invariant, the assumption that x, y hang off to the same side implies that w is a boundary
+vertex of x and v is a boundary vertex of a. Thus, since a and b share the vertex v, they are connected.
+
+Let us show that a ∪ b is a valid cluster. If a or b are point clusters, then we are done by Lemma 4.1, so assume
+both are path clusters. Since y is also a path cluster, it follows from Lemma 4.1 that v is not a boundary vertex of
+z. Since z = x ∪ (a ∪ b), it follows that v can only be a boundary vertex of a ∪ b if v is the vertex shared with x,
+but x ∪ b is disconnected by Lemma 4.3, making it impossible for v to be a boundary vertex of x. Thus, v is not a
+boundary vertex of a ∪ b, so it is valid by Lemma 4.1.
+
+Assume that z is a path cluster and that its sibling c exists. The cluster z has a boundary vertex that isn’t in the
+middle. Either it comes from x ∪ a before and x after, or it comes from b before and a ∪ b after. If that boundary
+vertex is shared with c, then the child it comes from must hang off to the same side as c both before and after the
+rotation. If it isn’t shared with c, then the child it comes from must hang off to the opposite side as c both before
+and after the rotation. The desired post-condition follows.
+
+Assume that z is a point cluster. Since x, y hang off to the same side, the only boundary vertex of z must be w.
+However, since w is not in the middle at z, it must come exclusively from one child, and we know that it is a
+boundary vertex of x, so it must come from x. This implies that a ∪ b cannot be a path cluster after the rotation.
+
+
+5 Splaying
+Splaying is a well-known strategy for balancing binary search trees, and typically comes in two variants: full
+splays and semi-splays. Splaying does not translate verbatim to top trees since not all rotations are allowed
+in top trees, but it turns out that rotations are allowed sufficiently often that we can still implement splay-like
+
+
+                                                           Page 11 of 27                                                  Copyright © 2023
+                                                                                         This paper is available under the CC-BY 4.0 license
+operations. This section will describe both a semi-splay and a full splay, where the semi-splay will reduce the
+depth of the given node by a constant factor, and the full splay will reduce the depth to four or less.
+
+If we only consider the asymptotic amortized running times in terms of n, then there is no reason to ever use a
+semi-splay, since the full splay provides strictly stronger guarantees and has the same amortized running time
+asymptotically. However, since semi-splays make fewer structural updates to the tree, they are generally faster
+by a constant factor, which we conjecture may be significant in practice. In this paper, we will only use a full
+splay when we need the additional guarantees it provides.
+
+OurPproofs that the operations run in amortized logarithmic time use the amortization potential of Φ =
+P
+  T   x∈T r(x), with r(x) = log2 (s(x)) and s(x) the number of leaves in the subtree rooted at x. This is similar
+to the potential used for splay trees, which uses the number of nodes rather than leaves in the subtree.
+
+5.1 Semi-splay step
+
+To implement this, we will first define a semi-splay step. Implementing a semi-splay or a full splay involves
+repeatedly calling the semi-splay step operation. Conceptually, the semi-splay step serves the purpose that we
+use rotations for in binary search trees: decreasing the depth of the given node. We cannot use rotate_up for that
+directly because we aren’t always allowed to call that function. However, rotate_up is allowed sufficiently often
+that we can still implement splay trees, and the semi-splay step is best thought of as a procedure that searches
+for such a rotation — understanding the precise details of how that happens is not important for understanding
+the rest of the paper.
+
+The pseudo-code for a semi-splay step is found below:
+
+fn semi_splay_step(node) {
+    parent = node.parent
+    gparent = parent.parent
+    if parent or gparent is null {
+        return null
+    }
+
+    if is_point(node) && is_point(gparent) {
+        rotate_up(node)
+        return gparent
+    }
+
+    ggparent = gparent.parent
+    if ggparent is null {
+        return null
+    }
+    if is_path(parent) && (is_path(gparent) || is_point(ggparent)) {
+        push_flip(gparent)
+        push_flip(parent)
+
+         node_is_left = parent.children[0] == node
+         parent_is_left = gparent.children[0] == parent
+         gparent_is_left = ggparent.children[0] == gparent
+         if node_is_left == parent_is_left {
+             rotate_up(node)
+             return gparent
+         }
+         if parent_is_left == gparent_is_left {
+             rotate_up(parent)
+             return ggparent
+
+
+                                                  Page 12 of 27                                               Copyright © 2023
+                                                                             This paper is available under the CC-BY 4.0 license
+          }
+          // At this point ‘node_is_left == gparent_is_left’ is true.
+          rotate_up(sibling(node)) // swaps sibling(node) and sibling(parent)
+          rotate_up(parent) // parent is still node.parent here
+          return ggparent
+     }
+     return semi_splay_step(parent)
+}
+
+Since rotations are not always valid, the semi_splay_step operation will follow the root path b0 , b1 , . . . , bk until
+it matches a pattern where the rotation is allowed. Once the pattern is detected, the algorithm knows that it has
+found two nodes hanging off the root path that can be merged, and it merges them using rotations. If the pattern
+doesn’t match, it tries again by calling itself with b0 being the previous b1 . The pattern is such that it can only fail
+a few times, and the first node in the match will be one of b0 , b1 , b2 , or b3 .
+
+The patterns that the algorithm will match are:
+
+    • b0 b1 b2 = point, point, point
+
+    • b0 b1 b2 = point, path, point
+
+    • b1 b2 b3 = path, path, point
+
+    • b1 b2 b3 = path, point, point
+
+    • b1 b2 b3 = path, path, path
+
+Here, some of the patterns are matched on b0 b1 b2 , and some are matched on b1 b2 b3 . The semi-splay step prefers
+to pick a pattern on b0 b1 b2 if there is a match for both types.
+
+Lemma 5.1. A semi-splay step never makes an invalid rotation in a valid top tree.
+
+Proof. If the semi-splay step hits the is_point(node) && is_point(gparent) branch, then the rotation is allowed
+by Lemma 4.4. If we hit the node_is_left == parent_is_left branch, then since parent is a path cluster, the
+rotation is valid by Lemma 4.5.
+
+If we hit the parent_is_left == gparent_is_left branch, then it must be the case that gparent is a path
+cluster. To see this, assume for contradiction that it is a point cluster, and assume without loss of generality that
+parent is a left child. Then gparent must have a left boundary vertex. This means that gparent has no rightmost
+boundary vertex, but it is a left child so its rightmost boundary vertex must exist. Thus, gparent is a path cluster,
+and the rotation is valid by Lemma 4.5.
+
+If we hit the node_is_left == gparent_is_left branch, then since parent is a path cluster, the first rotation is
+valid by Lemma 4.5. If gparent is a path cluster (the rotation doesn’t change this), then the first post-condition
+of Lemma 4.5 says that parent and gparent hang off to the same side after the rotation, so Lemma 4.5 says that
+the second rotation is valid. If gparent is a point cluster, then the second post-condition says that parent is a
+point cluster after the rotation, and this case is not reachable unless ggparent is also a point cluster, so the second
+rotation is allowed by Lemma 4.4.
+
+Lemma 5.2. If x has depth d ≥ 5, then semi_splay_step(x) reduces the depth of x by 1, and returns a node x′ with
+d − 5 ≤ depth(x′ ) ≤ d − 2 such that all modified nodes are in the subtree rooted at x′ .
+
+Proof. To see that the semi-splay step will match on b3 b4 b5 or earlier, note that if it fails at b1 b2 b3 and b2 b3 b4 , then
+b3 and b4 are both path clusters, but then it must succeed at b3 b4 b5 . The b0 b1 b2 patterns always returns b2 and
+the b1 b2 b3 patterns always returns b2 or b3 . This implies that the returned node is one of b2 , b3 , b4 , b5 which have
+depth as desired. The remainder of the lemma follows immediately by considering each case separately.
+
+
+                                                        Page 13 of 27                                                  Copyright © 2023
+                                                                                      This paper is available under the CC-BY 4.0 license
+Lemma 5.3. If semi_splay_step(x) returns null, then no change was made to the tree and depth(x) ≤ 4. If x is a point
+cluster, then depth(x) ≤ 3. If the root is a point cluster, then depth(x) ≤ 2. If both x and the root are point clusters, then
+depth(x) ≤ 1.
+
+Proof. We get depth(x) ≤ 4 since the semi-splay step always succeeds for depth(x) ≥ 5 by Lemma 5.2. If the root
+cluster is a point cluster, then since we match all patterns ending in a point cluster, the failure to match must be
+because b3 doesn’t exist, so depth(x) ≤ 2. If x is also a point cluster, then the failure to match must be because b2
+doesn’t exist, so depth(x) ≤ 1. Finally, if x is a point cluster and the root is a path cluster, then in every possible
+pattern for b0 b1 b2 b3 b4 either both of b0 , b2 are point clusters, or b3 is a point cluster, or both of b2 , b3 are path
+clusters. In each case semi_splay_step(x) would return non-null, so b4 can’t exist and depth(x) ≤ 3.
+
+Lemma 5.4. Consider the operation semi_splay_step(pk (x)) with pi (x) the ith ancestor of x or the root if i ≥ depth(x).
+Let x′ be the node x after the semi-splay step. Let 0 ≤ k ≤ b and 0 ≤ a ≤ k + 1 be such that semi_splay_step(pk (x))
+returns pℓ (x′ ) for some ℓ ≤ b (this is the same node as pℓ+1 (x)). Then, the splay step changes the amortization potential by
+                               P                   Pb
+∆Φ = r(sibling(pℓ−1(x′ ))) + b−1             ′
+                                  i=a r(pi (x )) −  i=a r(pi (x)).
+
+Proof. The semi-splay step either rotates once or twice. By drawing the tree before and after, we can see that
+if it rotates once, then the potential changes by ∆Φ = r(sibling(pℓ−1 (x′ ))) − r(pℓ (x)). If it rotates twice, then the
+potential changes by ∆Φ = r(sibling(pℓ−1 (x′ ))) + r(pℓ−1 (x′ )) − r(pℓ (x)) − r(pℓ−1 (x)). These expressions are equal to
+the expression in the Lemma because the remaining terms are just the same nodes added and subtracted before
+and after the operation, but none of those nodes had their number of leaves changed, so the extra terms cancel
+out.
+
+5.2 Semi-splay Using semi_splay_step as a subroutine, the pseudocode of semi_splay is:
+
+fn semi_splay(node) {
+    top = node
+    while top is not null {
+        top = semi_splay_step(top)
+    }
+}
+
+This subroutine will reduce the depth of node by a constant factor. It does this by repeatedly calling
+semi_splay_step on an ancestor of node. It is important for the amortized analysis that the semi-splay steps do
+not “overlap”, which the algorithm avoids because all nodes that the semi_splay_step modifies are descendants
+of the node that it returns.
+
+We will need the following small lemma in our analysis:
+
+Lemma 5.5. For a, b, c > 0, if a + b ≤ c then log2 (a) + log2 (b) ≤ 2 log2 (c) − 2.
+                                                                                                              √
+                                                                                                                         c
+Proof. Let a, b, c > 0 and a + b ≤ c, then by the arithmetic-geometric mean inequality we have                 ab ≤ a+b
+                                                                                                                     2 ≤ 2 , thus
+ab ≤ ( 2c )2 and log2 (a) + log2 (b) = log2 (ab) ≤ 2 log2 ( 2c ) = 2(log2 (c) − 1).
+                                                                                                
+Lemma 5.6. Calling semi_splay on a node x does O(depth(x)) work, changes the potential by ∆Φ ≤ O 1 + r(root(x)) −
+                                                        l           m
+r(x) − Ω(depth(x)), and reduces the depth of x to at most 45 depth(x) .
+                                                                          
+In other words, the amortized cost of semi_splay is O 1 + r(root(x)) − r(x) = O(log n).
+
+Proof. We consider an iteration of the semi_splay. Let x be top before the semi-splay step, and let x′
+be the same node in the tree after the semi-splay step. Then, the next value of top is pℓ (x′ ) for some
+integer 1 ≤ ℓ ≤ 4. By Lemma 5.4 (with a = k = 0 and b = ℓ), the potential changes by ∆Φ =
+                       P               Pℓ
+r(sibling(pℓ−1 (x′ )))+ ℓ−1        ′
+                                                         Lemma 5.5, we get r(pℓ−1 (x′ ))+r(sibling(pℓ−1 (x′ ))) ≤ 2r(pℓ (x′ ))−2,
+                        i=0 r(pi (x ))− i=0 r(pi (x)). ByP                  Pℓ
+from which it follows that ∆Φ ≤ 2r(pℓ (x )) + ℓ−2  ′                  ′
+                                                           i=0 r(pi (x )) −  i=0 r(pi (x)) − 2, and since ℓ − 2 ≤ 2, we get
+∆Φ ≤ 5r(pℓ (x′ )) − 5r(x) − 2 = 5r(new top) − 5r(old top) − 2.
+
+
+                                                        Page 14 of 27                                                   Copyright © 2023
+                                                                                       This paper is available under the CC-BY 4.0 license
+                                                                                                      j          k
+Since the semi-splay step is always successful when depth(top) ≥ 5, we must have at least 15 depth(x) ≥
+1
+5 (depth(x) −4) successful iterations.
+                               
+                                        Summing up over all iterations, the total change in potential is therefore at
+                                                                          
+                                   2                  8
+most ∆Φ ≤ 5 r(root(x)) − r(x) − 5 (depth(x) − 4) = 5 25 + r(root(x)) − r(x) − 52 depth(x). This is as desired.
+                                                                                                       j           k
+Each successful iteration reduces the depth of x by 1, so the resulting depth of x is at most depth(x)− 51 depth(x) =
+l           m
+  4
+  5 depth(x) as claimed.
+
+
+5.3 Full splay Using semi_splay_step as a subroutine, the pseudocode for full_splay is:
+
+fn full_splay(node) {
+    while true {
+        top = semi_splay_step(node)
+        if top is null {
+            return
+        }
+        semi_splay_step(top)
+    }
+}
+
+This subroutine will move node close to the root so that its depth is bounded by a constant. It does this by
+alternating between calling semi_splay_step on node and on one of its ancestors top. If we just wanted to
+reduce the depth to a constant, then calling semi_splay_step(node) in a loop would suffice, but the second
+semi_splay_step is necessary to make the amortized running time work. This is similar to ordinary splay trees,
+which require Zig-Zig or Zig-Zag steps rather than simply repeating Zig steps.
+                                                                                                
+Lemma 5.7. Calling full_splay on a node x does O(depth(x)) work, changes the potential by ∆Φ ≤ O 1 + r(root(x)) −
+    
+r(x) − Ω(depth(x)), and reduces the depth of x so it satisfies the same bounds as in Lemma 5.3.
+                                                                          
+In other words, the amortized cost of full_splay is O 1 + r(root(x)) − r(x) = O(log n).
+
+Proof. We consider the change of potential in an iteration of full_splay where both semi-splay steps succeed.
+We let x be the node before the iteration, x′ the node after one semi-splay step, and x′′ the node after two splay
+steps. Let pℓ1 (x′ ) and pℓ2 (x′′ ) be the return values of each semi-splay step. By Lemma 5.2, we have 1 ≤ ℓ1 ≤ 4
+and ℓ1 < ℓ2 ≤ 8. By using Lemma 5.4 twice (first with (a, k, b) = (1, 0, 9) then with (a, k, b) = (1, ℓ1 , 8)), the two
+semi-splay steps change the potential by
+
+                                                                                X
+                                                                                7                      X
+                                                                                                       9
+(5.1)               ∆Φ = r(sibling(pℓ2−1 (x′′ ))) + r(sibling(pℓ1−1 (x′ ))) +         r(pi (x′′ )) −         r(pi (x)).
+                                                                                i=1                    i=1
+
+                        P
+Note that the term 8i=1 r(pi (x′ )) has canceled in the above. Since sibling(pℓ2 −1 (x′′ )) and sibling(pℓ1−1 (x′ )) have
+disjoint subtrees and are both descendants of p8 (x′′ ), it follows by Lemma 5.5 that r(sibling(pℓ2 −1 (x′′ ))) +
+r(sibling(pℓ1−1 (x′ ))) ≤ 2r(p8 (x′′ )) − 2. We note further that 2r(p8 (x′′ )) − 2 ≤ r(p8 (x′′ )) + r(p9 (x′′ )) − 2, thus
+        P                 P
+∆Φ ≤ 9i=1 r(pi (x′′ )) − 9i=1 r(pi (x)) − 2. Analogously, the iterations where only one of the semi-splay steps
+                                                   P              P
+succeed increase the potential by at most ∆Φ ≤ 9i=1 r(pi (x′′ )) − 9i=1 r(pi (x)), without the minus two term.
+
+Since both semi-splay steps always succeed when depth(x) ≥ 9 and the depth decreases by two each time, both
+semi-splay steps succeed at least 12 (depth(x) − 9) times. Summing the changes of potentials over all iterations
+                    P                P                                                        
+telescopes to ∆Φ ≤ 9i=1 r(pi (x′ )) − 9i=1 r(pi (x)) − (depth(x) − 9) ≤ 9 1 + r(root(x)) − r(x) − depth(x) with x the node
+before and x′ the node after the entire full splay. This is as desired. That the depth bounds are as desired follows
+by Lemma 5.3 since the semi-splay step has just failed on x′ when the algorithm returns.
+
+
+                                                       Page 15 of 27                                                         Copyright © 2023
+                                                                                            This paper is available under the CC-BY 4.0 license
+6 Finding the consuming node of a vertex
+The consuming node of a vertex is defined as the lowest common ancestor in the top tree of all edges incident to
+the vertex. When the vertex is not exposed, this is the same as the smallest cluster containing the vertex, without
+having the vertex as a boundary vertex. Since boundary vertices can only “disappear” in nodes where they
+are the central vertex, the consuming node for a non-leaf vertex is also the largest cluster with the vertex as the
+central vertex. The latter condition also works when the vertex is exposed.
+Pseudocode for finding the consuming node is as follows:
+fn find_consuming_node(v) {
+    if v has no neighbors {
+        return null
+    }
+    node = any edge incident to v
+    semi_splay(node)
+    if v has at most one incident edge {
+        return node
+    }
+
+    // Where is v a boundary vertex in node? (taking flip into account)
+    is_left = (is v left endpoint of node) != node.flip
+    is_middle = false
+    is_right = (is v right endpoint of node) != node.flip
+    last_middle_node = null
+
+    while node is not the root {
+        parent = node.parent
+        is_left_child = parent.children[0] == node
+
+         // Compute where v is in the parent, taking the parent’s
+         // flip into account.
+         is_middle = if is_left_child {
+             is_right || (is_middle && !has_right_boundary(node))
+         } else {
+             is_left || (is_middle && !has_left_boundary(node))
+         }
+         is_left = (is_left_child != parent.flip) && !is_middle
+         is_right = (is_left_child == parent.flip) && !is_middle
+
+         // Go up to the parent
+         node = parent
+
+         // If v is in the middle, then it could be the consuming node.
+         if is_middle {
+             if !has_middle_boundary(node) {
+                 // This only happens if the vertex is not exposed.
+                 return node
+             }
+             last_middle_node = node
+         }
+    }
+    // This only happens when the vertex is exposed.
+    return last_middle_node
+}
+
+
+                                                  Page 16 of 27                                                Copyright © 2023
+                                                                              This paper is available under the CC-BY 4.0 license
+The idea behind find_consuming_node is to follow the root path, keeping track whether the vertex is the left,
+middle or right boundary vertex of the current node. If it encounters a node where it should be the middle
+boundary vertex, but the node has no middle boundary vertex, then it has found the smallest cluster containing
+the vertex without the vertex being a boundary vertex. If it reaches the root, then the function returns the largest
+cluster with the vertex as the central vertex.
+
+The is_left, is_middle, and is_right booleans store whether the vertex is the left, middle, or right boundary
+vertex of the current node respectively. These booleans are “from the perspective of the parent”, so if the current
+node has its flip bit set, then is_left and is_right are swapped.
+
+To see that is_middle is computed correctly, we note that this holds if the vertex is the central vertex of the
+parent. If node is a left child of the parent (not taking the parent’s flip into account), then this happens when
+v is the rightmost boundary vertex of node, which happens if it is to the right, or in the middle when the
+node has no boundary vertex to the right. It works analogously when node is a right child. We note here that
+has_left_boundary must take the flip bit of the given node into account too.
+
+To see that is_left is computed correctly, note that a boundary vertex is to the left when it comes from the
+left child and isn’t the central vertex. Analogously for is_right. The expression in the code uses parent.flip
+because we are computing the value taking the parent’s flip bit into account.
+
+If we let e be the edge incident to v chosen at the start and let c be the returned consuming node, then the semi-
+splay changes the potential by O(1 + r(root(e)) − r(e)) − Ω(depth(e)) ≤ O(log n) − Ω(depth(c)), so the amortized
+cost of find_consuming_node(v) is O(log n) − Ω(depth(c)). Thus, after a call to c = find_consuming_node(v) we
+can do O(depth(c)) work “for free”, which we use e.g. in our implementation of expose and deexpose.
+
+7 External operations on top trees
+This section contains the pseudocode and proofs for the dynamic operations expose, deexpose, link and cut.
+
+7.1 Expose The implementation of expose in this section uses a semi splay followed by a full splay because
+that version allows for the simplest implementation, but it is possible to avoid the full splay. How this is done is
+explained in Appendix A.
+
+Pseudocode for an implementation of expose based on full_splay:
+
+fn expose(vertex) {
+    node = find_consuming_node(vertex) // this contains a semi_splay
+    if node is null {
+        // The vertex has degree zero.
+        vertex.exposed = true
+        return null
+    }
+
+    while is_path(node) { // rotate_up until consuming node is a point cluster
+        parent = node.parent
+        push_flip(node)
+        node_idx = index of node in parent.children
+        rotate_up(node.children[node_idx])
+        node = parent
+    }
+
+    full_splay(node)
+
+    // Now depth(node)<=1, and node is the consuming point cluster.
+    root = null
+    while node is not null {
+
+
+                                                   Page 17 of 27                                               Copyright © 2023
+                                                                              This paper is available under the CC-BY 4.0 license
+            root = node
+            root.num_boundary_vertices += 1
+            node = root.parent
+        }
+        vertex.exposed = true
+        return root
+}
+When a vertex is exposed, it is considered a boundary vertex of all clusters containing the vertex, so we need to
+increment the number of boundary vertices for all clusters it is not already a boundary vertex in. Those clusters
+are exactly the consuming node of the vertex and all of its ancestors, but we cannot just increment the number of
+boundary vertices for those ancestors, because they might already have two boundary vertices. Because of this,
+the operation will first “prepare” the consuming node by ensuring that it has no ancestors with two boundary
+vertices, and then actually expose it.
+The purpose of the first loop is to ensure that node is a point cluster, which makes the full_splay give stronger
+guarantees about the new depth. The rotation is allowed by Lemma 4.5. Additionally, it can be seen that node is
+still the consuming node after the loop, because the rotation makes parent the lowest common ancestor of what
+were the two children of node before the rotation.
+After the full splay, the actual expose happens. Here, node has depth at most one by Lemma 5.7 since node is still
+a point cluster. Additionally, its only boundary vertex cannot be in the middle because that’s where the vertex
+being consumed is. Therefore, exposing the vertex does not break the orientation invariant for the root. Finally,
+since both node and the root are point clusters, increasing their number of boundary vertices does not make them
+invalid.
+Each rotation in the is_path(node) loop changes the potential by
+
+(7.2)          r(node.children[!node_idx] ∪ sibling(node)) − r(node) ≤ r(node.parent) − r(node).
+
+This sum telescopes, so the total change to the potential by the loop is at most log2 n. Additionally, the loop
+decreases the depth of node by one each time, so the number of iterations is at most the depth of the node that
+was semi-splayed inside find_consuming_node, so by Lemma 5.6, the code until just before the full splay has
+an amortized running time of O(log n). Since the rest of the function also runs in amortized O(log n), the total
+running time is amortized O(log n).
+
+7.2 Deexpose Pseudocode for deexpose can be found below:
+fn deexpose(vertex) {
+    root = null
+    node = find_consuming_node(vertex)
+    while node is not null {
+        root = node
+        root.num_boundary_vertices -= 1
+        node = root.parent
+    }
+    vertex.exposed = false
+    return root
+}
+When a vertex is exposed, that means that it is a boundary vertex of all clusters containing it. To deexpose it,
+we need to remove it as boundary vertex of the clusters it isn’t a true boundary vertex of, which is exactly the
+consuming node of the vertex and all of its ancestors. The implementation simply finds the consuming node,
+then subtracts one from the number of boundary vertices from those ancestors.
+The algorithm does not break the orientation invariant anywhere because, in each node we remove the boundary
+vertex from, it is the other boundary vertex whose orientation is important, and the other boundary vertex does
+
+
+                                                  Page 18 of 27                                               Copyright © 2023
+                                                                             This paper is available under the CC-BY 4.0 license
+not move around in the tree.
+The operation does O(depth(c)) work with c being the consuming node of the vertex, but the
+find_consuming_node call changes the potential by at most O(log n) − Ω(depth(c)), so the amortized running
+time is O(log n).
+
+7.3 Link Given an implementation of expose, we can implement link:
+fn link(u,v) { // Assumes u and v in trees with no exposed vertices
+    Tu = expose(u)
+    if Tu is not null and has_left_boundary(Tu) {
+        Tu.flip = !Tu.flip
+    }
+    u.exposed = false
+    Tv = expose(v)
+    if Tv is not null and has_right_boundary(Tv) {
+        Tv.flip = !Tv.flip
+    }
+    v.exposed = false
+
+     T = new node corresponding to the edge (u,v)
+     T.num_boundary_vertices = (Tu is not null)+(Tv is not null)
+
+     if Tu is not null {
+         T = new node with children Tu and T
+         T.num_boundary_vertices = (Tv is not null)
+     }
+     if Tv is not null {
+         T = new node with children T and Tv
+         T.num_boundary_vertices = 0
+     }
+
+     return T
+}
+We can implement link using expose in this manner because an exposed vertex is always a boundary vertex of
+all clusters it appears in, which is exactly what we need to add a new edge to the vertex. The pseudocode puts
+the two trees together by first merging the tree containing u with the new edge, then merging the result with the
+tree containing v.
+The trees are flipped if necessary to satisfy the orientation invariant in the new nodes in the tree. Note that the
+checks for whether to flip require that the trees do not already have any exposed vertices, as the check would not
+be able to tell them apart from the one exposed by link.
+The amortized running time of the link operation is O(log n) because that’s the amortized cost of the two expose
+operations, and the new nodes that it adds to the tree increase the amortization potential by at most 2 log2 (n).
+
+7.4 Cut Using a full splay and deexpose we can implement cut as follows:
+    fn delete_all_ancestors(node) {
+        p = node.parent
+        if p is not null {
+            s = sibling(node)
+            delete_all_ancestors(p)
+            s.parent = null
+        }
+
+
+                                                  Page 19 of 27                                                Copyright © 2023
+                                                                              This paper is available under the CC-BY 4.0 license
+       delete node
+  }
+
+  fn cut(e) { // Assumes there are no exposed vertices
+      u = e.vertices[0]
+      v = e.vertices[1]
+      full_splay(e)
+      // now depth(e)<=2, and if e is a leaf edge, depth(e)<=1
+      delete_all_ancestors(e)
+      u.exposed = true
+      v.exposed = true
+      Tu = deexpose(u)
+      Tv = deexpose(v)
+      return (Tu,Tv)
+  }
+
+Since we assume that there are no exposed vertices, the full splay reduces the depth to 2 when e is a path cluster,
+or 1 when e is a point cluster. For a path cluster, the two top trees that remain when removing the ancestors of the
+edge must correspond to the two trees you get by removing the edge, since otherwise the original top tree would
+contain a cluster that isn’t connected. For point clusters, removing the ancestors of the edge does not cut the top
+tree into several pieces, so here the remaining top tree also corresponds to the remaining piece of the underlying
+tree.
+
+Note that after removing the ancestors, the vertices are marked as boundary vertices of all clusters they appear
+in, which is incorrect. Marking them as exposed restores the top tree invariants, and they can then be deexposed
+afterwards.
+
+The amortized running time of the cut operation is O(log n) because that’s the amortized cost of a full splay
+and the deexpose operations. Removing the edge and its at most 2 ancestors only decreases the amortization
+potential, so that is also okay.
+
+8 Implementation and testing
+To help verify the correctness of the pseudocode in this paper, we provide an implementation of the data structure
+in the C programming language. The implementation can be found at:
+https://gitlab.com/aliceryhl/toptree-c-example
+
+Whenever a function in the C code also exists as pseudocode in the paper, we have ensured that they match
+line-for-line to make it easy to verify that they implement the algorithm in the same way. There are a few
+exceptions since the C code must handle e.g. allocation failures, but the equivalence should be clear.
+
+The C code maintains the following user data: For each edge, a weight is stored. Additionally, for each path
+cluster, the maximum weight of any edge on the path between the two boundary vertices is stored. Using this
+information, we can use the top tree to dynamically maintain a minimum spanning tree of a weighted graph as
+new edges are added to the graph (see e.g. [27]).
+
+To verify the correctness of the C code, we have implemented a testing utility that generates a random graph with
+a given number of vertices and edges, then verifies that the minimum spanning tree generated by our top tree has
+the same total weight as the minimum spanning tree generated by running Kruskal’s algorithm [36] on the same
+graph. Furthermore, our implementation provides a way to check whether all invariants are satisfied, which is
+called periodically during the test. We have run this testing utility on a larger number of random graphs. The
+two algorithms agreed on the total weight every time, and the invariants were satisfied every time we checked
+them. This makes it very likely that the implementation is correct.
+
+
+                                                   Page 20 of 27                                               Copyright © 2023
+                                                                              This paper is available under the CC-BY 4.0 license
+References
+
+ [1] Amir Abboud and Søren Dahlgaard. Popular conjectures as a barrier for dynamic planar graph algorithms. In Irit
+     Dinur, editor, IEEE 57th Annual Symposium on Foundations of Computer Science, FOCS 2016, 9-11 October 2016, Hyatt
+     Regency, New Brunswick, New Jersey, USA, pages 477–486. IEEE Computer Society, 2016. doi:10.1109/FOCS.2016.58.
+ [2] Susanne Albers and Marek Karpinski. Randomized splay trees: Theoretical and experimental results. Inf. Process. Lett.,
+     81(4):213–221, 2002. doi:10.1016/S0020-0190(01)00230-7.
+ [3] Brian Allen and Ian Munro.             Self-organizing binary search trees.       J. ACM, 25(4):526–535, oct 1978.
+     doi:10.1145/322092.322094.
+ [4] Stephen Alstrup, Jacob Holm, Kristian De Lichtenberg, and Mikkel Thorup. Maintaining information in fully dynamic
+     trees with top trees. Acm Transactions on Algorithms (talg), 1(2):243–264, 2005.
+ [5] Sam Barr and Therese C. Biedl. Efficiently partitioning the edges of a 1-planar graph into a planar graph and a forest.
+     In Hee-Kap Ahn and Kunihiko Sadakane, editors, 32nd International Symposium on Algorithms and Computation, ISAAC
+     2021, December 6-8, 2021, Fukuoka, Japan, volume 212 of LIPIcs, pages 16:1–16:15. Schloss Dagstuhl - Leibniz-Zentrum
+     für Informatik, 2021. doi:10.4230/LIPIcs.ISAAC.2021.16.
+ [6] Surender Baswana, Manoj Gupta, and Sandeep Sen. Fully dynamic maximal matching in o(log n) update time (corrected
+     version). SIAM J. Comput., 47(3):617–650, 2018. doi:10.1137/16M1106158.
+ [7] Benjamin Aram Berendsohn and László Kozma. Splay trees on trees. In Joseph (Seffi) Naor and Niv Buchbinder,
+     editors, Proceedings of the 2022 ACM-SIAM Symposium on Discrete Algorithms, SODA 2022, Virtual Conference / Alexandria,
+     VA, USA, January 9 - 12, 2022, pages 1875–1900. SIAM, 2022. doi:10.1137/1.9781611977073.75.
+ [8] Aaron Bernstein, Sebastian Forster, and Monika Henzinger. A deamortization approach for dynamic spanner and
+     dynamic maximal matching. ACM Trans. Algorithms, 17(4):29:1–29:51, 2021. doi:10.1145/3469833.
+ [9] Sayan Bhattacharya and Janardhan Kulkarni. Deterministically maintaining a (2 + ε)-approximate minimum vertex
+     cover in o(1/ε2 ) amortized update time. In Timothy M. Chan, editor, Proceedings of the Thirtieth Annual ACM-SIAM
+     Symposium on Discrete Algorithms, SODA 2019, San Diego, California, USA, January 6-9, 2019, pages 1872–1885. SIAM,
+     2019. doi:10.1137/1.9781611975482.113.
+[10] Therese C. Biedl, Prosenjit Bose, Erik D. Demaine, and Anna Lubiw. Efficient algorithms for petersen’s matching
+     theorem. J. Algorithms, 38(1):110–134, 2001. doi:10.1006/jagm.2000.1132.
+[11] Prosenjit Bose, Jean Cardinal, John Iacono, Grigorios Koumoutsos, and Stefan Langerman. Competitive online search
+     trees on trees. In Shuchi Chawla, editor, Proceedings of the 2020 ACM-SIAM Symposium on Discrete Algorithms, SODA
+     2020, Salt Lake City, UT, USA, January 5-8, 2020, pages 1878–1891. SIAM, 2020. doi:10.1137/1.9781611975994.115.
+[12] Gunnar Brinkmann, Jan Degraer, and Karel De Loof. Rehabilitation of an unloved child: semi-splaying. Softw. Pract.
+     Exp., 39(1):33–45, 2009. doi:10.1002/spe.886.
+[13] Richard Cole. On the dynamic finger conjecture for splay trees. part II: the proof. SIAM J. Comput., 30(1):44–85, 2000.
+     doi:10.1137/S009753979732699X.
+[14] Richard Cole, Bud Mishra, Jeanette P. Schmidt, and Alan Siegel. On the dynamic finger conjecture for splay trees. part
+     I: splay sorting log n-block sequences. SIAM J. Comput., 30(1):1–43, 2000. doi:10.1137/S0097539797326988.
+[15] Erik D. Demaine, Dion Harmon, John Iacono, and Mihai Patrascu. Dynamic optimality - almost. SIAM J. Comput.,
+     37(1):240–251, 2007. doi:10.1137/S0097539705447347.
+[16] Camil Demetrescu and Giuseppe F. Italiano. A new approach to dynamic all pairs shortest paths. J. ACM, 51(6):968–992,
+     2004. doi:10.1145/1039488.1039492.
+[17] David Eppstein. Dynamic generators of topologically embedded graphs. In Proceedings of the Fourteenth Annual ACM-
+     SIAM Symposium on Discrete Algorithms, January 12-14, 2003, Baltimore, Maryland, USA., pages 599–608. ACM/SIAM,
+     2003. URL: http://dl.acm.org/citation.cfm?id=644108.644208.
+[18] David Eppstein, Zvi Galil, Giuseppe F. Italiano, and Amnon Nissenzweig. Sparsification - a technique for speeding up
+     dynamic graph algorithms. Journal of the ACM, 44(5):669–696, September 1997. doi:10.1145/265910.265914.
+[19] David Eppstein, Zvi Galil, Giuseppe F. Italiano, and Thomas H. Spencer. Separator based sparsification: I.
+     planarity testing and minimum spanning trees. Journal of Computer and Systems Sciences, 52(1):3–27, February 1996.
+     doi:10.1006/jcss.1996.0002.
+[20] Greg N. Frederickson. Data structures for on-line updating of minimum spanning trees, with applications. SIAM J.
+     Comput., 14(4):781–798, 1985. doi:10.1137/0214055.
+[21] Greg N. Frederickson. Ambivalent data structures for dynamic 2-edge-connectivity and k smallest spanning trees. In
+     32nd Annual Symposium on Foundations of Computer Science, San Juan, Puerto Rico, 1-4 October 1991, pages 632–641. IEEE
+     Computer Society, 1991. doi:10.1109/SFCS.1991.185429.
+[22] Greg N. Frederickson. A data structure for dynamically maintaining rooted trees. J. Algorithms, 24(1):37–65, 1997.
+     doi:10.1006/jagm.1996.0835.
+[23] Harold N. Gabow, Haim Kaplan, and Robert Endre Tarjan. Unique maximum matching algorithms. J. Algorithms,
+     40(2):159–183, 2001. doi:10.1006/jagm.2001.1167.
+
+
+                                                      Page 21 of 27                                                  Copyright © 2023
+                                                                                    This paper is available under the CC-BY 4.0 license
+[24] Zvi Galil, Giuseppe F. Italiano, and Neil Sarnak. Fully dynamic planarity testing with applications. Journal of the ACM,
+     46(1):28–91, 1999. doi:10.1145/300515.300517.
+[25] Fabrizio Grandoni, Chris Schwiegelshohn, Shay Solomon, and Amitai Uzrad. Maintaining an EDCS in general graphs:
+     Simpler, density-sensitive and with worst-case time bounds. In Karl Bringmann and Timothy Chan, editors, 5th
+     Symposium on Simplicity in Algorithms, SOSA@SODA 2022, Virtual Conference, January 10-11, 2022, pages 12–23. SIAM,
+     2022. doi:10.1137/1.9781611977066.2.
+[26] Maximilian Probst Gutenberg and Christian Wulff-Nilsen. Deterministic algorithms for decremental approximate
+     shortest paths: Faster and simpler. In Shuchi Chawla, editor, Proceedings of the 2020 ACM-SIAM Symposium
+     on Discrete Algorithms, SODA 2020, Salt Lake City, UT, USA, January 5-8, 2020, pages 2522–2541. SIAM, 2020.
+     doi:10.1137/1.9781611975994.154.
+[27] Jacob Holm, Kristian de Lichtenberg, and Mikkel Thorup. Poly-logarithmic deterministic fully-dynamic al-
+     gorithms for connectivity, minimum spanning tree, 2-edge, and biconnectivity. J. ACM, 48(4):723–760, 2001.
+     doi:10.1145/502090.502095.
+[28] Jacob Holm and Eva Rotenberg. Dynamic planar embeddings of dynamic graphs. Theory Comput. Syst., 61(4):1054–1083,
+     2017. doi:10.1007/s00224-017-9768-7.
+[29] Jacob Holm and Eva Rotenberg. Fully-dynamic planarity testing in polylogarithmic time. In Konstantin Makarychev,
+     Yury Makarychev, Madhur Tulsiani, Gautam Kamath, and Julia Chuzhoy, editors, Proccedings of the 52nd Annual ACM
+     SIGACT Symposium on Theory of Computing, STOC 2020, Chicago, IL, USA, June 22-26, 2020, pages 167–180. ACM, 2020.
+     doi:10.1145/3357713.3384249.
+[30] Jacob Holm, Eva Rotenberg, and Mikkel Thorup. Dynamic bridge-finding in Õ(log2 n) amortized time. In Artur
+     Czumaj, editor, Proceedings of the Twenty-Ninth Annual ACM-SIAM Symposium on Discrete Algorithms, SODA 2018, New
+     Orleans, LA, USA, January 7-10, 2018, pages 35–52. SIAM, 2018. doi:10.1137/1.9781611975031.3.
+[31] Jacob Holm, Eva Rotenberg, and Mikkel Thorup. Dynamic bridge-finding in O(log  e    2
+                                                                                           n) amortized time. In Proceedings
+     of the Twenty-Ninth Annual ACM-SIAM Symposium on Discrete Algorithms, SODA 2018, New Orleans, LA, USA, January
+     7-10, 2018, pages 35–52, 2018. doi:10.1137/1.9781611975031.3.
+[32] Jacob Holm, Eva Rotenberg, and Christian Wulff-Nilsen. Faster fully-dynamic minimum spanning forest. In
+     Nikhil Bansal and Irene Finocchi, editors, Algorithms - ESA 2015 - 23rd Annual European Symposium, Patras, Greece,
+     September 14-16, 2015, Proceedings, volume 9294 of Lecture Notes in Computer Science, pages 742–753. Springer, 2015.
+     doi:10.1007/978-3-662-48350-3\_62.
+[33] Giuseppe F. Italiano, Johannes A. La Poutré, and Monika Rauch. Fully dynamic planarity testing in planar embedded
+     graphs (extended abstract). In Thomas Lengauer, editor, Algorithms - ESA ’93, First Annual European Symposium, Bad
+     Honnef, Germany, September 30 - October 2, 1993, Proceedings, volume 726 of Lecture Notes in Computer Science, pages
+     212–223. Springer, 1993. doi:10.1007/3-540-57273-2\_57.
+[34] Bruce M. Kapron, Valerie King, and Ben Mountjoy. Dynamic graph connectivity in polylogarithmic worst
+     case time. In Proceedings of the Twenty-fourth Annual ACM-SIAM Symposium on Discrete Algorithms, SODA
+     ’13, pages 1131–1142, Philadelphia, PA, USA, 2013. Society for Industrial and Applied Mathematics. URL:
+     http://dl.acm.org/citation.cfm?id=2627817.2627898.
+[35] Adam Karczmarz, Anish Mukherjee, and Piotr Sankowski. Subquadratic dynamic path reporting in directed
+     graphs against an adaptive adversary. In Stefano Leonardi and Anupam Gupta, editors, STOC ’22: 54th Annual
+     ACM SIGACT Symposium on Theory of Computing, Rome, Italy, June 20 - 24, 2022, pages 1643–1656. ACM, 2022.
+     doi:10.1145/3519935.3520058.
+[36] Joseph B Kruskal. On the shortest spanning subtree of a graph and the traveling salesman problem. Proceedings of the
+     American Mathematical society, 7(1):48–50, 1956.
+[37] Marcin Mucha and Piotr Sankowski. Maximum matchings via gaussian elimination. In 45th Symposium on Foundations
+     of Computer Science (FOCS 2004), 17-19 October 2004, Rome, Italy, Proceedings, pages 248–255. IEEE Computer Society,
+     2004. doi:10.1109/FOCS.2004.40.
+[38] Danupon Nanongkai, Thatchaphol Saranurak, and Christian Wulff-Nilsen. Dynamic minimum spanning forest with
+     subpolynomial worst-case update time. In Proceedings of the 58th Annual Symposium on Foundations of Computer Science,
+     FOCS 2017, 2017.
+[39] Krzysztof Onak and Ronitt Rubinfeld. Maintaining a large matching and a small vertex cover. In Leonard J. Schulman,
+     editor, Proceedings of the 42nd ACM Symposium on Theory of Computing, STOC 2010, Cambridge, Massachusetts, USA, 5-8
+     June 2010, pages 457–464. ACM, 2010. doi:10.1145/1806689.1806753.
+[40] Mihai Pǎtraşcu and Erik D Demaine. Logarithmic lower bounds in the cell-probe model. SIAM Journal on Computing,
+     35(4):932–963, 2006.
+[41] Piotr Sankowski.         Faster dynamic matchings and vertex connectivity.           In Nikhil Bansal, Kirk Pruhs,
+     and Clifford Stein, editors, Proceedings of the Eighteenth Annual ACM-SIAM Symposium on Discrete Algo-
+     rithms, SODA 2007, New Orleans, Louisiana, USA, January 7-9, 2007, pages 118–126. SIAM, 2007.                       URL:
+     http://dl.acm.org/citation.cfm?id=1283383.1283397.
+
+
+                                                      Page 22 of 27                                                  Copyright © 2023
+                                                                                    This paper is available under the CC-BY 4.0 license
+[42] Daniel D. Sleator and Robert Endre Tarjan. A data structure for dynamic trees. Journal of Computer and System
+     Sciences, 26(3):362–391, 1983. URL: https://www.sciencedirect.com/science/article/pii/0022000083900065,
+     doi:https://doi.org/10.1016/0022-0000(83)90006-5.
+[43] Daniel Dominic Sleator and Robert Endre Tarjan. Self-adjusting binary search trees. J. ACM, 32(3):652–686, 1985.
+     doi:10.1145/3828.3835.
+[44] Shay Solomon. Fully dynamic maximal matching in constant update time. In Irit Dinur, editor, IEEE 57th Annual
+     Symposium on Foundations of Computer Science, FOCS 2016, 9-11 October 2016, Hyatt Regency, New Brunswick, New Jersey,
+     USA, pages 325–334. IEEE Computer Society, 2016. doi:10.1109/FOCS.2016.43.
+[45] Robert Endre Tarjan and Renato Fonseca F. Werneck. Self-adjusting top trees. In Proceedings of the Sixteenth Annual
+     ACM-SIAM Symposium on Discrete Algorithms, SODA 2005, Vancouver, British Columbia, Canada, January 23-25, 2005,
+     pages 813–822. SIAM, 2005. URL: http://dl.acm.org/citation.cfm?id=1070432.1070547.
+[46] Mikkel Thorup. Near-optimal fully-dynamic graph connectivity. In F. Frances Yao and Eugene M. Luks, editors,
+     Proceedings of the Thirty-Second Annual ACM Symposium on Theory of Computing, May 21-23, 2000, Portland, OR, USA,
+     pages 343–350. ACM, 2000. doi:10.1145/335305.335345.
+[47] Jan van den Brand and Danupon Nanongkai. Dynamic approximate shortest paths and beyond: Subquadratic
+     and worst-case update time. In David Zuckerman, editor, 60th IEEE Annual Symposium on Foundations of Computer
+     Science, FOCS 2019, Baltimore, Maryland, USA, November 9-12, 2019, pages 436–455. IEEE Computer Society, 2019.
+     doi:10.1109/FOCS.2019.00035.
+[48] Christian Wulff-Nilsen. Faster deterministic fully-dynamic graph connectivity. In Encyclopedia of Algorithms, pages
+     738–741. Springer Berlin Heidelberg, Berlin, Heidelberg, 2016.
+
+
+
+
+                                                     Page 23 of 27                                                 Copyright © 2023
+                                                                                  This paper is available under the CC-BY 4.0 license
+A Expose that avoids full splay
+The expose operation in the main text of the paper uses a full splay to move the consuming node of the vertex
+very close to the root, which makes the actual expose rather simple. However, it is also possible to implement
+expose using only a semi-splay, reducing the amortized cost of expose (and link) by a constant factor that may
+be significant in practice.
+
+This implementation of expose consists of three steps: first semi-splay the vertex, then “prepare” for the expose
+operation by ensuring that no ancestors of the consuming node are path clusters, then we actually expose it.
+
+A.1 Preparing for the expose operation We define a subroutine that performs some rotations to prepare for
+the expose operation. This subroutine ensures that no ancestors of the consuming node are path clusters. Note
+that it takes as argument the consuming node of the vertex rather than the vertex itself. The function returns the
+new consuming node.
+
+fn prepare_expose(consuming_node) {
+    node = consuming_node
+    while node is not the root {
+        parent = node.parent
+        if is_point(node) {
+            node = parent
+        } else {
+            push_flip(parent)
+            push_flip(node)
+
+              sibling = sibling(node)
+              sibling_idx = index of sibling in parent.children
+              same_side_child = node.children[sibling_idx]
+              if is_path(same_side_child) or is_point(sibling) {
+                  // Case (a),(b),(c),(d)
+                  other_side_child = node.children[1-sibling_idx]
+                  rotate_up(other_side_child)
+                  if node == consuming_node {
+                       // Case (a),(b)
+                       consuming_node = parent
+                  }
+                  node = parent
+              } else {
+                  uncle = sibling(parent)
+                  gparent = parent.parent
+                  uncle_idx = index of uncle in gparent.children
+
+                   if sibling_idx == uncle_idx {
+                       // Case (e)
+                       rotate_up(node)
+                   } else {
+                       // Case (f)
+                       rotate_up(sibling)
+                   }
+              }
+         }
+    }
+    return consuming_node
+}
+
+
+                                                  Page 24 of 27                                               Copyright © 2023
+                                                                             This paper is available under the CC-BY 4.0 license
+The correctness of each rotation is seen by considering the figure and noticing that the new cluster must necessarily
+be valid in each case.
+
+                                                                                  B                             D
+ D                       B
+                                                                        A                        C
+             A                       C
+
+
+                                                                    (b) B is exposed, next edge on C. We merge BC and CD.
+(a) B is exposed, next edge on A. We merge AB and DA.
+                                                                    Symmetric to Case (a).
+                         D
+                                                                                  B                             D
+              B
+                                                                        A                        C
+  A                      C
+
+                                                                    (d) A is exposed, next edge connects on C. We merge BC
+(c) A is exposed, edge to D is point cluster and connects           and CD.
+on B. We merge AB and BD.
+                                                                                                 D
+                         D
+                                                                                  B                             E
+              B                      E
+                                                                        A                        C
+  A                      C
+
+
+                                                                    (f) A is exposed, edge to D is path cluster on B, and edge
+(e) A is exposed, edge to D is path cluster on B, and edge
+                                                                    to E connects to C. We swap BD and CE, leaving situation
+to E connects to B. We merge BD and DE.
+                                                                    (d) for next iteration.
+
+Figure 6: The different situations one can encounter during the subroutine from section A.1 when the current
+node has two boundary vertices. The two edges AB and BC inside the dashed circles are the two children of the
+current node. The gray vertex corresponds to the vertex we want to expose. The two other vertices inside the
+dashed circle are boundary vertices of the current node. The edge connecting to D is the sibling of the current
+node. The edge connecting to E is the sibling of the parent of the current node.
+
+Lemma A.1. When the prepare_expose function returns, every cluster containing the vertex being exposed is either a
+point cluster, or already has the vertex as a boundary vertex.
+Proof. The above algorithm will maintain the following invariant: At every iteration, every node on the root path
+from the consuming node of the vertex and until the current node (exclusive) is a point cluster. Initially, this
+holds vacuously since the current node is equal to the consuming node.
+Whenever the algorithm reaches a point cluster, it will change the current node to its parent, which does not
+break the invariant. When it reaches a path cluster, it will be in one of the six cases in Figure 6. Cases (a), (b), (c)
+and (d) are handled in the is_path(same_side_child) or is_point(sibling) branch. Case (e) is handled in
+the sibling_idx == uncle_idx branch and case (f) is handled in the else branch. In case (a) and (b), the current
+node is equal to the consuming node both before and after the operation, so the invariant holds vacuously. In
+case (c), the cluster {AB, BD} is added below the node, but it is a point cluster since only B is a boundary vertex,
+so this maintains the invariant. In cases (d), (e) and (f), no clusters relevant to the invariant are modified, so the
+invariant is maintained.
+The algorithm terminates when it reaches the root. Here, the invariant implies the lemma because every cluster
+
+
+                                                        Page 25 of 27                                                  Copyright © 2023
+                                                                                      This paper is available under the CC-BY 4.0 license
+containing the vertex is either the root, a point cluster according to the invariant, or a proper descendant of the
+consuming node. The root must be a point cluster too, since it is a precondition of expose that at most one other
+vertex is already exposed. The proper descendants of the consuming node that contain the vertex must already
+have the vertex as a boundary vertex by definition of consuming node.
+Lemma A.2. The node returned by prepare_expose is the new consuming node of the vertex after the changes.
+Proof. Operations (a) and (b) are the only ones that change the consuming node of the vertex, and the current node
+is the consuming node exactly those cases. Therefore, the node == consuming_node condition in the pseudocode
+updates the consuming node in exactly the cases where it changes.
+Lemma A.3. The prepare_expose function does O(depth(node)) work and increases the amortization potential by at
+most O(log n).
+Proof. Since Figure 6f is always followed by case (d), we treat an (f) followed by (d) as a single iteration in this
+proof. Since the lemma is formulated in terms of big-O, this doesn’t change anything.
+Every iteration of prepare_expose decreases the depth of node by one, so it makes O(depth(node)) iterations of
+constant cost as desired.
+Each operation changes the amortization potential by:
+(a) r({AB, AD}) − r({AB, BC}) ≤ r({AB, AD, BC}) − r({AB, BC}) = r(new node) − r(old node)
+(b) r({BC, CD}) − r({AB, BC}) ≤ r({AB, BC, CD}) − r({AB, BC}) = r(new node) − r(old node)
+(c) r({AB, BD}) − r({AB, BC}) ≤ r({AB, BD, BC}) − r({AB, BC}) = r(new node) − r(old node)
+(d) r({BC, CD}) − r({AB, BC}) ≤ r({AB, BC, CD}) − r({AB, BC}) = r(new node) − r(old node)
+(e) r({BD, DE}) − r({BD, node}) ≤ r({BD, DE, node}) − r({BD, node}) = r(parent(new node)) − r(parent(old node))
+(f)+(d) r({BC, CE}) + r({AB, BC, CE}) − r({AB, BC}) − r({AB, BC, BD}) ≤ r({AB, BC, CE, BD}) + r({AB, BC, CE}) −
+      r({AB, BC}) − r({AB, BC, BD}) = r(parent(new node)) + r(new node) − r(old node) − r(parent(old node))
+The total change in potential is the sum of the above expressions, and the sum of the first i terms will always be
+at most r(node in ith iteration) + r(parent(node) in ith iteration) for every i, so the total change in the potential is
+at most 2 log2 n as desired.
+
+A.2 Exposing a prepared vertex Once the vertex has been prepared, we need to make it an actual boundary
+vertex of the consuming node and its ancestors. This amounts to going through each node on the root path from
+the consuming node and increasing its number of boundary vertices by one. It is also sometimes necessary to
+flip the nodes, since if the node is a left child and its rightmost boundary vertex is the middle vertex, then if the
+vertex being exposed becomes the right boundary vertex of the node, then the middle vertex will no longer be
+the rightmost boundary vertex. In this case, we should flip the node so that the new boundary vertex becomes
+the left boundary vertex instead.
+The pseudocode for this is as follows:
+fn expose_prepared(consuming_node) {
+    from_left = false
+    from_right = false
+    node = consuming_node
+    while true {
+        node.num_boundary_vertices += 1
+        parent = node.parent
+        if parent is null {
+            // Here we return the root node.
+            return node
+
+
+                                                    Page 26 of 27                                                 Copyright © 2023
+                                                                                 This paper is available under the CC-BY 4.0 license
+          }
+
+          is_left_child_of_parent = parent.children[0] == node;
+          is_right_child_of_parent = !is_left_child_of_parent;
+
+          if (is_left_child_of_parent && from_right)
+              || (is_right_child_of_parent && from_left)
+          {
+              node.flip = !node.flip
+          }
+
+          from_left = is_left_child_of_parent != parent.flip
+          from_right = is_right_child_of_parent != parent.flip
+          node = parent
+     }
+}
+In each iteration, increasing the number of boundary vertices will introduce a new boundary vertex to the current
+node. This new boundary vertex could be to the left, in the middle, or to the right. If our vertex is in the middle,
+then the existing boundary vertex isn’t in the middle so a flip is not necessary. If we are to the left/right, then we
+should flip if we become the innermost boundary vertex, which the code checks by looking at whether we are the
+left or right child of the parent, ignoring the parent’s flip since the parent’s flip is only relevant when comparing
+the parent to the grandparent. We note that the first iteration is the only time that the new boundary vertex can
+be in the middle, which is represented as from_left = from_right = false. If the vertex being exposed is not
+the middle vertex of the consuming node, then the consuming node is a leaf node. However, since leaf nodes
+never have a middle boundary vertex, we also don’t need to flip in this situation.
+The expose_prepared function does O(depth(consuming_node)) work and does not change the amortization
+potential.
+
+A.3 The full expose operation Using the two pieces introduced above, the full expose operation is the
+following:
+fn expose(vertex) {
+    consuming_node = get_consuming_node(vertex)
+    if consuming_node is not null {
+        consuming_node = prepare_expose(consuming_node)
+        root = expose_prepared(consuming_node)
+        vertex.exposed = true
+        return root
+    } else {
+        // The vertex has degree zero.
+        vertex.exposed = true
+        return null
+    }
+}
+Adding up the contributions of each call, the above function does O(depth(x)) work and changes the potential
+by at most ∆Φ ≤ O(log n) − Ω(depth(x)), where x is the edge incident to the vertex that get_consuming_node
+chooses. Thus, the amortized running time of expose is O(log n).
+
+
+
+
+                                                    Page 27 of 27                                                Copyright © 2023
+                                                                                This paper is available under the CC-BY 4.0 license
+
