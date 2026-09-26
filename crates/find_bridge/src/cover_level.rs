@@ -392,15 +392,15 @@ fn along_path_find_size(
 
     let mut parts = [PartTree::new(), PartTree::new()];
     let mut children_parts = [left.part.clone(), right.part.clone()];
-    let child_boundaries = [ctx.left_vertices, ctx.right_vertices];
+    let child_boundaries = [ctx.left_boundary, ctx.right_boundary];
     let child_summaries = [left, right];
 
-    let (outer, path_vertices) = match ctx.parent_vertices {
+    let (outer, path_vertices) = match ctx.boundary {
         top_tree::Boundary::Two {
             left: left_vertex,
             right: right_vertex,
         } => {
-            let path_vertices = match (ctx.left_boundary == 2, ctx.right_boundary == 2) {
+            let path_vertices = match (ctx.left_boundary.is_path(), ctx.right_boundary.is_path()) {
                 // The two child paths meet at `ctx.central`.
                 (true, true) => left.path_vertices + right.path_vertices - 1,
                 // A point child is raked onto the path at an existing vertex;
@@ -420,7 +420,7 @@ fn along_path_find_size(
         ),
     };
     let outer_children = outer
-        .map(|vertex| endpoint_child(ctx.left_vertices, ctx.right_vertices, vertex, ctx.central));
+        .map(|vertex| endpoint_child(ctx.left_boundary, ctx.right_boundary, vertex, ctx.central));
 
     // Step 1 of FS.Merge: clean each outer-boundary tree and its central tree
     // when that outer boundary is different from the central vertex.
@@ -489,7 +489,7 @@ fn along_path_find_size(
         // Keep the calculation explicit here to follow the paper's recurrence
         // and to make its invariant easy to audit.
         debug_assert_eq!(diag_at_cover, m_apply(cover_x, &part_at_cover));
-        set_boundary_tree(&mut parts, ctx.parent_vertices, x, result);
+        set_boundary_tree(&mut parts, ctx.boundary, x, result);
     }
 
     (size, path_vertices, parts)
@@ -500,7 +500,7 @@ fn off_path_find_size(
     right: &CoverLevel,
     ctx: &MergeContext,
 ) -> (SizeVector, u64, [PartTree; 2]) {
-    let mut a = match ctx.parent_vertices {
+    let mut a = match ctx.boundary {
         top_tree::Boundary::One(vertex) if vertex != ctx.central => Some(vertex),
         top_tree::Boundary::Two { left, right } => {
             // Defensive only: the caller classifies two-boundary parents as
@@ -511,10 +511,10 @@ fn off_path_find_size(
     };
 
     let mut a_child = if let Some(vertex) = a {
-        endpoint_child(ctx.left_vertices, ctx.right_vertices, vertex, ctx.central)
-    } else if ctx.left_boundary == 2 && ctx.right_boundary != 2 {
+        endpoint_child(ctx.left_boundary, ctx.right_boundary, vertex, ctx.central)
+    } else if ctx.left_boundary.is_path() && !ctx.right_boundary.is_path() {
         0
-    } else if ctx.right_boundary == 2 && ctx.left_boundary != 2 {
+    } else if ctx.right_boundary.is_path() && !ctx.left_boundary.is_path() {
         1
     } else {
         0
@@ -524,14 +524,14 @@ fn off_path_find_size(
         a = Some(ctx.central);
     }
     let a = a.expect("off-path merge must have a representative boundary");
-    if !boundary_contains(ctx.left_vertices, a) {
+    if !boundary_contains(ctx.left_boundary, a) {
         a_child = 1;
-    } else if !boundary_contains(ctx.right_vertices, a) {
+    } else if !boundary_contains(ctx.right_boundary, a) {
         a_child = 0;
     }
     let b_child = 1 - a_child;
     let summaries = [left, right];
-    let boundaries = [ctx.left_vertices, ctx.right_vertices];
+    let boundaries = [ctx.left_boundary, ctx.right_boundary];
     let a_tree = boundary_tree(&summaries[a_child].part, boundaries[a_child], a);
 
     let low = cover_key(
@@ -555,7 +555,7 @@ fn off_path_find_size(
     let mut parts = [PartTree::new(), PartTree::new()];
     set_boundary_tree(
         &mut parts,
-        ctx.parent_vertices,
+        ctx.boundary,
         a,
         single_key_tree(LEVEL_CAP, &size, incident),
     );
@@ -763,9 +763,9 @@ impl Summary<()> for CoverLevel {
     }
 
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self {
-        let parent_is_path = ctx.boundary == 2;
-        let left_is_path = ctx.left_boundary == 2;
-        let right_is_path = ctx.right_boundary == 2;
+        let parent_is_path = ctx.boundary.is_path();
+        let left_is_path = ctx.left_boundary.is_path();
+        let right_is_path = ctx.right_boundary.is_path();
 
         // The cluster path of the parent is the concatenation of the paths of
         // its path children.
@@ -813,7 +813,7 @@ impl Summary<()> for CoverLevel {
         } else {
             let (size, incident, part) = off_path_find_size(left, right, ctx);
 
-            (size, ctx.parent_vertices.count() as u64, incident, part)
+            (size, ctx.boundary.count() as u64, incident, part)
         };
 
         CoverLevel {
