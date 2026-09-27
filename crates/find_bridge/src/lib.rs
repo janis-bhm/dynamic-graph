@@ -12,6 +12,8 @@
 //! * [`FindBridge::add_label`], [`FindBridge::remove_label`] and
 //!   [`FindBridge::find_first_label`] implement the FindFirstLabel structure
 //!   of Section 6.
+//! * [`DynamicGraph`] implements Appendix A's graph-level reduction on top of
+//!   these tree operations.
 //!
 //! # Example
 //!
@@ -37,7 +39,32 @@
 //! graph.uncover(a, c, level);
 //! assert!(graph.find_bridge_between(a, c).is_some());
 //! ```
+//!
+//! The higher-level [`DynamicGraph`] API manages tree and non-tree edges for
+//! you:
+//!
+//! ```
+//! use find_bridge::DynamicGraph;
+//!
+//! let mut graph = DynamicGraph::new();
+//! let a = graph.add_vertex();
+//! let b = graph.add_vertex();
+//! let c = graph.add_vertex();
+//! graph.insert_edge(a, b).unwrap();
+//! graph.insert_edge(b, c).unwrap();
+//! assert!(graph.find_bridge_between(a, c).is_some());
+//!
+//! // The third edge closes a cycle and covers the tree path.
+//! let cycle_edge = graph.insert_edge(c, a).unwrap();
+//! assert_eq!(graph.find_bridge(a), None);
+//! assert!(graph.two_edge_connected(a, c));
+//!
+//! graph.delete_edge(cycle_edge);
+//! assert!(graph.find_bridge_between(a, c).is_some());
+//! ```
 
 mod cover_level;
+mod graph;
 
 pub use cover_level::{CoverLevel, CoverTag, Edge, FindBridge, LabelId, LabelKey, Level, NO_COVER};
+pub use graph::{DynamicGraph, EdgeId, VertexId};
