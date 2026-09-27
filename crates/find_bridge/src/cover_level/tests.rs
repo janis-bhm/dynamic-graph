@@ -772,6 +772,45 @@ fn component_size_and_labels() {
 }
 
 #[test]
+fn find_first_label_multiple_labels_at_same_vertex_and_level() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=2 {
+        fb.add_vertex(vertex);
+    }
+    fb.link(0, 1);
+    fb.link(1, 2);
+
+    let smaller = fb.add_label(1, lvl(1));
+    let other = fb.add_label(1, lvl(1));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(smaller));
+
+    assert_eq!(fb.remove_label(smaller), Some((1, lvl(1))));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(other));
+
+    assert_eq!(fb.remove_label(other), Some((1, lvl(1))));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), None);
+}
+
+#[test]
+fn find_first_label_removing_one_level_preserves_another() {
+    let mut fb = FindBridge::new();
+    for vertex in 0..=2 {
+        fb.add_vertex(vertex);
+    }
+    fb.link(0, 1);
+    fb.link(1, 2);
+
+    let level_zero = fb.add_label(1, lvl(0));
+    let level_one = fb.add_label(1, lvl(1));
+    assert_eq!(fb.find_first_label(0, 2, lvl(0)), Some(level_zero));
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(level_one));
+
+    assert_eq!(fb.remove_label(level_zero), Some((1, lvl(0))));
+    assert_eq!(fb.find_first_label(0, 2, lvl(0)), None);
+    assert_eq!(fb.find_first_label(0, 2, lvl(1)), Some(level_one));
+}
+
+#[test]
 fn find_first_label_off_path_branch() {
     let mut fb = FindBridge::new();
     for vertex in 0..=6 {

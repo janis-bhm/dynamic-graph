@@ -29,7 +29,7 @@
 //! of each top-tree summary. [`FindBridge::find_first_label`] descends the
 //! exposed path cluster using the per-cluster incident masks from Section 6.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use augmented_tree::{Aggregate, BTree};
 use top_tree::{MergeContext, Summary};
@@ -691,8 +691,11 @@ pub struct CoverLevel {
 impl CoverLevel {
     /// Sets the bitmask of user-label levels stored on this vertex label.
     fn set_vertex_levels(&mut self, levels: u64) {
+        // incident_C = ([v has assoc label at level j])_{j = 0..LEVEL_CAP}
         self.incident = levels;
+        // Note that if \partial{C} = {v} then pointsize_{C,v} = size_C.
         let size = self.size.clone();
+        // partsize_{C,v,i} = \sum_{m \in \pi(C) where CoverLevel(v,m)=i} pointsize_{C,m}
         self.part = [single_key_tree(LEVEL_CAP, &size, levels), PartTree::new()];
     }
 }
@@ -858,6 +861,8 @@ pub struct FindBridge {
     vertex_levels: Vec<u64>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
     labels: BTreeMap<LabelId, (usize, Level)>,
+    /// Live label ids grouped by their (vertex, level), ordered by id.
+    labels_at: BTreeMap<(usize, Level), BTreeSet<LabelId>>,
     /// The next label handle to allocate.
     next_label: usize,
 }
@@ -875,6 +880,7 @@ impl FindBridge {
             top_tree: top_tree::TopTree::new(),
             vertex_levels: Vec::new(),
             labels: BTreeMap::new(),
+            labels_at: BTreeMap::new(),
             next_label: 0,
         }
     }
@@ -1034,12 +1040,30 @@ impl FindBridge {
         let id = LabelId(self.next_label);
         self.next_label += 1;
         self.labels.insert(id, (v, level));
-        let bit = level_bit(level);
-        let new = self.vertex_levels[v] | bit;
-        if new != self.vertex_levels[v] {
-            self.vertex_levels[v] = new;
-            self.top_tree
-                .update_label_summary(&LabelKey { vertex: v }, |sum| sum.set_vertex_levels(new));
+
+        let first_at_level = {
+            // labels are stored in a set addressed by (vertex, level).
+            let labels = self.labels_at.entry((v, level)).or_default();
+            let first_at_level = labels.is_empty();
+            labels.insert(id);
+            first_at_level
+        };
+
+        if first_at_level {
+            // if our label is the first for this vertex at this level we have
+            // to update the vertex's summary to reflect the new incident level.
+
+            let bit = level_bit(level);
+            let new = self.vertex_levels[v] | bit;
+            if new != self.vertex_levels[v] {
+                self.vertex_levels[v] = new;
+
+                // updates incident_C and the part tree for this vertex's label cluster.
+                self.top_tree
+                    .update_label_summary(&LabelKey { vertex: v }, |sum| {
+                        sum.set_vertex_levels(new)
+                    });
+            }
         }
         id
     }
@@ -1047,11 +1071,19 @@ impl FindBridge {
     /// `RemoveLabel(l)`: removes a user label.
     pub fn remove_label(&mut self, label: LabelId) -> Option<(usize, Level)> {
         let (v, level) = self.labels.remove(&label)?;
-        let bit = level_bit(level);
 
-        // search for any other label at the same vertex and level.
-        let still_present = self.labels.values().any(|&(u, l)| u == v && l == level);
-        if !still_present {
+        let last_at_level = {
+            let labels = self
+                .labels_at
+                .get_mut(&(v, level))
+                .expect("live label must have a (vertex, level) index bucket");
+            assert!(labels.remove(&label));
+            labels.is_empty()
+        };
+
+        if last_at_level {
+            self.labels_at.remove(&(v, level));
+            let bit = level_bit(level);
             let new = self.vertex_levels[v] & !bit;
             self.vertex_levels[v] = new;
             self.top_tree
@@ -1083,10 +1115,9 @@ impl FindBridge {
 
     /// The smallest live label id at `vertex` with the given exact level.
     fn smallest_label_at(&self, vertex: usize, level: Level) -> Option<LabelId> {
-        self.labels
-            .iter()
-            .find(|&(_, &(u, l))| u == vertex && l == level)
-            .map(|(&id, _)| id)
+        self.labels_at
+            .get(&(vertex, level))
+            .and_then(|labels| labels.iter().next().copied())
     }
 
     /// Descends a path cluster to the valid level-`i` label whose projection
