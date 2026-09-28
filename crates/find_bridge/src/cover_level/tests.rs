@@ -666,7 +666,6 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     assert_eq!(fb.labels_at.len(), 2);
     assert_eq!(fb.label_map.len(), 4);
     assert_eq!(fb.top_tree.label_count(), 4);
-    assert_eq!(fb.vertex_levels.len(), 4);
     assert_eq!(fb.find_first_label(left, moved, lvl(1)), Some(moved_label));
     assert_eq!(fb.find_first_label(left, moved, lvl(0)), Some(middle_label));
 
@@ -939,7 +938,10 @@ fn find_first_label_multiple_labels_at_same_vertex_and_level() {
 
     let smaller = fb.add_label(verts[1], lvl(1));
     let other = fb.add_label(verts[1], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(smaller));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(smaller)
+    );
 
     assert_eq!(fb.remove_label(smaller), Some((verts[1], lvl(1))));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(other));
@@ -957,12 +959,21 @@ fn find_first_label_removing_one_level_preserves_another() {
 
     let level_zero = fb.add_label(verts[1], lvl(0));
     let level_one = fb.add_label(verts[1], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(0)), Some(level_zero));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(level_one));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(0)),
+        Some(level_zero)
+    );
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(level_one)
+    );
 
     assert_eq!(fb.remove_label(level_zero), Some((verts[1], lvl(0))));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(0)), None);
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(level_one));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(level_one)
+    );
 }
 
 #[test]
@@ -1035,7 +1046,10 @@ fn find_first_label_prefers_nearest() {
     let id_at_1 = fb.add_label(verts[1], lvl(0));
     fb.add_label(verts[4], lvl(0));
 
-    assert_eq!(fb.find_first_label(verts[0], verts[5], lvl(0)), Some(id_at_1));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[5], lvl(0)),
+        Some(id_at_1)
+    );
 }
 
 #[test]
@@ -1049,16 +1063,25 @@ fn find_first_label_after_uncover() {
     let branch_label = fb.add_label(verts[3], lvl(1));
 
     fb.cover(verts[0], verts[2], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(path_label));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(path_label)
+    );
     fb.uncover(verts[0], verts[2], lvl(1));
     // The label remains valid because its projection is its own vertex, whose
     // CoverLevel is the no-cover sentinel.
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(path_label));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(path_label)
+    );
 
     fb.remove_label(path_label);
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
     fb.cover(verts[1], verts[3], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(branch_label));
+    assert_eq!(
+        fb.find_first_label(verts[0], verts[2], lvl(1)),
+        Some(branch_label)
+    );
     fb.uncover(verts[1], verts[3], lvl(1));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
 }
@@ -1320,7 +1343,10 @@ fn find_size_above_level_cap_on_point_cluster() {
 
     for vertex in 0..6 {
         assert_eq!(fb.find_size(verts[vertex], verts[vertex], LEVEL_CAP + 1), 1);
-        assert_eq!(fb.find_size(verts[vertex], verts[vertex], LEVEL_CAP + 100), 1);
+        assert_eq!(
+            fb.find_size(verts[vertex], verts[vertex], LEVEL_CAP + 100),
+            1
+        );
     }
 }
 

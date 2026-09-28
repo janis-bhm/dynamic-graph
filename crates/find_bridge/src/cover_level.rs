@@ -685,6 +685,18 @@ pub struct CoverLevel {
 }
 
 impl CoverLevel {
+    /// Removes all user-levels in `levels` from the levels stored on this vertex label.
+    fn remove_vertex_levels(&mut self, levels: u64) {
+        let levels = self.incident & !levels;
+        self.set_vertex_levels(levels);
+    }
+
+    /// Adds all user-levels in `levels` to the levels stored on this vertex label.
+    fn add_vertex_levels(&mut self, levels: u64) {
+        let levels = self.incident | levels;
+        self.set_vertex_levels(levels);
+    }
+
     /// Sets the bitmask of user-label levels stored on this vertex label.
     fn set_vertex_levels(&mut self, levels: u64) {
         // incident_C = ([v has assoc label at level j])_{j = 0..LEVEL_CAP}
@@ -866,9 +878,6 @@ pub struct FindBridge {
     top_tree: top_tree::TopTree<CoverLevel>,
     /// Maps each vertex to its label cluster. We only need one label per vertex, so this is a bijection.
     label_map: BTreeMap<top_tree::VertexId, top_tree::ClusterId>,
-    /// User-label levels attached to each vertex, encoded as a bitmask.
-    /// Indexed by the vertex's internal forest index.
-    vertex_levels: Vec<u64>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
     labels: BTreeMap<UserLabel, (top_tree::VertexId, Level)>,
     /// Live label ids grouped by their (vertex, level), ordered by id.
@@ -889,7 +898,6 @@ impl FindBridge {
         FindBridge {
             top_tree: top_tree::TopTree::new(),
             label_map: BTreeMap::new(),
-            vertex_levels: Vec::new(),
             labels: BTreeMap::new(),
             labels_at: BTreeMap::new(),
             next_label: 0,
@@ -899,7 +907,7 @@ impl FindBridge {
     /// Adds a vertex and returns its internal forest handle.
     pub fn add_vertex(&mut self) -> top_tree::VertexId {
         let index = self.top_tree.add_vertex();
-        self.vertex_levels.resize(index.index() + 1, 0);
+
         // One label per vertex makes every vertex contribute exactly once to
         // FindSize and supplies the point cluster for that vertex.
         let label = self.top_tree.attach(index);
@@ -948,11 +956,9 @@ impl FindBridge {
         self.label_map
             .remove(&vertex)
             .expect("every live vertex has a structural label leaf");
-        self.vertex_levels.swap_remove(vertex.index());
 
         if let top_tree::SwapResult::Some { prev, current } = swap {
             debug_assert_eq!(current.index(), vertex.index());
-            debug_assert_eq!(prev.index(), self.vertex_levels.len());
             let structural_label = self
                 .label_map
                 .remove(&prev)
@@ -1135,19 +1141,13 @@ impl FindBridge {
             // if our label is the first for this vertex at this level we have
             // to update the vertex's summary to reflect the new incident level.
 
-            let bit = level_bit(level);
-            let new = self.vertex_levels[v.index()] | bit;
-            if new != self.vertex_levels[v.index()] {
-                self.vertex_levels[v.index()] = new;
-
-                // updates incident_C and the part tree for this vertex's label cluster.
-                self.top_tree.update_label_summary(
-                    self.top_tree
-                        .node_label_key(*self.label_map.get(&v).unwrap())
-                        .unwrap(),
-                    |sum| sum.set_vertex_levels(new),
-                );
-            }
+            // updates incident_C and the part tree for this vertex's label cluster.
+            self.top_tree.update_label_summary(
+                self.top_tree
+                    .node_label_key(*self.label_map.get(&v).unwrap())
+                    .unwrap(),
+                |sum| sum.add_vertex_levels(level_bit(level)),
+            );
         }
         id
     }
@@ -1166,15 +1166,11 @@ impl FindBridge {
         };
 
         if last_at_level {
-            self.labels_at.remove(&(v, level));
-            let bit = level_bit(level);
-            let new = self.vertex_levels[v.index()] & !bit;
-            self.vertex_levels[v.index()] = new;
             self.top_tree.update_label_summary(
                 self.top_tree
                     .node_label_key(*self.label_map.get(&v).unwrap())
                     .unwrap(),
-                |sum| sum.set_vertex_levels(new),
+                |sum| sum.remove_vertex_levels(level_bit(level)),
             );
         }
         Some((v, level))
