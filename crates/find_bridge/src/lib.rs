@@ -21,9 +21,9 @@
 //! use find_bridge::{FindBridge, Level};
 //!
 //! let mut graph = FindBridge::new();
-//! let a = graph.add_vertex(0);
-//! let b = graph.add_vertex(1);
-//! let c = graph.add_vertex(2);
+//! let a = graph.add_vertex();
+//! let b = graph.add_vertex();
+//! let c = graph.add_vertex();
 //! graph.link(a, b);
 //! graph.link(b, c);
 //! let level = Level::new(0).unwrap();
@@ -67,6 +67,6 @@ mod cover_level;
 mod graph;
 
 pub use cover_level::{
-    CoverLevel, CoverTag, Edge, FindBridge, LabelKey, Level, NO_COVER, UserLabel,
+    CoverLevel, CoverTag, Edge, FindBridge, Level, NO_COVER, UserLabel,
 };
 pub use graph::{DynamicGraph, EdgeId, VertexId};

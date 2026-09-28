@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use top_tree::VertexId as TopVertexId;
+
 use crate::cover_level::{FindBridge, Level, UserLabel};
 
 /// A stable handle for a vertex in a [`DynamicGraph`].
@@ -44,7 +46,7 @@ enum EdgeKind {
 
 #[derive(Clone, Copy, Debug)]
 struct EdgeRecord {
-    endpoints: (usize, usize),
+    endpoints: (TopVertexId, TopVertexId),
     level: i32,
     kind: EdgeKind,
 }
@@ -68,14 +70,14 @@ struct EdgeRecord {
 /// invariant used to guarantee a replacement edge may fail.
 pub struct DynamicGraph {
     fb: FindBridge,
-    /// `VertexId.0 -> FindBridge`'s internal vertex index.
-    vertices: Vec<usize>,
+    /// `VertexId.0 -> FindBridge`'s internal vertex id.
+    vertices: Vec<TopVertexId>,
     /// `FindBridge`'s internal vertex index -> public handle.
     internal_to_vertex: Vec<VertexId>,
     /// `EdgeId.0 -> live edge record`; deleted edge handles are never reused.
     edges: Vec<Option<EdgeRecord>>,
     /// Normalized internal endpoint pair -> the live tree-edge handle.
-    tree_edge_at: BTreeMap<(usize, usize), EdgeId>,
+    tree_edge_at: BTreeMap<(TopVertexId, TopVertexId), EdgeId>,
     /// Each live non-tree label -> the graph edge that owns it.
     label_to_edge: BTreeMap<UserLabel, EdgeId>,
     /// Highest supported cover level, also used by the paper for tree edges.
@@ -112,7 +114,8 @@ impl DynamicGraph {
             "adding a vertex would exceed DynamicGraph's supported range (< 2^31 vertices; level cap 32)"
         );
         let id = VertexId(self.vertices.len());
-        let internal = self.fb.add_vertex(id.0);
+        let internal = self.fb.add_vertex();
+        debug_assert_eq!(internal.index(), self.internal_to_vertex.len());
         self.vertices.push(internal);
         self.internal_to_vertex.push(id);
         id
@@ -219,8 +222,12 @@ impl DynamicGraph {
     /// or deleted edge handle.
     pub fn edge_endpoints(&self, e: EdgeId) -> Option<(VertexId, VertexId)> {
         let record = self.edges.get(e.0)?.as_ref()?;
-        let u = *self.internal_to_vertex.get(record.endpoints.0)?;
-        let v = *self.internal_to_vertex.get(record.endpoints.1)?;
+        let u = *self
+            .internal_to_vertex
+            .get(record.endpoints.0.index())?;
+        let v = *self
+            .internal_to_vertex
+            .get(record.endpoints.1.index())?;
         Some((u, v))
     }
 
@@ -275,15 +282,15 @@ impl DynamicGraph {
         self.fb.connected(a, b) && self.fb.cover_level_between(a, b) >= 0
     }
 
-    fn internal_vertex(&self, vertex: VertexId) -> Option<usize> {
+    fn internal_vertex(&self, vertex: VertexId) -> Option<TopVertexId> {
         self.vertices.get(vertex.0).copied()
     }
 
     fn add_edge_labels(
         &mut self,
         edge: EdgeId,
-        u: usize,
-        v: usize,
+        u: TopVertexId,
+        v: TopVertexId,
         level: Level,
     ) -> (UserLabel, UserLabel) {
         let label1 = self.fb.add_label(u, level);
@@ -342,7 +349,7 @@ impl DynamicGraph {
     }
 
     /// Appendix A's `FindReplacement` searches the smaller side after a cut.
-    fn find_replacement(&mut self, v: usize, w: usize, i: i32) -> EdgeId {
+    fn find_replacement(&mut self, v: TopVertexId, w: TopVertexId, i: i32) -> EdgeId {
         let size_v = self.fb.find_size(v, v, i);
         let size_w = self.fb.find_size(w, w, i);
         if size_v <= size_w {
@@ -357,7 +364,7 @@ impl DynamicGraph {
 
     /// Appendix A's `Recover`: scan both orientations of a path with half its
     /// level-`i` size as the promotion threshold.
-    fn recover(&mut self, v: usize, w: usize, i: i32) {
+    fn recover(&mut self, v: TopVertexId, w: TopVertexId, i: i32) {
         let size = self.fb.find_size(v, w, i) / 2;
         let _ = self.recover_phase(v, w, i, size);
         let _ = self.recover_phase(w, v, i, size);
@@ -365,7 +372,13 @@ impl DynamicGraph {
 
     /// Appendix A's `RecoverPhase`: promote eligible labelled edges or return
     /// a non-tree edge crossing the cut currently being repaired.
-    fn recover_phase(&mut self, v: usize, w: usize, i: i32, size: u64) -> Option<EdgeId> {
+    fn recover_phase(
+        &mut self,
+        v: TopVertexId,
+        w: TopVertexId,
+        i: i32,
+        size: u64,
+    ) -> Option<EdgeId> {
         let level = Level::new(i).expect("RecoverPhase uses a supported level");
         loop {
             let label = self.fb.find_first_label(v, w, level)?;
@@ -409,7 +422,7 @@ impl DynamicGraph {
     }
 }
 
-fn norm(a: usize, b: usize) -> (usize, usize) {
+fn norm(a: TopVertexId, b: TopVertexId) -> (TopVertexId, TopVertexId) {
     if a < b { (a, b) } else { (b, a) }
 }
 

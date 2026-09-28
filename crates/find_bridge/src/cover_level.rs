@@ -570,14 +570,6 @@ fn off_path_find_size(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UserLabel(pub usize);
 
-/// Identifies the single label object attached to a vertex. The vertex's
-/// user-label levels are stored in the label's summary, not in this key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LabelKey {
-    /// The vertex owning this label.
-    pub vertex: usize,
-}
-
 /// An undirected edge, stored as the pair of endpoints passed to
 /// [`FindBridge::link`].
 pub type Edge = (top_tree::VertexId, top_tree::VertexId);

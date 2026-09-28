@@ -1,5 +1,6 @@
 use super::{DynamicGraph, EdgeId, EdgeKind, VertexId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use top_tree::VertexId as TopVertexId;
 
 /// A deliberately straightforward multigraph used as the test oracle.
 ///
@@ -212,6 +213,10 @@ fn normalized_pair(u: usize, v: usize) -> (usize, usize) {
     if u < v { (u, v) } else { (v, u) }
 }
 
+fn normalized_top_pair(u: TopVertexId, v: TopVertexId) -> (TopVertexId, TopVertexId) {
+    if u < v { (u, v) } else { (v, u) }
+}
+
 fn label_sizes(labels: &[usize]) -> Vec<usize> {
     let mut sizes = vec![0; labels.len()];
     for &label in labels {
@@ -281,7 +286,7 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
                 assert_eq!(
                     graph
                         .tree_edge_at
-                        .get(&normalized_pair(record.endpoints.0, record.endpoints.1,)),
+                        .get(&normalized_top_pair(record.endpoints.0, record.endpoints.1,)),
                     Some(&EdgeId(index)),
                     "{context}: tree edge {index} is not indexed by its endpoint pair"
                 );
@@ -333,7 +338,7 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         );
         assert_eq!(
             pair,
-            normalized_pair(record.endpoints.0, record.endpoints.1),
+            normalized_top_pair(record.endpoints.0, record.endpoints.1),
             "{context}: tree_edge_at key does not match edge {edge:?}"
         );
     }
@@ -368,17 +373,20 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         graph.vertex_count(),
         "{context}: internal-to-public vertex map length mismatch"
     );
-    for (public_index, &internal_index) in graph.vertices.iter().enumerate() {
+    for (public_index, &internal_vertex) in graph.vertices.iter().enumerate() {
         assert_eq!(
-            graph.internal_to_vertex.get(internal_index),
+            graph.internal_to_vertex.get(internal_vertex.index()),
             Some(&VertexId(public_index)),
-            "{context}: vertex {public_index} does not round-trip through internal index {internal_index}"
+            "{context}: vertex {public_index} does not round-trip through internal index {internal_vertex:?}"
         );
     }
     for (internal_index, &public_vertex) in graph.internal_to_vertex.iter().enumerate() {
         assert_eq!(
-            graph.vertices.get(public_vertex.index()),
-            Some(&internal_index),
+            graph
+                .vertices
+                .get(public_vertex.index())
+                .map(|internal| internal.index()),
+            Some(internal_index),
             "{context}: internal vertex {internal_index} does not round-trip"
         );
     }
