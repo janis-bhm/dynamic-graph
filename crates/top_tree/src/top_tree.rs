@@ -148,10 +148,6 @@ where
                 }
             })
     }
-
-    fn len(&self) -> usize {
-        self.nodes.len()
-    }
 }
 
 impl<S> core::ops::Index<ClusterId> for Clusters<S>
@@ -559,6 +555,10 @@ where
         index
     }
 
+    pub fn remove_vertex(&mut self, vertex: tree::VertexId) -> Option<SwapResult<tree::VertexId>> {
+        self.remove_node(vertex)
+    }
+
     /// Links the trees containing `u` and `v` with a new tree edge of the
     /// given weight and returns the index of the new edge.
     ///
@@ -940,6 +940,7 @@ where
         }
     }
 
+    #[expect(dead_code)]
     fn middle_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         match self.cl(node).boundary_vertices {
             BoundaryVertices::None => None,
@@ -969,12 +970,14 @@ where
 
     /// Returns the rightmost boundary vertex of `node`, or `None` if it has no boundary vertices.
     /// This is the rightmost vertex in the logical (unflipped) orientation of the cluster.
+    #[expect(dead_code)]
     fn rightmost_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         self.cl(node).boundary_vertices.right()
     }
 
     /// Returns the leftmost boundary vertex of `node`, or `None` if it has no boundary vertices.
     /// This is the leftmost vertex in the logical (unflipped) orientation of the cluster.
+    #[expect(dead_code)]
     fn leftmost_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         self.cl(node).boundary_vertices.left()
     }
@@ -1143,47 +1146,6 @@ where
         self.set_parent(left, Some(node));
         self.set_parent(right, Some(node));
         node
-    }
-
-    fn new_leaf_edge(
-        &mut self,
-        edge: tree::EdgeId,
-        u: tree::VertexId,
-        v: tree::VertexId,
-        boundary_vertices: BoundaryVertices,
-    ) -> ClusterId {
-        let sum = S::tree_edge(u, v);
-        let cluster = Cluster {
-            parent: None,
-            children: None,
-            flipped: false,
-            boundary_vertices,
-            data: ClusterData::Edge(edge),
-            sum,
-            tag: S::Tag::default(),
-        };
-
-        self.clusters.push(cluster)
-    }
-
-    fn new_leaf_label(
-        &mut self,
-        label: tree::LabelId,
-        vertex: tree::VertexId,
-        boundary: BoundaryVertices,
-    ) -> ClusterId {
-        let sum = S::label(vertex);
-        let cluster = Cluster {
-            parent: None,
-            children: None,
-            flipped: false,
-            boundary_vertices: boundary,
-            data: ClusterData::Node(label),
-            sum,
-            tag: S::Tag::default(),
-        };
-
-        self.clusters.push(cluster)
     }
 
     /// Rotates `node` up, above its parent and grandparent.
@@ -1632,7 +1594,7 @@ where
             let boundary_vertices =
                 BoundaryVertices::from_left_and_right(root_u.map(|_| u), root_v.map(|_| v));
 
-            let cluster = Cluster {
+            Cluster {
                 parent: None,
                 children: None,
                 flipped: false,
@@ -1640,9 +1602,7 @@ where
                 data: ClusterData::Edge(edge),
                 sum,
                 tag: S::Tag::default(),
-            };
-
-            cluster
+            }
         });
 
         let mut node = leaf;

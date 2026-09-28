@@ -279,14 +279,6 @@ impl<V, E, L> Tree<V, E, L> {
         VertexId::new(idx, self.nodes[idx].generation)
     }
 
-    fn label_id_from_index(&self, idx: usize) -> LabelId {
-        LabelId::new(idx, self.labels[idx].generation)
-    }
-
-    fn edge_id_from_index(&self, idx: usize) -> EdgeId {
-        EdgeId::new(idx, self.edges[idx].generation)
-    }
-
     /// Returns the endpoints of the edge at `edge`.
     pub fn edge_endpoints(&self, edge: EdgeId) -> Option<(VertexId, VertexId)> {
         self.edges
@@ -698,33 +690,16 @@ impl<Id> SwapResult<Id> {
     }
 }
 
-const NO_EDGE: usize = usize::MAX;
-
 pub struct LabelWalker<'a, L> {
     labels: &'a [Label<L>],
     current: Option<NonMaxUsize>,
-}
-
-impl<'a, L> LabelWalker<'a, L> {
-    fn from_node<V, E>(tree: &'a Tree<V, E, L>, node_index: usize) -> Self {
-        let node = tree
-            .nodes
-            .get(node_index)
-            .expect("Node index not found in tree");
-        Self {
-            labels: &tree.labels,
-            current: node.next_label,
-        }
-    }
 }
 
 impl<'a, L> Iterator for LabelWalker<'a, L> {
     type Item = &'a L;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(label_index) = self.current.map(NonMaxUsize::get) else {
-            return None;
-        };
+        let label_index = self.current.map(NonMaxUsize::get)?;
 
         let label = self
             .labels

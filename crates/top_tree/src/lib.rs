@@ -80,6 +80,7 @@
 //!
 //! assert_eq!(top_tree.expose_path(a, c), Some(PathLen { len: 2 }));
 //! ```
+#![expect(internal_features)]
 #![feature(pattern_types, pattern_type_macro, structural_match)]
 
 mod summary;
