@@ -70,6 +70,11 @@ impl Naive {
         self.cover.remove(&key(u, v));
     }
 
+    fn remove_isolated_vertex(&mut self, vertex: usize) {
+        assert!(self.adj[&vertex].is_empty());
+        self.adj.remove(&vertex).expect("vertex must be live");
+    }
+
     fn path_edges(&self, u: usize, v: usize) -> Option<Vec<(usize, usize)>> {
         if u == v {
             return Some(Vec::new());
@@ -501,6 +506,79 @@ fn check_against_naive(fb: &mut FindBridge, naive: &Naive, verts: &[VertexId]) {
     let _ = n;
 }
 
+fn check_sparse_forest_against_naive(
+    fb: &mut FindBridge,
+    naive: &Naive,
+    vertices: &[Option<VertexId>],
+) {
+    let live = vertices
+        .iter()
+        .enumerate()
+        .filter_map(|(model, vertex)| vertex.map(|vertex| (model, vertex)))
+        .collect::<Vec<_>>();
+    let model_vertex = |internal: VertexId| {
+        live.iter()
+            .find_map(|&(model, vertex)| (vertex == internal).then_some(model))
+            .expect("summary edge endpoint maps to a live model vertex")
+    };
+
+    for &(model, vertex) in &live {
+        assert_eq!(fb.cover_level(vertex), naive.cover_level(model));
+        assert_eq!(
+            fb.find_size(vertex, vertex, -1) as usize,
+            naive.component(model).len(),
+            "find_size for model vertex {model}"
+        );
+        match fb.min_covered_edge(vertex) {
+            Some((u, v)) => {
+                let edge = key(model_vertex(u), model_vertex(v));
+                assert_eq!(naive.cover.get(&edge), Some(&naive.cover_level(model)));
+            }
+            None => assert_eq!(naive.cover_level(model), NO_COVER),
+        }
+        match fb.find_bridge(vertex) {
+            Some((u, v)) => {
+                let edge = key(model_vertex(u), model_vertex(v));
+                assert_eq!(naive.cover.get(&edge), Some(&-1));
+            }
+            None => assert_ne!(naive.cover_level(model), -1),
+        }
+    }
+
+    for (u_model, u) in &live {
+        for (v_model, v) in &live {
+            let expected = naive.cover_level_between(*u_model, *v_model);
+            assert_eq!(fb.cover_level_between(*u, *v), expected);
+            match fb.min_covered_edge_between(*u, *v) {
+                Some((a, b)) => {
+                    let edge = key(model_vertex(a), model_vertex(b));
+                    assert_eq!(naive.cover.get(&edge), Some(&expected));
+                    assert!(
+                        naive
+                            .path_edges(*u_model, *v_model)
+                            .unwrap()
+                            .contains(&edge)
+                    );
+                }
+                None => assert_eq!(expected, NO_COVER),
+            }
+            match fb.find_bridge_between(*u, *v) {
+                Some((a, b)) => {
+                    let edge = key(model_vertex(a), model_vertex(b));
+                    assert_eq!(naive.cover.get(&edge), Some(&-1));
+                    assert!(
+                        naive
+                            .path_edges(*u_model, *v_model)
+                            .unwrap()
+                            .contains(&edge)
+                    );
+                }
+                None => assert_ne!(expected, -1),
+            }
+        }
+    }
+}
+
 #[test]
 fn single_edge_is_a_bridge() {
     let mut fb = FindBridge::new();
@@ -541,6 +619,80 @@ fn disconnected_vertices() {
     assert!(fb.find_bridge_between(a, c).is_none());
     // `a` is still connected to `b` after the negative connectivity test.
     assert!(fb.connected(a, b));
+}
+
+#[test]
+fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
+    let mut fb = FindBridge::new();
+    let initial = new_vertices(&mut fb, 5);
+    let mut vertices = initial.into_iter().map(Some).collect::<Vec<_>>();
+    let mut naive = Naive::new(5);
+
+    let removed = vertices[0].unwrap();
+    let left = vertices[1].unwrap();
+    let middle = vertices[2].unwrap();
+    let moved_before = vertices[4].unwrap();
+    fb.link(left, middle);
+    naive.link(1, 2);
+    fb.link(middle, moved_before);
+    naive.link(2, 4);
+    fb.cover(left, moved_before, lvl(1));
+    naive.cover_path(1, 4, 1);
+
+    let removed_level0 = fb.add_label(removed, lvl(0));
+    let removed_level0_duplicate = fb.add_label(removed, lvl(0));
+    let removed_level1 = fb.add_label(removed, lvl(1));
+    let middle_label = fb.add_label(middle, lvl(0));
+    let moved_label = fb.add_label(moved_before, lvl(1));
+
+    assert_eq!(
+        fb.find_first_label(left, moved_before, lvl(1)),
+        Some(moved_label)
+    );
+    let swap = fb
+        .remove_vertex(removed)
+        .expect("live isolated vertex is removed");
+    naive.remove_isolated_vertex(0);
+    vertices[0] = None;
+    vertices[4].as_mut().unwrap().swap(swap);
+    let moved = vertices[4].unwrap();
+    assert_ne!(moved, moved_before);
+    assert_eq!(moved.index(), removed.index());
+
+    assert_eq!(fb.remove_label(removed_level0), None);
+    assert_eq!(fb.remove_label(removed_level0_duplicate), None);
+    assert_eq!(fb.remove_label(removed_level1), None);
+    assert_eq!(fb.labels.len(), 2);
+    assert_eq!(fb.labels_at.len(), 2);
+    assert_eq!(fb.label_map.len(), 4);
+    assert_eq!(fb.top_tree.label_count(), 4);
+    assert_eq!(fb.vertex_levels.len(), 4);
+    assert_eq!(fb.find_first_label(left, moved, lvl(1)), Some(moved_label));
+    assert_eq!(fb.find_first_label(left, moved, lvl(0)), Some(middle_label));
+
+    check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
+
+    fb.uncover(left, moved, lvl(1));
+    naive.uncover_path(1, 4, 1);
+    check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
+
+    let last_vertex = vertices[3].take().unwrap();
+    assert_eq!(
+        fb.remove_vertex(last_vertex),
+        Some(top_tree::SwapResult::None)
+    );
+    naive.remove_isolated_vertex(3);
+    check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
+}
+
+#[test]
+#[should_panic(expected = "FindBridge::remove_vertex requires no incident forest edges")]
+fn remove_vertex_requires_no_forest_edges() {
+    let mut fb = FindBridge::new();
+    let a = fb.add_vertex();
+    let b = fb.add_vertex();
+    fb.link(a, b);
+    fb.remove_vertex(a);
 }
 
 #[test]

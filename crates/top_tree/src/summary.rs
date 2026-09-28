@@ -134,6 +134,12 @@ pub trait Summary: Sized {
     /// default no-op implementation.
     fn flip(&mut self) {}
 
+    /// Remap any vertex handle stored in this summary after the forest moves a
+    /// surviving vertex from `old` to `new` while compacting its vertex
+    /// storage. Summaries that do not store vertex handles can use this
+    /// default no-op implementation.
+    fn remap_vertex(&mut self, _old: VertexId, _new: VertexId) {}
+
     /// Apply a lazy `tag` to this summary.
     fn apply(&mut self, _tag: &Self::Tag) {}
 

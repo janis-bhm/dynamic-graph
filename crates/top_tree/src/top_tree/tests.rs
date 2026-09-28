@@ -213,6 +213,71 @@ impl Summary for DirectedPath {
     fn flip(&mut self) {
         self.edges = self.edges.drain(..).rev().map(|(u, v)| (v, u)).collect();
     }
+
+    fn remap_vertex(&mut self, old: tree::VertexId, new: tree::VertexId) {
+        for (u, v) in &mut self.edges {
+            if *u == old {
+                *u = new;
+            }
+            if *v == old {
+                *v = new;
+            }
+        }
+    }
+}
+
+#[test]
+fn removing_isolated_vertex_remaps_surviving_clusters() {
+    let mut tt = TopTree::<DirectedPath>::new();
+    let removed = tt.add_vertex();
+    let left = tt.add_vertex();
+    let middle = tt.add_vertex();
+    let mut moved = tt.add_vertex();
+
+    for vertex in [removed, left, middle, moved] {
+        tt.attach(vertex);
+    }
+    tt.link(left, middle);
+    tt.link(middle, moved);
+
+    let swap = tt.remove_vertex(removed).expect("live vertex is removed");
+    moved.swap(swap);
+    assert_eq!(moved.index(), removed.index());
+    assert!(tt.forest().node(removed).is_none());
+    assert!(tt.forest().node(moved).is_some());
+    assert_eq!(tt.edge_count(), 2);
+    assert_eq!(tt.label_count(), 3);
+
+    let summary = tt.expose_path(left, moved).expect("path remains connected");
+    assert_eq!(summary.edges, vec![(left, middle), (middle, moved)]);
+    tt.deexpose(moved);
+    tt.deexpose(left);
+
+    for root in live_roots(&tt) {
+        check_node_boundaries(&tt, root);
+    }
+
+    let labels_before_stale_removal = tt.label_count();
+    assert_eq!(tt.remove_vertex(removed), None);
+    assert_eq!(tt.label_count(), labels_before_stale_removal);
+}
+
+#[test]
+fn removing_last_vertex_clears_exposure_and_reports_success() {
+    let mut tt = TopTree::<PathLen>::new();
+    let vertex = tt.add_vertex();
+    assert_eq!(tt.expose(vertex), None);
+    assert!(tt.exposed.get(vertex.index()));
+
+    assert_eq!(tt.remove_vertex(vertex), Some(SwapResult::None));
+    let added = tt.add_vertex();
+    assert_eq!(added.index(), vertex.index());
+    assert!(!tt.exposed.get(added.index()));
+    assert_eq!(
+        tt.remove_vertex(vertex),
+        None,
+        "stale generations are rejected"
+    );
 }
 
 struct Harness<S: Summary> {

@@ -832,6 +832,17 @@ impl Summary for CoverLevel {
         self.part.swap(0, 1);
     }
 
+    fn remap_vertex(&mut self, old: top_tree::VertexId, new: top_tree::VertexId) {
+        let remap = |(u, v): Edge| {
+            (
+                if u == old { new } else { u },
+                if v == old { new } else { v },
+            )
+        };
+        self.min_path_edge = self.min_path_edge.map(remap);
+        self.min_global_edge = self.min_global_edge.map(remap);
+    }
+
     fn apply(&mut self, tag: &Self::Tag) {
         self.cover = tag.apply_to(self.cover);
         if self.leaf == LeafKind::Edge {
@@ -856,6 +867,7 @@ pub struct FindBridge {
     /// Maps each vertex to its label cluster. We only need one label per vertex, so this is a bijection.
     label_map: BTreeMap<top_tree::VertexId, top_tree::ClusterId>,
     /// User-label levels attached to each vertex, encoded as a bitmask.
+    /// Indexed by the vertex's internal forest index.
     vertex_levels: Vec<u64>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
     labels: BTreeMap<UserLabel, (top_tree::VertexId, Level)>,
@@ -884,7 +896,7 @@ impl FindBridge {
         }
     }
 
-    /// Adds a vertex keyed by `key` and returns its index.
+    /// Adds a vertex and returns its internal forest handle.
     pub fn add_vertex(&mut self) -> top_tree::VertexId {
         let index = self.top_tree.add_vertex();
         self.vertex_levels.resize(index.index() + 1, 0);
@@ -893,6 +905,76 @@ impl FindBridge {
         let label = self.top_tree.attach(index);
         self.label_map.insert(index, label);
         index
+    }
+
+    /// Removes an isolated-in-the-forest vertex, its structural label leaf,
+    /// and all user labels attached to it.
+    ///
+    /// If the underlying vertex storage compacts another vertex into this
+    /// vertex's slot, the returned [`top_tree::SwapResult`] describes that
+    /// handle remapping; callers holding the moved handle should apply
+    /// [`top_tree::VertexId::swap`]. Returns `None` for a stale vertex handle.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a live vertex has any incident forest edge. Graph-level
+    /// callers should first delete its incident graph edges.
+    pub fn remove_vertex(
+        &mut self,
+        vertex: top_tree::VertexId,
+    ) -> Option<top_tree::SwapResult<top_tree::VertexId>> {
+        self.top_tree.forest().node(vertex)?;
+
+        assert_eq!(
+            self.top_tree.forest().incident_edge_indices(vertex).count(),
+            0,
+            "FindBridge::remove_vertex requires no incident forest edges"
+        );
+
+        let user_labels = self
+            .labels_at
+            .extract_if((vertex, Level::MIN)..=(vertex, Level::MAX), |_, _| true)
+            .flat_map(|((_, _), labels)| labels)
+            .collect::<Vec<_>>();
+
+        for label in user_labels {
+            self.labels.remove(&label);
+        }
+
+        let swap = self
+            .top_tree
+            .remove_vertex(vertex)
+            .expect("the live vertex was validated before removal");
+        self.label_map
+            .remove(&vertex)
+            .expect("every live vertex has a structural label leaf");
+        self.vertex_levels.swap_remove(vertex.index());
+
+        if let top_tree::SwapResult::Some { prev, current } = swap {
+            debug_assert_eq!(current.index(), vertex.index());
+            debug_assert_eq!(prev.index(), self.vertex_levels.len());
+            let structural_label = self
+                .label_map
+                .remove(&prev)
+                .expect("the moved vertex has a structural label leaf");
+            assert!(self.label_map.insert(current, structural_label).is_none());
+
+            // remove range of labels_at for the moved vertex, then reinsert
+            // them under the new vertex handle
+            let prev_labels = self
+                .labels_at
+                .extract_if((prev, Level::MIN)..=(prev, Level::MAX), |_, _| true)
+                .collect::<Vec<_>>();
+
+            for ((_, level), labels) in prev_labels {
+                for label in &labels {
+                    self.labels.get_mut(label).expect("asdf").0 = current;
+                }
+                assert!(self.labels_at.insert((current, level), labels).is_none());
+            }
+        }
+
+        Some(swap)
     }
 
     /// The number of tree edges.

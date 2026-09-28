@@ -5,7 +5,7 @@
 ## Structure
 
 - `src/lib.rs` declares the modules and public exports (`TopTree`, `Summary`, `Boundary`, IDs, and forest types). Its crate docs include a small example of implementing a summary.
-- `src/summary.rs` defines the application contract. `Summary::tree_edge` and `Summary::label` initialize leaf values; `Summary::combine` builds a parent value from its children and a `MergeContext`; `flip`, `apply`, and `compose` handle orientation and lazy updates.
+- `src/summary.rs` defines the application contract. `Summary::tree_edge` and `Summary::label` initialize leaf values; `Summary::combine` builds a parent value from its children and a `MergeContext`; `flip`, `remap_vertex`, `apply`, and `compose` handle orientation, compacting vertex IDs, and lazy updates.
 - `src/top_tree.rs` implements `TopTree<S>` and the cluster tree. A cluster is a leaf for a forest edge or attached label, or an internal union of two clusters sharing a vertex. This file owns cluster boundaries, splay/rotation and expose logic, link/cut/attach/detach, summary recomputation, and lazy-tag propagation.
 - `src/tree/mod.rs` implements the underlying forest storage: vertices, tree edges, attached labels, incidence lists, handles, and removal/remapping. It does not maintain the top-tree summaries.
 - `src/top_tree/tests.rs` exercises cluster invariants and operations, including randomized link/cut/expose sequences and custom summaries. `src/tree/tests.rs` covers forest storage and handle-remapping behavior.
@@ -18,6 +18,7 @@
 - `MergeContext` is the authority for boundary-aware combination. In particular, path aggregates should include only path children; a raked point child is off the parent path. Tags are propagated only to path children, not raked children.
 - Reversing a cluster changes the logical left/right order. If `S` depends on path direction, implement `Summary::flip` consistently with that reversal. For lazy updates, `apply` must update a cluster summary and `compose` must preserve the order of pending operations.
 - Structural changes and exposes can change cluster boundaries and orientation. Recompute summaries through `Summary::combine` rather than assuming a cluster's old shape or child order is stable.
+- Removing a vertex compacts the forest's vertex storage. The returned `SwapResult` remaps a surviving handle, and every summary that stores vertex IDs should implement `Summary::remap_vertex` so live cluster data follows that remapping.
 
 ## Working in this crate
 

@@ -5,8 +5,8 @@
 ## Structure
 
 - `src/lib.rs` documents and re-exports the public API: `FindBridge`, `Level`, `CoverLevel`, `CoverTag`, and `DynamicGraph` with its graph-level IDs.
-- `src/cover_level.rs` contains the tree-level implementation. `CoverLevel` is the `top_tree::Summary`; it stores path and off-path minimum cover levels and their edges, plus the data used for `FindSize` and `FindFirstLabel`. `FindBridge` owns `TopTree<CoverLevel>` and implements `Link`, `Cut`, `Connected`, `Cover`, `Uncover`, cover/min-edge queries, `FindSize`, and label operations.
-- `src/graph.rs` contains `DynamicGraph`, the Appendix A reduction. It translates stable public IDs to `top_tree::VertexId`, records whether each graph edge is a tree or non-tree edge, and implements insert/delete, replacement-edge search, and recovery/promotion.
+- `src/cover_level.rs` contains the tree-level implementation. `CoverLevel` is the `top_tree::Summary`; it stores path and off-path minimum cover levels and their edges, plus the data used for `FindSize` and `FindFirstLabel`. `FindBridge` owns `TopTree<CoverLevel>` and implements `Link`, `Cut`, `Connected`, `Cover`, `Uncover`, cover/min-edge queries, `FindSize`, label operations, and removal of a vertex with no incident forest edges.
+- `src/graph.rs` contains `DynamicGraph`, the Appendix A reduction. It translates stable public IDs to `top_tree::VertexId`, records whether each graph edge is a tree or non-tree edge, and implements insert/delete, vertex removal, replacement-edge search, and recovery/promotion.
 - `src/cover_level/tests.rs` checks the tree-level operations against a simple forest model. `src/graph/tests.rs` checks dynamic graph behavior against a naive graph implementation, including randomized update sequences.
 - `augmented_tree` supplies the aggregated balanced `BTree` used by `PartTree` in `cover_level.rs`; `top_tree` supplies the dynamic forest and summary callbacks.
 

@@ -4,7 +4,8 @@
 //! Section 4, implemented as a [`top_tree::Summary`] ([`CoverLevel`]) with a
 //! lazy [`CoverTag`]. The [`FindBridge`] wrapper exposes the tree operations
 //! (`link`, `cut`, `connected`, `cover`, `uncover`, `cover_level`,
-//! `min_covered_edge`) and the bridge queries (`find_bridge`, ...).
+//! `min_covered_edge`, and isolated-in-the-forest vertex removal) and the
+//! bridge queries (`find_bridge`, ...).
 //!
 //! It also exposes the two auxiliary query structures of the paper:
 //!

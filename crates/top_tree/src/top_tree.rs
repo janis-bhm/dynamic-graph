@@ -123,6 +123,31 @@ where
         }
     }
 
+    // TODO: this kinda sucks, find a better way to iterate over live clusters
+    fn for_each_mut(&mut self, mut f: impl FnMut(&mut Cluster<S>)) {
+        let mut free = vec![false; self.nodes.len()];
+        let mut current = self.first_free;
+        while let Some(index) = current {
+            let index = index.get();
+            assert!(!free[index], "cluster free list must not contain a cycle");
+            free[index] = true;
+            current = unsafe {
+                self.nodes[index]
+                    .as_ptr()
+                    .cast::<Option<NonMaxUsize>>()
+                    .read()
+            };
+        }
+
+        for (index, node) in self.nodes.iter_mut().enumerate() {
+            if !free[index] {
+                // SAFETY: every slot not listed in the free list contains an
+                // initialized live cluster.
+                f(unsafe { &mut *node.as_mut_ptr() });
+            }
+        }
+    }
+
     #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (ClusterId, &Cluster<S>)> + '_ {
         let mut free = vec![false; self.nodes.len()];
@@ -202,11 +227,9 @@ impl BitVec {
             .is_some_and(|bits| bits >> (index % Self::BITS) & 1 == 1)
     }
 
-    fn swap(&mut self, a: usize, b: usize) {
-        let va = self.get(a);
-        let vb = self.get(b);
-        self.set(a, vb);
-        self.set(b, va);
+    fn remove(&mut self, index: usize, last: usize) {
+        self.set(index, self.get(last));
+        self.set(last, false);
     }
 
     /// Sets the bit at `index`, ignoring indices past the end.
@@ -420,6 +443,25 @@ impl BoundaryVertices {
         }
     }
 
+    fn remap(&mut self, old: tree::VertexId, new: tree::VertexId) {
+        match self {
+            Self::None => {}
+            Self::One(vertex) => {
+                if *vertex == old {
+                    *vertex = new;
+                }
+            }
+            Self::Two { left, right } => {
+                if *left == old {
+                    *left = new;
+                }
+                if *right == old {
+                    *right = new;
+                }
+            }
+        }
+    }
+
     fn left(&self) -> Option<tree::VertexId> {
         match self {
             Self::None => None,
@@ -552,6 +594,11 @@ where
         index
     }
 
+    /// Removes a vertex and all of its incident forest edges and labels.
+    ///
+    /// Returns `None` for a stale handle. A successful removal returns
+    /// `Some(SwapResult::None)` when the vertex was last in storage, or the
+    /// remapping of the moved last vertex otherwise.
     pub fn remove_vertex(&mut self, vertex: tree::VertexId) -> Option<SwapResult<tree::VertexId>> {
         self.remove_node(vertex)
     }
@@ -1647,9 +1694,15 @@ where
         }
     }
 
-    fn swap_vertex(exposed: &mut BitVec, swap: SwapResult<tree::VertexId>) {
+    fn remove_vertex_bit(
+        exposed: &mut BitVec,
+        vertex: tree::VertexId,
+        swap: SwapResult<tree::VertexId>,
+    ) {
         if let SwapResult::Some { current, prev } = swap {
-            exposed.swap(current.index(), prev.index());
+            exposed.remove(current.index(), prev.index());
+        } else {
+            exposed.set(vertex.index(), false);
         }
     }
 
@@ -1678,6 +1731,8 @@ where
     }
 
     fn remove_node(&mut self, vertex: tree::VertexId) -> Option<SwapResult<tree::VertexId>> {
+        self.tree.node(vertex)?;
+
         loop {
             let Some(label) = self.tree.incident_label_ids(vertex).next() else {
                 break;
@@ -1695,18 +1750,23 @@ where
             self.cut_edge(u, v, edge);
         }
 
-        if let Some((_, swap @ SwapResult::Some { .. })) = self.tree.remove_node(
+        let (_, swap) = self.tree.remove_node(
             vertex,
             &mut self.clusters,
             |clusters, tree, swap| Self::swap_edge(clusters, tree, swap),
             |clusters, tree, swap| Self::swap_label(clusters, tree, swap),
-        ) {
-            Self::swap_vertex(&mut self.exposed, swap);
+        )?;
 
-            Some(swap)
-        } else {
-            None
+        Self::remove_vertex_bit(&mut self.exposed, vertex, swap);
+
+        if let SwapResult::Some { prev, current } = swap {
+            self.clusters.for_each_mut(|cluster| {
+                cluster.boundary_vertices.remap(prev, current);
+                cluster.sum.remap_vertex(prev, current);
+            });
         }
+
+        Some(swap)
     }
 
     fn attach_internal(&mut self, vertex: tree::VertexId) -> ClusterId {

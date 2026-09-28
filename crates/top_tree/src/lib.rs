@@ -89,7 +89,7 @@ mod tree;
 
 pub use summary::{Boundary, MergeContext, Summary};
 pub use top_tree::{ClusterId, NodeData, TopTree};
-pub use tree::{Edge, EdgeId, Label, LabelId, Node, Tree, VertexId};
+pub use tree::{Edge, EdgeId, Label, LabelId, Node, SwapResult, Tree, VertexId};
 
 macro_rules! impl_nonmax_type {
     ($($vis:vis struct $name:ident($int:ident is $pat:pat)),* $(,)?) => {
