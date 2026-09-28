@@ -20,7 +20,7 @@ fn remove_nodes() {
     assert_eq!(tree.edges.len(), 1);
     verify_tree(&tree);
 
-    tree.remove_node(v, |_, _| (), |_, _| ());
+    tree.remove_node(v, (), |_, _, _| (), |_, _, _| ());
     assert_eq!(tree.edges.len(), 0);
     assert_eq!(tree.nodes.len(), 1);
     verify_tree(&tree);
@@ -44,7 +44,7 @@ fn labels_are_keyed_by_unique_id() {
 
     let l1 = tree.add_label(u, 100);
     let l2 = tree.add_label(u, 101);
-    let l3 = tree.add_label(v, 102);
+    let mut l3 = tree.add_label(v, 102);
 
     assert_eq!(tree.label_count(), 3);
     assert_eq!(tree.degree(u), 2);
@@ -54,14 +54,18 @@ fn labels_are_keyed_by_unique_id() {
     weights.sort_unstable();
     assert_eq!(weights, vec![100, 101]);
 
-    assert_eq!(tree.remove_label(l2).map(|(i, _)| i), Some(101));
+    let (removed, swap) = tree.remove_label(l2).unwrap();
+    assert_eq!(removed, 101);
+    l3.swap(swap);
     assert_eq!(tree.label_count(), 2);
     assert!(tree.label(l2).is_none());
     assert_eq!(tree.degree(u), 1);
     assert_eq!(tree.label_weight(l1), Some(&100));
 
-    // Removing another label must not disturb the ids or payloads of the rest.
-    assert_eq!(tree.remove_label(l1).map(|(i, _)| i), Some(100));
+    // Removing another label reports the slot change for the moved id.
+    let (removed, swap) = tree.remove_label(l1).unwrap();
+    assert_eq!(removed, 100);
+    l3.swap(swap);
     assert_eq!(tree.label_weight(l3), Some(&102));
     assert_eq!(tree.label(l3).unwrap().node_index(), v.index());
     assert_eq!(tree.degree(v), 1);
@@ -78,12 +82,14 @@ fn removing_node_remaps_its_labels() {
     let mut v = tree.add_node(2);
     let l0 = tree.add_label(u, 100);
     let l1 = tree.add_label(v, 101);
+    let mut labels = [l0, l1];
 
     if let Some((_, swap)) = tree.remove_node(
         u,
-        |_, _| (),
-        |_, swap| {
-            for l in &mut [l0, l1] {
+        &mut labels,
+        |_, _, _| (),
+        |labels, _, swap| {
+            for l in labels.iter_mut() {
                 l.swap(swap);
             }
         },
@@ -91,6 +97,6 @@ fn removing_node_remaps_its_labels() {
         v.swap(swap);
     }
 
-    assert_eq!(tree.label(l1).unwrap().node_index(), v.index());
-    assert_eq!(tree.label_weight(l1), Some(&101));
+    assert_eq!(tree.label(labels[1]).unwrap().node_index(), v.index());
+    assert_eq!(tree.label_weight(labels[1]), Some(&101));
 }
