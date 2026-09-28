@@ -181,7 +181,7 @@ impl DynamicGraph {
             return false;
         };
         let (mut v, mut w) = record.endpoints;
-        let alpha = record.level;
+        let mut alpha = record.level;
 
         // In the paper l_max identifies a tree edge. Here it is also the
         // largest representable cover level, so EdgeKind disambiguates a
@@ -200,6 +200,9 @@ impl DynamicGraph {
                 .as_ref()
                 .expect("Swap keeps the deleted edge live as a non-tree edge");
             (v, w) = record.endpoints;
+            // Paper Appendix A, Delete line 30: for a tree edge the original
+            // level is l_max, so use the cover level that Swap turned it into.
+            alpha = record.level;
         }
 
         let (label1, label2) = match record.kind {
