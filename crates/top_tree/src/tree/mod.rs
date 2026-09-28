@@ -1,3 +1,4 @@
+use core::fmt;
 use std::{
     mem,
     ops::{Index, IndexMut},
@@ -9,6 +10,12 @@ use crate::{NonMaxU32, NonMaxUsize};
 pub struct VertexId {
     index: NonMaxU32,
     generation: Generation,
+}
+
+impl fmt::Display for VertexId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}.{}", self.index.get(), self.generation.0)
+    }
 }
 
 impl VertexId {
@@ -40,6 +47,12 @@ pub struct LabelId {
     generation: Generation,
 }
 
+impl fmt::Display for LabelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "l{}.{}", self.index.get(), self.generation.0)
+    }
+}
+
 impl LabelId {
     fn new(index: usize, generation: Generation) -> Self {
         Self {
@@ -67,6 +80,12 @@ impl LabelId {
 pub struct EdgeId {
     index: NonMaxU32,
     generation: Generation,
+}
+
+impl fmt::Display for EdgeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "e{}.{}", self.index.get(), self.generation.0)
+    }
 }
 
 impl EdgeId {

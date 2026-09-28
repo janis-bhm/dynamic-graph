@@ -472,16 +472,13 @@ impl BoundaryVertices {
     fn to_boundary(self) -> Boundary {
         match self {
             Self::None => Boundary::None,
-            Self::One(v) => Boundary::One(v.index()),
-            Self::Two { left, right } => Boundary::Two {
-                left: left.index(),
-                right: right.index(),
-            },
+            Self::One(v) => Boundary::One(v),
+            Self::Two { left, right } => Boundary::Two { left, right },
         }
     }
 }
 
-fn shared(a: Boundary, b: Boundary) -> usize {
+fn shared(a: Boundary, b: Boundary) -> tree::VertexId {
     let b_slots = b.slots();
     a.slots()
         .into_iter()
@@ -611,6 +608,10 @@ where
             current = self.parent(parent);
         }
     }
+
+    pub fn label_vertex(&self, label: tree::LabelId) -> Option<tree::VertexId> {
+        self.tree.label_vertex(label)
+    }
 }
 
 impl<S> TopTree<S>
@@ -645,7 +646,7 @@ where
     }
 
     /// The vertex shared by the two children of an internal `node`.
-    pub fn node_central(&self, node: ClusterId) -> Option<usize> {
+    pub fn node_central(&self, node: ClusterId) -> Option<tree::VertexId> {
         self.cl(node).children?;
         let (left, right) = self.flipped_children(node);
         let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();

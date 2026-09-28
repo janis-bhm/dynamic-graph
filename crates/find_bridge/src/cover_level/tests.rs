@@ -693,11 +693,11 @@ fn naive_find_size(naive: &Naive, n: usize, v: usize, w: usize, i: i32) -> u64 {
 
 fn naive_find_first_label(
     naive: &Naive,
-    labels: &BTreeMap<LabelId, (usize, i32)>,
+    labels: &BTreeMap<UserLabel, (usize, i32)>,
     v: usize,
     w: usize,
     i: i32,
-) -> Option<LabelId> {
+) -> Option<UserLabel> {
     let path = naive.path_vertices(v, w)?;
     let projection = naive.projections(&path);
     for &m in &path {
@@ -712,7 +712,7 @@ fn naive_find_first_label(
 
 fn naive_has_incident(
     naive: &Naive,
-    labels: &BTreeMap<LabelId, (usize, i32)>,
+    labels: &BTreeMap<UserLabel, (usize, i32)>,
     v: usize,
     w: usize,
     level: i32,
@@ -941,7 +941,7 @@ fn randomized_find_size_and_labels() {
             edges.push((u, v));
         }
 
-        let mut labels: BTreeMap<LabelId, (usize, i32)> = BTreeMap::new();
+        let mut labels: BTreeMap<UserLabel, (usize, i32)> = BTreeMap::new();
 
         for _ in 0..60 {
             match rng.next() % 6 {
@@ -1070,7 +1070,7 @@ fn incident_mask_matches_naive() {
             edges.push((u, v));
         }
 
-        let mut labels: BTreeMap<LabelId, (usize, i32)> = BTreeMap::new();
+        let mut labels: BTreeMap<UserLabel, (usize, i32)> = BTreeMap::new();
         for _ in 0..30 {
             match rng.next() % 6 {
                 0 => {

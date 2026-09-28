@@ -27,9 +27,9 @@ pub enum Boundary {
     /// The cluster has no boundary vertices.
     None,
     /// The cluster has one boundary vertex.
-    One(usize),
+    One(VertexId),
     /// The cluster has two boundary vertices, ordered from left to right.
-    Two { left: usize, right: usize },
+    Two { left: VertexId, right: VertexId },
 }
 
 impl Boundary {
@@ -51,7 +51,7 @@ impl Boundary {
     ///
     /// A one-vertex cluster repeats its vertex in both slots so that set-
     /// intersection helpers can treat point and path clusters uniformly.
-    pub fn slots(self) -> [Option<usize>; 2] {
+    pub fn slots(self) -> [Option<VertexId>; 2] {
         match self {
             Boundary::None => [None, None],
             Boundary::One(v) => [Some(v), Some(v)],
@@ -74,7 +74,7 @@ pub struct MergeContext {
     /// Merged cluster's boundary vertices, in the logical frame of the new sum.
     pub boundary: Boundary,
     /// The vertex shared by the two children (their central vertex).
-    pub central: usize,
+    pub central: VertexId,
 }
 
 impl MergeContext {

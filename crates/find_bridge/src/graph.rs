@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::cover_level::{FindBridge, LabelId, Level};
+use crate::cover_level::{FindBridge, Level, UserLabel};
 
 /// A stable handle for a vertex in a [`DynamicGraph`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -36,7 +36,10 @@ impl EdgeId {
 #[derive(Clone, Copy, Debug)]
 enum EdgeKind {
     Tree,
-    NonTree { label1: LabelId, label2: LabelId },
+    NonTree {
+        label1: UserLabel,
+        label2: UserLabel,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +77,7 @@ pub struct DynamicGraph {
     /// Normalized internal endpoint pair -> the live tree-edge handle.
     tree_edge_at: BTreeMap<(usize, usize), EdgeId>,
     /// Each live non-tree label -> the graph edge that owns it.
-    label_to_edge: BTreeMap<LabelId, EdgeId>,
+    label_to_edge: BTreeMap<UserLabel, EdgeId>,
     /// Highest supported cover level, also used by the paper for tree edges.
     l_max: i32,
     /// Number of live graph edges (including both tree and non-tree edges).
@@ -282,7 +285,7 @@ impl DynamicGraph {
         u: usize,
         v: usize,
         level: Level,
-    ) -> (LabelId, LabelId) {
+    ) -> (UserLabel, UserLabel) {
         let label1 = self.fb.add_label(u, level);
         let label2 = self.fb.add_label(v, level);
         let _ = self.label_to_edge.insert(label1, edge);
@@ -290,7 +293,7 @@ impl DynamicGraph {
         (label1, label2)
     }
 
-    fn remove_edge_labels(&mut self, label1: LabelId, label2: LabelId) {
+    fn remove_edge_labels(&mut self, label1: UserLabel, label2: UserLabel) {
         let _ = self.fb.remove_label(label1);
         let _ = self.fb.remove_label(label2);
         let _ = self.label_to_edge.remove(&label1);

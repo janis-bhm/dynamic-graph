@@ -303,7 +303,7 @@ fn clean_tree(tree: &PartTree, pending: CoverTag) -> PartTree {
     cleaned
 }
 
-fn boundary_contains(boundary: top_tree::Boundary, vertex: usize) -> bool {
+fn boundary_contains(boundary: top_tree::Boundary, vertex: top_tree::VertexId) -> bool {
     boundary.slots().contains(&Some(vertex))
 }
 
@@ -313,8 +313,8 @@ fn boundary_contains(boundary: top_tree::Boundary, vertex: usize) -> bool {
 fn endpoint_child(
     left: top_tree::Boundary,
     right: top_tree::Boundary,
-    vertex: usize,
-    central: usize,
+    vertex: top_tree::VertexId,
+    central: top_tree::VertexId,
 ) -> usize {
     let in_left = boundary_contains(left, vertex);
     let in_right = boundary_contains(right, vertex);
@@ -341,7 +341,11 @@ fn endpoint_child(
 /// slot rather than assuming it is still slot zero.
 /// The unused slot is empty, while every stored boundary tree must be
 /// non-empty so this test continues to identify the unused slot.
-fn boundary_tree(parts: &[PartTree; 2], boundary: top_tree::Boundary, vertex: usize) -> &PartTree {
+fn boundary_tree(
+    parts: &[PartTree; 2],
+    boundary: top_tree::Boundary,
+    vertex: top_tree::VertexId,
+) -> &PartTree {
     let slot = match boundary {
         top_tree::Boundary::Two { left, .. } if vertex == left => 0,
         top_tree::Boundary::Two { left: _, right } if vertex == right => 1,
@@ -367,7 +371,7 @@ fn boundary_tree(parts: &[PartTree; 2], boundary: top_tree::Boundary, vertex: us
 fn set_boundary_tree(
     parts: &mut [PartTree; 2],
     boundary: top_tree::Boundary,
-    vertex: usize,
+    vertex: top_tree::VertexId,
     tree: PartTree,
 ) {
     match boundary {
@@ -564,7 +568,7 @@ fn off_path_find_size(
 
 /// A stable handle to a user label added with [`FindBridge::add_label`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LabelId(pub usize);
+pub struct UserLabel(pub usize);
 
 /// Identifies the single label object attached to a vertex. The vertex's
 /// user-label levels are stored in the label's summary, not in this key.
@@ -576,7 +580,7 @@ pub struct LabelKey {
 
 /// An undirected edge, stored as the pair of endpoints passed to
 /// [`FindBridge::link`].
-pub type Edge = (usize, usize);
+pub type Edge = (top_tree::VertexId, top_tree::VertexId);
 
 /// A lazily pending pair of `Cover`/`Uncover` operations, represented as the
 /// monotone function `g(x) = if x > threshold { x } else { constant }`.
@@ -710,7 +714,7 @@ fn incident_has(summary: &CoverLevel, level: Level) -> bool {
 fn pointincident_has(
     summary: &CoverLevel,
     boundary: top_tree::Boundary,
-    vertex: usize,
+    vertex: top_tree::VertexId,
     level: Level,
 ) -> bool {
     let raw = boundary_tree(&summary.part, boundary, vertex);
@@ -726,7 +730,7 @@ fn min_candidate(left: (i32, Option<Edge>), right: (i32, Option<Edge>)) -> (i32,
 impl Summary for CoverLevel {
     type Tag = CoverTag;
 
-    fn tree_edge(u: usize, v: usize) -> Self {
+    fn tree_edge(u: top_tree::VertexId, v: top_tree::VertexId) -> Self {
         // A freshly linked tree edge is a bridge: its cover level is -1. The
         // same value is stored as the global cover so that an edge leaf can
         // serve as the root of an `expose`; whether the edge is on or off the
@@ -747,7 +751,7 @@ impl Summary for CoverLevel {
         }
     }
 
-    fn label(_v: usize) -> Self {
+    fn label(_v: top_tree::VertexId) -> Self {
         let size = SizeVector::from_vec(vec![1; SLOTS]);
         let tree = single_key_tree(LEVEL_CAP, &size, 0);
         CoverLevel {
@@ -856,13 +860,15 @@ impl Summary for CoverLevel {
 /// cover level `-1` (they are bridges). [`FindBridge::cover`] and
 /// [`FindBridge::uncover`] update the cover levels of a whole path lazily.
 pub struct FindBridge {
-    top_tree: top_tree::TopTree<usize, LabelKey, CoverLevel>,
+    top_tree: top_tree::TopTree<CoverLevel>,
+    /// Maps each vertex to its label cluster. We only need one label per vertex, so this is a bijection.
+    label_map: BTreeMap<top_tree::VertexId, top_tree::ClusterId>,
     /// User-label levels attached to each vertex, encoded as a bitmask.
     vertex_levels: Vec<u64>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
-    labels: BTreeMap<LabelId, (usize, Level)>,
+    labels: BTreeMap<UserLabel, (top_tree::VertexId, Level)>,
     /// Live label ids grouped by their (vertex, level), ordered by id.
-    labels_at: BTreeMap<(usize, Level), BTreeSet<LabelId>>,
+    labels_at: BTreeMap<(top_tree::VertexId, Level), BTreeSet<UserLabel>>,
     /// The next label handle to allocate.
     next_label: usize,
 }
@@ -878,6 +884,7 @@ impl FindBridge {
     pub fn new() -> Self {
         FindBridge {
             top_tree: top_tree::TopTree::new(),
+            label_map: BTreeMap::new(),
             vertex_levels: Vec::new(),
             labels: BTreeMap::new(),
             labels_at: BTreeMap::new(),
@@ -886,21 +893,14 @@ impl FindBridge {
     }
 
     /// Adds a vertex keyed by `key` and returns its index.
-    pub fn add_vertex(&mut self, key: usize) -> usize {
-        if let Some(index) = self.top_tree.vertex_index(&key) {
-            return index;
-        }
-        let index = self.top_tree.add_vertex(key);
-        self.vertex_levels.resize(index + 1, 0);
+    pub fn add_vertex(&mut self) -> top_tree::VertexId {
+        let index = self.top_tree.add_vertex();
+        self.vertex_levels.resize(index.index() + 1, 0);
         // One label per vertex makes every vertex contribute exactly once to
         // FindSize and supplies the point cluster for that vertex.
-        self.top_tree.attach(index, LabelKey { vertex: index });
+        let label = self.top_tree.attach(index);
+        self.label_map.insert(index, label);
         index
-    }
-
-    /// Returns the index of the vertex with the given key, if it exists.
-    pub fn vertex_index(&self, key: usize) -> Option<usize> {
-        self.top_tree.vertex_index(&key)
     }
 
     /// The number of tree edges.
@@ -909,22 +909,22 @@ impl FindBridge {
     }
 
     /// Links two vertices that are in different trees with a new tree edge.
-    pub fn link(&mut self, u: usize, v: usize) {
+    pub fn link(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) {
         self.top_tree.link(u, v);
     }
 
     /// Cuts the tree edge between `u` and `v`, returning whether it existed.
-    pub fn cut(&mut self, u: usize, v: usize) -> bool {
+    pub fn cut(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> bool {
         self.top_tree.cut(u, v).is_some()
     }
 
     /// Returns whether `u` and `v` are in the same tree.
-    pub fn connected(&mut self, u: usize, v: usize) -> bool {
+    pub fn connected(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> bool {
         self.top_tree.connected(u, v)
     }
 
     #[cfg(test)]
-    fn debug_root_incident(&mut self, v: usize, w: usize) -> u64 {
+    fn debug_root_incident(&mut self, v: top_tree::VertexId, w: top_tree::VertexId) -> u64 {
         let summary = self.top_tree.expose_path(v, w);
         self.top_tree.deexpose(w);
         self.top_tree.deexpose(v);
@@ -933,17 +933,17 @@ impl FindBridge {
 
     /// Applies `Cover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is below `level` is raised to `level`.
-    pub fn cover(&mut self, u: usize, v: usize, level: Level) {
+    pub fn cover(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::cover(level));
     }
 
     /// Applies `Uncover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is at most `level` gets cover level `-1`.
-    pub fn uncover(&mut self, u: usize, v: usize, level: Level) {
+    pub fn uncover(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::uncover(level));
     }
 
-    fn with_path_tag(&mut self, u: usize, v: usize, tag: CoverTag) {
+    fn with_path_tag(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, tag: CoverTag) {
         if u == v {
             // A trivial path has no edges, so there is nothing to tag.
             return;
@@ -955,14 +955,14 @@ impl FindBridge {
 
     /// `CoverLevel(v)`: the minimum cover level of any edge in `v`'s tree, or
     /// [`NO_COVER`] if there are none.
-    pub fn cover_level(&mut self, v: usize) -> i32 {
+    pub fn cover_level(&mut self, v: top_tree::VertexId) -> i32 {
         let summary = self.top_tree.expose(v);
         self.top_tree.deexpose(v);
         summary.map_or(NO_COVER, |node| node.global_cover)
     }
 
     /// `MinCoveredEdge(v)`: an edge attaining [`FindBridge::cover_level`].
-    pub fn min_covered_edge(&mut self, v: usize) -> Option<Edge> {
+    pub fn min_covered_edge(&mut self, v: top_tree::VertexId) -> Option<Edge> {
         let summary = self.top_tree.expose(v);
         self.top_tree.deexpose(v);
         summary.and_then(|node| node.min_global_edge)
@@ -971,7 +971,7 @@ impl FindBridge {
     /// `CoverLevel(u, v)`: the minimum cover level on the `u`-`v` path. If
     /// `u == v` (or the two are not connected and there is no path) this is
     /// [`NO_COVER`].
-    pub fn cover_level_between(&mut self, u: usize, v: usize) -> i32 {
+    pub fn cover_level_between(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> i32 {
         if u == v || !self.connected(u, v) {
             return NO_COVER;
         }
@@ -983,7 +983,11 @@ impl FindBridge {
 
     /// `MinCoveredEdge(u, v)`: an edge on the `u`-`v` path attaining
     /// [`FindBridge::cover_level_between`].
-    pub fn min_covered_edge_between(&mut self, u: usize, v: usize) -> Option<Edge> {
+    pub fn min_covered_edge_between(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+    ) -> Option<Edge> {
         if u == v || !self.connected(u, v) {
             return None;
         }
@@ -994,7 +998,7 @@ impl FindBridge {
     }
 
     /// `FindBridge(v)`: a bridge in `v`'s tree, if one exists.
-    pub fn find_bridge(&mut self, v: usize) -> Option<Edge> {
+    pub fn find_bridge(&mut self, v: top_tree::VertexId) -> Option<Edge> {
         if self.cover_level(v) == -1 {
             self.min_covered_edge(v)
         } else {
@@ -1003,7 +1007,11 @@ impl FindBridge {
     }
 
     /// `FindBridge(u, v)`: a bridge on the `u`-`v` path, if one exists.
-    pub fn find_bridge_between(&mut self, u: usize, v: usize) -> Option<Edge> {
+    pub fn find_bridge_between(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+    ) -> Option<Edge> {
         if self.cover_level_between(u, v) == -1 {
             self.min_covered_edge_between(u, v)
         } else {
@@ -1015,7 +1023,7 @@ impl FindBridge {
     /// `CoverLevel(u, meet(u, v, w)) >= i`.
     ///
     /// In particular `find_size(v, v, -1)` is the size of `v`'s component.
-    pub fn find_size(&mut self, v: usize, w: usize, i: i32) -> u64 {
+    pub fn find_size(&mut self, v: top_tree::VertexId, w: top_tree::VertexId, i: i32) -> u64 {
         if !self.connected(v, w) {
             return 0;
         }
@@ -1036,8 +1044,8 @@ impl FindBridge {
     }
 
     /// `AddLabel(v, i)`: attaches a user label at `v` with level `i`.
-    pub fn add_label(&mut self, v: usize, level: Level) -> LabelId {
-        let id = LabelId(self.next_label);
+    pub fn add_label(&mut self, v: top_tree::VertexId, level: Level) -> UserLabel {
+        let id = UserLabel(self.next_label);
         self.next_label += 1;
         self.labels.insert(id, (v, level));
 
@@ -1054,22 +1062,24 @@ impl FindBridge {
             // to update the vertex's summary to reflect the new incident level.
 
             let bit = level_bit(level);
-            let new = self.vertex_levels[v] | bit;
-            if new != self.vertex_levels[v] {
-                self.vertex_levels[v] = new;
+            let new = self.vertex_levels[v.index()] | bit;
+            if new != self.vertex_levels[v.index()] {
+                self.vertex_levels[v.index()] = new;
 
                 // updates incident_C and the part tree for this vertex's label cluster.
-                self.top_tree
-                    .update_label_summary(&LabelKey { vertex: v }, |sum| {
-                        sum.set_vertex_levels(new)
-                    });
+                self.top_tree.update_label_summary(
+                    self.top_tree
+                        .node_label_key(*self.label_map.get(&v).unwrap())
+                        .unwrap(),
+                    |sum| sum.set_vertex_levels(new),
+                );
             }
         }
         id
     }
 
     /// `RemoveLabel(l)`: removes a user label.
-    pub fn remove_label(&mut self, label: LabelId) -> Option<(usize, Level)> {
+    pub fn remove_label(&mut self, label: UserLabel) -> Option<(top_tree::VertexId, Level)> {
         let (v, level) = self.labels.remove(&label)?;
 
         let last_at_level = {
@@ -1084,10 +1094,14 @@ impl FindBridge {
         if last_at_level {
             self.labels_at.remove(&(v, level));
             let bit = level_bit(level);
-            let new = self.vertex_levels[v] & !bit;
-            self.vertex_levels[v] = new;
-            self.top_tree
-                .update_label_summary(&LabelKey { vertex: v }, |sum| sum.set_vertex_levels(new));
+            let new = self.vertex_levels[v.index()] & !bit;
+            self.vertex_levels[v.index()] = new;
+            self.top_tree.update_label_summary(
+                self.top_tree
+                    .node_label_key(*self.label_map.get(&v).unwrap())
+                    .unwrap(),
+                |sum| sum.set_vertex_levels(new),
+            );
         }
         Some((v, level))
     }
@@ -1098,7 +1112,12 @@ impl FindBridge {
     /// `CoverLevel(u, meet(u, v, w)) >= i`, minimizing the distance from `v`
     /// to `meet(u, v, w)`. Correctness is guaranteed for levels in
     /// `-1..=LEVEL_CAP`, the range represented by the incident masks.
-    pub fn find_first_label(&mut self, v: usize, w: usize, level: Level) -> Option<LabelId> {
+    pub fn find_first_label(
+        &mut self,
+        v: top_tree::VertexId,
+        w: top_tree::VertexId,
+        level: Level,
+    ) -> Option<UserLabel> {
         if !self.connected(v, w) {
             return None;
         }
@@ -1114,7 +1133,7 @@ impl FindBridge {
     }
 
     /// The smallest live label id at `vertex` with the given exact level.
-    fn smallest_label_at(&self, vertex: usize, level: Level) -> Option<LabelId> {
+    fn smallest_label_at(&self, vertex: top_tree::VertexId, level: Level) -> Option<UserLabel> {
         self.labels_at
             .get(&(vertex, level))
             .and_then(|labels| labels.iter().next().copied())
@@ -1123,7 +1142,12 @@ impl FindBridge {
     /// Descends a path cluster to the valid level-`i` label whose projection
     /// onto the cluster path is closest to `near` (`near` is a boundary of
     /// `node`).
-    fn first_path(&mut self, node: top_tree::NodeId, near: usize, level: Level) -> Option<usize> {
+    fn first_path(
+        &mut self,
+        node: top_tree::ClusterId,
+        near: top_tree::VertexId,
+        level: Level,
+    ) -> Option<top_tree::VertexId> {
         self.top_tree.push_node_tag(node);
 
         if !incident_has(self.top_tree.node_summary(node), level) {
@@ -1171,10 +1195,10 @@ impl FindBridge {
     /// must be a boundary vertex of `node`.
     fn find_label_vertex(
         &mut self,
-        node: top_tree::NodeId,
-        boundary_vertex: usize,
+        node: top_tree::ClusterId,
+        boundary_vertex: top_tree::VertexId,
         level: Level,
-    ) -> Option<usize> {
+    ) -> Option<top_tree::VertexId> {
         let boundary = self.top_tree.node_boundary(node);
         // NOTE: this must be evaluated BEFORE pushing `node`'s tag, because
         // `push_tag` consumes the label's own `pending` state used by clean_tree.
@@ -1186,21 +1210,28 @@ impl FindBridge {
         ) {
             return None;
         }
+
         match self.top_tree.node_leaf_data(node) {
             top_tree::NodeData::Label(_) => {
-                return self.top_tree.node_label_key(node).map(|key| key.vertex);
+                return self
+                    .top_tree
+                    .node_label_key(node)
+                    .and_then(|key| self.top_tree.label_vertex(key));
             }
             top_tree::NodeData::Edge(_) => return None,
             top_tree::NodeData::Internal => {}
         }
+
         self.top_tree.push_node_tag(node);
         let (left, right) = self.top_tree.node_children(node).expect("internal node");
         let central = self.top_tree.node_central(node).expect("internal node");
+
         if boundary_vertex == central {
             return self
                 .find_label_vertex(left, boundary_vertex, level)
                 .or_else(|| self.find_label_vertex(right, boundary_vertex, level));
         }
+
         if boundary_contains(self.top_tree.node_boundary(left), boundary_vertex) {
             if let Some(found) = self.find_label_vertex(left, boundary_vertex, level) {
                 return Some(found);
