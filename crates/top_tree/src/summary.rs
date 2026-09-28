@@ -19,6 +19,8 @@
 //! boundary vertices each child and the resulting cluster have. From this a
 //! summary can recover the case it is in:
 
+use crate::tree::VertexId;
+
 /// The boundary vertices of a cluster, in its logical frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boundary {
@@ -111,15 +113,15 @@ pub trait Summary: Sized {
     /// A lazy tag that can be applied to a whole cluster, e.g. to add a common
     /// value to every edge on an exposed path. Use `()` if no lazy
     /// propagation is needed.
-    type Tag: Clone + Default;
+    type Tag: Sized + Clone + Default;
 
     /// Summary of the leaf representing the tree edge `u`-`v`.
     ///
     /// `u` and `v` are given in the orientation stored in the leaf.
-    fn tree_edge(u: usize, v: usize) -> Self;
+    fn tree_edge(u: VertexId, v: VertexId) -> Self;
 
     /// Summary of the leaf representing the label at `v`.
-    fn label(v: usize) -> Self;
+    fn label(v: VertexId) -> Self;
 
     /// Combine the summaries of the left and right child of a cluster.
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;

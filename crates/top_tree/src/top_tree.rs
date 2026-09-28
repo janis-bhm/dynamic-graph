@@ -12,13 +12,167 @@
 //! information (connectivity, bridge/cover levels, biconnectivity data, ...)
 //! over a fully dynamic forest.
 
-use std::hash::Hash;
+use std::{hash::Hash, mem::MaybeUninit};
 
 use crate::{
-    NonMaxUsize, Tree,
+    NonMaxUsize,
     summary::{Boundary, MergeContext, Summary},
-    tree::SwapResult,
+    tree::{self, SwapResult, Tree},
 };
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
+pub struct ClusterId(NonMaxUsize);
+
+impl core::fmt::Display for ClusterId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl ClusterId {
+    pub fn index(&self) -> usize {
+        self.0.get()
+    }
+}
+
+struct Clusters<S>
+where
+    S: Summary,
+{
+    nodes: Vec<MaybeUninit<Cluster<S>>>,
+    first_free: Option<NonMaxUsize>,
+}
+
+impl<S> Clusters<S>
+where
+    S: Summary,
+{
+    fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            first_free: None,
+        }
+    }
+
+    fn get(&self, id: ClusterId) -> Option<&Cluster<S>> {
+        self.nodes
+            .get(id.index())
+            .map(|node| unsafe { &*node.as_ptr() })
+    }
+
+    fn get_mut(&mut self, id: ClusterId) -> Option<&mut Cluster<S>> {
+        self.nodes
+            .get_mut(id.index())
+            .map(|node| unsafe { &mut *node.as_mut_ptr() })
+    }
+
+    fn remove(&mut self, id: ClusterId) -> Cluster<S> {
+        let node = self.nodes.get_mut(id.index()).expect("cluster must exist");
+        let removed = unsafe { node.assume_init_read() };
+        let next_free = self.first_free;
+        self.first_free = NonMaxUsize::new(id.index());
+
+        // write the next free index into the first word of the removed cluster
+        unsafe {
+            node.as_mut_ptr()
+                .cast::<Option<NonMaxUsize>>()
+                .write(next_free);
+        }
+
+        removed
+    }
+
+    fn push(&mut self, cluster: Cluster<S>) -> ClusterId {
+        if let Some(free_index) = self.first_free {
+            unsafe {
+                let slot_ptr = self.nodes.as_mut_ptr().add(free_index.get());
+                let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
+                self.first_free = next_free;
+
+                slot_ptr.write(MaybeUninit::new(cluster));
+
+                ClusterId(free_index)
+            }
+        } else {
+            assert!(self.nodes.len() < usize::MAX, "too many clusters");
+            let idx = unsafe { NonMaxUsize::new_unchecked(self.nodes.len()) };
+            self.nodes.push(MaybeUninit::new(cluster));
+
+            ClusterId(idx)
+        }
+    }
+
+    fn push_with(&mut self, f: impl FnOnce(ClusterId) -> Cluster<S>) -> ClusterId {
+        if let Some(free_index) = self.first_free {
+            unsafe {
+                let slot_ptr = self.nodes.as_mut_ptr().add(free_index.get());
+                let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
+                self.first_free = next_free;
+
+                slot_ptr.write(MaybeUninit::new(f(ClusterId(free_index))));
+
+                ClusterId(free_index)
+            }
+        } else {
+            assert!(self.nodes.len() < usize::MAX, "too many clusters");
+            let idx = unsafe { NonMaxUsize::new_unchecked(self.nodes.len()) };
+            self.nodes.push(MaybeUninit::new(f(ClusterId(idx))));
+
+            ClusterId(idx)
+        }
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = (ClusterId, &Cluster<S>)> + '_ {
+        let mut free = vec![false; self.nodes.len()];
+        let mut current = self.first_free;
+        while let Some(index) = current {
+            free[index.get()] = true;
+            current = unsafe {
+                self.nodes[index.get()]
+                    .as_ptr()
+                    .cast::<Option<NonMaxUsize>>()
+                    .read()
+            };
+        }
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, node)| {
+                if free[index] {
+                    None
+                } else {
+                    let id = ClusterId(unsafe { NonMaxUsize::new_unchecked(index) });
+                    Some((id, unsafe { &*node.as_ptr() }))
+                }
+            })
+    }
+
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+impl<S> core::ops::Index<ClusterId> for Clusters<S>
+where
+    S: Summary,
+{
+    type Output = Cluster<S>;
+
+    fn index(&self, index: ClusterId) -> &Self::Output {
+        self.get(index).expect("cluster must exist")
+    }
+}
+
+impl<S> core::ops::IndexMut<ClusterId> for Clusters<S>
+where
+    S: Summary,
+{
+    fn index_mut(&mut self, index: ClusterId) -> &mut Self::Output {
+        self.get_mut(index).expect("cluster must exist")
+    }
+}
 
 /// A compact growable bit vector, used to track which vertices are exposed.
 ///
@@ -52,6 +206,13 @@ impl BitVec {
             .is_some_and(|bits| bits >> (index % Self::BITS) & 1 == 1)
     }
 
+    fn swap(&mut self, a: usize, b: usize) {
+        let va = self.get(a);
+        let vb = self.get(b);
+        self.set(a, vb);
+        self.set(b, va);
+    }
+
     /// Sets the bit at `index`, ignoring indices past the end.
     fn set(&mut self, index: usize, value: bool) {
         let block = index / Self::BITS;
@@ -71,17 +232,17 @@ impl BitVec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClusterData {
     /// The cluster is a single tree edge, stored by its index in the forest.
-    Edge(usize),
+    Edge(tree::EdgeId),
     /// The cluster is a single label, stored by its index in the forest.
-    Label(usize),
+    Node(tree::LabelId),
     /// The cluster is the union of its two children.
     Internal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Children {
-    left: NonMaxUsize,
-    right: NonMaxUsize,
+    left: ClusterId,
+    right: ClusterId,
 }
 
 impl Children {
@@ -92,7 +253,7 @@ impl Children {
 
 /// A node of the top tree.
 struct Cluster<S: Summary> {
-    parent: Option<NonMaxUsize>,
+    parent: Option<ClusterId>,
     children: Option<Children>,
     /// Whether the logical orientation of the cluster is reversed.
     flipped: bool,
@@ -119,15 +280,15 @@ impl<S: Summary> Cluster<S> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BoundaryVertices {
     None,
-    One(NonMaxUsize),
+    One(tree::VertexId),
     Two {
-        left: NonMaxUsize,
-        right: NonMaxUsize,
+        left: tree::VertexId,
+        right: tree::VertexId,
     },
 }
 
 impl BoundaryVertices {
-    fn from_left_and_right(left: Option<NonMaxUsize>, right: Option<NonMaxUsize>) -> Self {
+    fn from_left_and_right(left: Option<tree::VertexId>, right: Option<tree::VertexId>) -> Self {
         match (left, right) {
             (None, None) => Self::None,
             (Some(v), None) | (None, Some(v)) => Self::One(v),
@@ -141,7 +302,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn from_option(v: Option<NonMaxUsize>) -> Self {
+    fn from_option(v: Option<tree::VertexId>) -> Self {
         match v {
             None => Self::None,
             Some(v) => Self::One(v),
@@ -210,7 +371,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn remove(&mut self, v: NonMaxUsize) -> Option<NonMaxUsize> {
+    fn remove(&mut self, v: tree::VertexId) -> Option<tree::VertexId> {
         match self {
             Self::None => {}
             Self::One(w) => {
@@ -233,7 +394,7 @@ impl BoundaryVertices {
         None
     }
 
-    fn add(&mut self, v: NonMaxUsize, left: bool) {
+    fn add(&mut self, v: tree::VertexId, left: bool) {
         if self.contains(v) {
             return;
         }
@@ -255,7 +416,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn contains(&self, v: NonMaxUsize) -> bool {
+    fn contains(&self, v: tree::VertexId) -> bool {
         match self {
             Self::None => false,
             Self::One(w) => *w == v,
@@ -263,19 +424,19 @@ impl BoundaryVertices {
         }
     }
 
-    fn left(&self) -> Option<usize> {
+    fn left(&self) -> Option<tree::VertexId> {
         match self {
             Self::None => None,
-            Self::One(v) => Some(v.get()),
-            Self::Two { left, .. } => Some(left.get()),
+            Self::One(v) => Some(*v),
+            Self::Two { left, .. } => Some(*left),
         }
     }
 
-    fn right(&self) -> Option<usize> {
+    fn right(&self) -> Option<tree::VertexId> {
         match self {
             Self::None => None,
-            Self::One(v) => Some(v.get()),
-            Self::Two { right, .. } => Some(right.get()),
+            Self::One(v) => Some(*v),
+            Self::Two { right, .. } => Some(*right),
         }
     }
 
@@ -315,10 +476,10 @@ impl BoundaryVertices {
     fn to_boundary(self) -> Boundary {
         match self {
             Self::None => Boundary::None,
-            Self::One(v) => Boundary::One(v.get()),
+            Self::One(v) => Boundary::One(v.index()),
             Self::Two { left, right } => Boundary::Two {
-                left: left.get(),
-                right: right.get(),
+                left: left.index(),
+                right: right.index(),
             },
         }
     }
@@ -335,57 +496,44 @@ fn shared(a: Boundary, b: Boundary) -> usize {
         })
 }
 
-/// A stable handle to a label attached with [`TopTree::attach`].
-///
-/// Unlike the underlying forest indices, a `LabelId` stays valid until the
-/// corresponding [`TopTree::detach`] call, even when other labels are removed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LabelId(pub usize);
-
-/// An opaque handle to a node of a top tree, valid only while the tree is not
-/// structurally modified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NodeId(usize);
-
 /// What a cluster node represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeData {
-    Edge(usize),
-    Label(usize),
+    Edge(tree::EdgeId),
+    Label(tree::LabelId),
     Internal,
 }
 
 /// A dynamic top tree over a forest of trees.
 ///
-/// `N` is the vertex key type, `S` the user supplied [`Summary`] and `W`/`V`
-/// the edge/label and vertex weights of the underlying [`Tree`].
-pub struct TopTree<N, L, S>
+/// `S` is the user-supplied [`Summary`] type.
+pub struct TopTree<S>
 where
     S: Summary,
 {
-    tree: Tree<N, L, usize, ()>,
-    nodes: Vec<Option<Cluster<S>>>,
-    free: Vec<usize>,
+    /// The underlying forest of trees, storing indices into the `nodes` vec of
+    /// clusters on edges and labels, of which one per vertex exists.
+    tree: tree::Tree<(), ClusterId, ClusterId>,
+    clusters: Clusters<S>,
     /// Whether each vertex is currently exposed, indexed by vertex index.
     exposed: BitVec,
 }
 
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary,
 {
     /// Creates an empty top tree.
     pub fn new() -> Self {
         Self {
-            tree: Tree::new(),
-            nodes: Vec::new(),
-            free: Vec::new(),
+            tree: tree::Tree::new(),
+            clusters: Clusters::new(),
             exposed: BitVec::new(),
         }
     }
 
     /// The underlying forest.
-    pub fn forest(&self) -> &Tree<N, L, usize> {
+    pub fn forest(&self) -> &Tree<(), ClusterId, ClusterId> {
         &self.tree
     }
 
@@ -400,37 +548,29 @@ where
     }
 }
 
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary,
-    N: Eq + Hash,
 {
-    /// Adds a vertex with the given key and weight and returns its index.
-    ///
-    /// Adding a key that is already present returns the existing index.
-    pub fn add_vertex(&mut self, key: N) -> usize {
-        let index = self.tree.add_node(key, ());
-        self.exposed.grow_to(index + 1);
+    /// Adds a vertex and returns its index.
+    pub fn add_vertex(&mut self) -> tree::VertexId {
+        let index = self.tree.add_node(());
+        self.exposed.grow_to(index.index() + 1);
         index
-    }
-
-    /// Returns the index of the vertex with the given key.
-    pub fn vertex_index(&self, key: &N) -> Option<usize> {
-        self.tree.node_index_of(key)
     }
 
     /// Links the trees containing `u` and `v` with a new tree edge of the
     /// given weight and returns the index of the new edge.
     ///
     /// `u` and `v` must be in different trees.
-    pub fn link(&mut self, u: usize, v: usize) -> usize {
+    pub fn link(&mut self, u: tree::VertexId, v: tree::VertexId) -> ClusterId {
         self.link_internal(u, v)
     }
 
     /// Cuts the tree edge connecting `u` and `v`, returning its weight.
     ///
     /// Returns `None` if there is no such edge.
-    pub fn cut(&mut self, u: usize, v: usize) -> Option<()> {
+    pub fn cut(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<()> {
         self.cut_internal(u, v)
     }
 
@@ -439,37 +579,29 @@ where
     ///
     /// Labels act as leaf edges that are not part of the spanning forest,
     /// e.g. non-tree edges in the underlying graph.
-    pub fn attach(&mut self, v: usize, label: L)
-    where
-        L: Eq + Hash,
-    {
-        self.attach_internal(v, label)
+    pub fn attach(&mut self, v: tree::VertexId) -> ClusterId {
+        self.attach_internal(v)
     }
 
     /// Removes the label identified by `label`, returning its weight.
     ///
     /// The handle is invalidated; all other [`LabelId`]s remain valid.
-    pub fn detach(&mut self, label: &L) -> Option<()>
-    where
-        L: Eq + Hash,
-    {
+    pub fn detach(&mut self, label: tree::LabelId) {
         self.detach_internal(label);
-        Some(())
     }
 }
 
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary,
-    L: Eq + Hash,
 {
     /// Mutates the summary of the live label identified by `key` and recomputes
     /// all of its ancestors. The label node itself is not re-linked, so the top
     /// tree's structure is unchanged.
-    pub fn update_label_summary(&mut self, key: &L, update: impl FnOnce(&mut S)) {
-        let node = *self.tree.label_weight(key).expect("label must exist");
+    pub fn update_label_summary(&mut self, label: tree::LabelId, update: impl FnOnce(&mut S)) {
+        let node = *self.tree.label_weight(label).expect("label must exist");
         assert!(
-            matches!(self.cl(node).data, ClusterData::Label(_)),
+            matches!(self.cl(node).data, ClusterData::Node(_)),
             "update_label_summary expects a label node"
         );
         update(&mut self.cl_mut(node).sum);
@@ -481,60 +613,59 @@ where
     }
 }
 
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary,
 {
     /// Exposes `u` and `v` and returns the resulting root cluster node.
-    pub fn expose_path_node(&mut self, u: usize, v: usize) -> Option<NodeId> {
+    pub fn expose_path_node(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<ClusterId> {
         self.expose_vertex(u);
-        self.expose_vertex(v).map(NodeId)
+        self.expose_vertex(v)
     }
 
     /// The summary of `node`.
-    pub fn node_summary(&self, node: NodeId) -> &S {
-        &self.cl(node.0).sum
+    pub fn node_summary(&self, node: ClusterId) -> &S {
+        &self.cl(node).sum
     }
 
     /// Whether `node` is a path cluster.
-    pub fn node_is_path(&self, node: NodeId) -> bool {
-        self.is_path(node.0)
+    pub fn node_is_path(&self, node: ClusterId) -> bool {
+        self.is_path(node)
     }
 
     /// The logical (flipped) boundary vertices of `node`.
-    pub fn node_boundary(&self, node: NodeId) -> Boundary {
-        self.cl(node.0).flipped_boundary_vertices().to_boundary()
+    pub fn node_boundary(&self, node: ClusterId) -> Boundary {
+        self.cl(node).flipped_boundary_vertices().to_boundary()
     }
 
     /// The logical children of an internal `node`.
-    pub fn node_children(&self, node: NodeId) -> Option<(NodeId, NodeId)> {
-        self.cl(node.0).children?;
-        let (left, right) = self.flipped_children(node.0);
-        Some((NodeId(left), NodeId(right)))
+    pub fn node_children(&self, node: ClusterId) -> Option<(ClusterId, ClusterId)> {
+        self.cl(node).children?;
+        Some(self.flipped_children(node))
     }
 
     /// The vertex shared by the two children of an internal `node`.
-    pub fn node_central(&self, node: NodeId) -> Option<usize> {
-        self.cl(node.0).children?;
-        let (left, right) = self.flipped_children(node.0);
+    pub fn node_central(&self, node: ClusterId) -> Option<usize> {
+        self.cl(node).children?;
+        let (left, right) = self.flipped_children(node);
         let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
         let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
         Some(shared(left_vertices, right_vertices))
     }
 
     /// What `node` represents.
-    pub fn node_leaf_data(&self, node: NodeId) -> NodeData {
-        match self.cl(node.0).data {
+    pub fn node_leaf_data(&self, node: ClusterId) -> NodeData {
+        match self.cl(node).data {
             ClusterData::Edge(edge) => NodeData::Edge(edge),
-            ClusterData::Label(index) => NodeData::Label(index),
+            ClusterData::Node(index) => NodeData::Label(index),
             ClusterData::Internal => NodeData::Internal,
         }
     }
 
     /// The key of the label represented by `node`, if it is a label leaf.
-    pub fn node_label_key(&self, node: NodeId) -> Option<&L> {
-        match self.cl(node.0).data {
-            ClusterData::Label(index) => self.tree.label_key(index),
+    pub fn node_label_key(&self, node: ClusterId) -> Option<tree::LabelId> {
+        match self.cl(node).data {
+            ClusterData::Node(index) => Some(index),
             _ => None,
         }
     }
@@ -542,12 +673,12 @@ where
     /// Pushes `node`'s pending lazy tag to its path children. This does not
     /// change the top tree's structure and is used by traversal code that
     /// needs up-to-date child summaries.
-    pub fn push_node_tag(&mut self, node: NodeId) {
-        self.push_tag(node.0);
+    pub fn push_node_tag(&mut self, node: ClusterId) {
+        self.push_tag(node);
     }
 }
 
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary + Clone,
 {
@@ -559,7 +690,7 @@ where
     /// vertex whose component already has two exposed vertices.
     ///
     /// Returns `None` if `v` has no incident edges or labels.
-    pub fn expose(&mut self, v: usize) -> Option<S> {
+    pub fn expose(&mut self, v: tree::VertexId) -> Option<S> {
         self.expose_vertex(v).map(|node| self.cl(node).sum.clone())
     }
 
@@ -569,14 +700,19 @@ where
     ///
     /// The path of the returned cluster is exactly the `u`-`v` path. Returns
     /// `None` unless `u` and `v` are both incident to an edge or label.
-    pub fn expose_path(&mut self, u: usize, v: usize) -> Option<S> {
+    pub fn expose_path(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<S> {
         self.expose_vertex(u);
         self.expose_vertex(v).map(|node| self.cl(node).sum.clone())
     }
 
     /// Applies a lazy tag to the path between `u` and `v` and returns the
     /// resulting summary.
-    pub fn expose_path_tagged(&mut self, u: usize, v: usize, tag: S::Tag) -> Option<S> {
+    pub fn expose_path_tagged(
+        &mut self,
+        u: tree::VertexId,
+        v: tree::VertexId,
+        tag: S::Tag,
+    ) -> Option<S> {
         let node = {
             self.expose_vertex(u);
             self.expose_vertex(v)
@@ -588,13 +724,13 @@ where
     }
 
     /// Removes the external boundary status from `v`.
-    pub fn deexpose(&mut self, v: usize) -> Option<S> {
+    pub fn deexpose(&mut self, v: tree::VertexId) -> Option<S> {
         self.deexpose_vertex(v)
             .map(|node| self.cl(node).sum.clone())
     }
 
     /// Returns whether `u` and `v` are in the same tree.
-    pub fn connected(&mut self, u: usize, v: usize) -> bool {
+    pub fn connected(&mut self, u: tree::VertexId, v: tree::VertexId) -> bool {
         if u == v {
             return true;
         }
@@ -611,7 +747,7 @@ where
     /// Returns the summary of the root cluster of the tree containing `v`.
     ///
     /// The boundaries of that root are the currently exposed vertices.
-    pub fn component_summary(&self, v: usize) -> Option<S> {
+    pub fn component_summary(&self, v: tree::VertexId) -> Option<S> {
         let leaf = self.incident_leaves(v).next()?;
         let mut node = leaf;
         while let Some(parent) = self.parent(node) {
@@ -621,7 +757,7 @@ where
     }
 }
 
-impl<N, L, S> Default for TopTree<N, L, S>
+impl<S> Default for TopTree<S>
 where
     S: Summary,
 {
@@ -631,69 +767,46 @@ where
 }
 
 /// Low level cluster tree operations.
-impl<N, L, S> TopTree<N, L, S>
+impl<S> TopTree<S>
 where
     S: Summary,
 {
     #[inline]
-    fn cl(&self, node: usize) -> &Cluster<S> {
-        self.nodes[node]
-            .as_ref()
-            .expect("top tree node must be live")
+    fn cl(&self, node: ClusterId) -> &Cluster<S> {
+        &self.clusters[node]
     }
 
     #[inline]
-    fn cl_mut(&mut self, node: usize) -> &mut Cluster<S> {
-        self.nodes[node]
-            .as_mut()
-            .expect("top tree node must be live")
-    }
-
-    fn alloc(&mut self, cluster: Cluster<S>) -> usize {
-        if let Some(index) = self.free.pop() {
-            self.nodes[index] = Some(cluster);
-            index
-        } else {
-            self.nodes.push(Some(cluster));
-            self.nodes.len() - 1
-        }
-    }
-
-    fn dealloc(&mut self, node: usize) {
-        self.nodes[node] = None;
-        self.free.push(node);
+    fn cl_mut(&mut self, node: ClusterId) -> &mut Cluster<S> {
+        &mut self.clusters[node]
     }
 
     #[inline]
-    fn parent(&self, node: usize) -> Option<usize> {
-        self.cl(node).parent.map(NonMaxUsize::get)
+    fn parent(&self, node: ClusterId) -> Option<ClusterId> {
+        self.cl(node).parent
     }
 
     #[inline]
-    fn set_parent(&mut self, node: usize, parent: Option<usize>) {
-        self.cl_mut(node).parent = parent.and_then(NonMaxUsize::new);
+    fn set_parent(&mut self, node: ClusterId, parent: Option<ClusterId>) {
+        self.cl_mut(node).parent = parent;
     }
 
-    fn is_left_child(&self, node: usize) -> Option<bool> {
+    fn is_left_child(&self, node: ClusterId) -> Option<bool> {
         let parent = self.parent(node)?;
         self.cl(parent)
             .children
-            .map(|children| children.left.get() == node)
+            .map(|children| children.left == node)
     }
 
     /// Returns the child of `node` on the given side.
     ///
     /// `left` refers to the logical (unflipped) orientation.
-    fn child(&self, node: usize, is_left: bool) -> Option<usize> {
+    fn child(&self, node: ClusterId, is_left: bool) -> Option<ClusterId> {
         let Children { left, right } = self.cl(node).children?;
-        if is_left {
-            Some(left.get())
-        } else {
-            Some(right.get())
-        }
+        if is_left { Some(left) } else { Some(right) }
     }
 
-    fn set_child(&mut self, node: usize, child: usize, is_left: bool) {
+    fn set_child(&mut self, node: ClusterId, child: ClusterId, is_left: bool) {
         let Some(Children {
             ref mut left,
             ref mut right,
@@ -702,25 +815,23 @@ where
             panic!("internal node must have children");
         };
 
-        unsafe {
-            if is_left {
-                *left = NonMaxUsize::new_unchecked(child);
-            } else {
-                *right = NonMaxUsize::new_unchecked(child);
-            }
+        if is_left {
+            *left = child;
+        } else {
+            *right = child;
         }
 
-        self.cl_mut(child).parent = NonMaxUsize::new(node);
+        self.cl_mut(child).parent = Some(node);
     }
 
     /// Returns the two children in logical (unflipped) order.
-    fn flipped_children(&self, node: usize) -> (usize, usize) {
+    fn flipped_children(&self, node: ClusterId) -> (ClusterId, ClusterId) {
         let cluster = self.cl(node);
         let Some(Children { left, right }) = cluster.children else {
             panic!("internal node must have children");
         };
 
-        let (left, right) = (left.get(), right.get());
+        let (left, right) = (left, right);
 
         if cluster.flipped {
             (right, left)
@@ -729,20 +840,20 @@ where
         }
     }
 
-    fn sibling(&self, node: usize) -> Option<usize> {
-        let parent = self.cl(node).parent?.get();
+    fn sibling(&self, node: ClusterId) -> Option<ClusterId> {
+        let parent = self.cl(node).parent?;
         let cluster = self.cl(parent);
 
-        let sibling = if cluster.children?.left.get() == node {
-            cluster.children?.right.get()
+        let sibling = if cluster.children?.left == node {
+            cluster.children?.right
         } else {
-            cluster.children?.left.get()
+            cluster.children?.left
         };
 
         Some(sibling)
     }
 
-    fn set_flipped(&mut self, node: usize, flipped: bool) {
+    fn set_flipped(&mut self, node: ClusterId, flipped: bool) {
         let cluster = self.cl_mut(node);
         if cluster.flipped != flipped {
             cluster.flipped = flipped;
@@ -750,13 +861,11 @@ where
         }
     }
 
-    fn toggle_flipped(&mut self, node: usize) {
+    fn toggle_flipped(&mut self, node: ClusterId) {
         self.set_flipped(node, !self.cl(node).flipped);
     }
 
-    fn add_boundary(&mut self, node: usize, vertex: usize) {
-        let v = unsafe { NonMaxUsize::new_unchecked(vertex) };
-
+    fn add_boundary(&mut self, node: ClusterId, vertex: tree::VertexId) {
         let (data, children) = {
             let cluster = self.cl(node);
             (cluster.data, cluster.children)
@@ -768,31 +877,32 @@ where
                 // (unflipped) frame, so compare against the physical endpoints.
                 let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
                 if left == vertex {
-                    self.cl_mut(node).boundary_vertices.add(v, true);
+                    self.cl_mut(node).boundary_vertices.add(vertex, true);
                 } else if right == vertex {
-                    self.cl_mut(node).boundary_vertices.add(v, false);
+                    self.cl_mut(node).boundary_vertices.add(vertex, false);
                 } else {
                     panic!("vertex must be an endpoint of the edge");
                 }
             }
-            ClusterData::Label(_) => {
-                self.cl_mut(node).boundary_vertices.add(v, false);
+            ClusterData::Node(_) => {
+                self.cl_mut(node).boundary_vertices.add(vertex, false);
             }
             ClusterData::Internal => {
                 let Children { left, right } = children.expect("internal node must have children");
-                let (left, right) = (left.get(), right.get());
-                let in_left = self.cl(left).boundary_vertices.contains(v);
-                let in_right = self.cl(right).boundary_vertices.contains(v);
+
+                let in_left = self.cl(left).boundary_vertices.contains(vertex);
+                let in_right = self.cl(right).boundary_vertices.contains(vertex);
+
                 if in_left && in_right {
                     // `vertex` is the central vertex. It sits on the side of the
                     // child that is a path cluster, because that child's outer
                     // boundary is the node's other boundary.
                     let is_left = !self.is_path(left);
-                    self.cl_mut(node).boundary_vertices.add(v, is_left);
+                    self.cl_mut(node).boundary_vertices.add(vertex, is_left);
                 } else if in_left {
-                    self.cl_mut(node).boundary_vertices.add(v, true);
+                    self.cl_mut(node).boundary_vertices.add(vertex, true);
                 } else if in_right {
-                    self.cl_mut(node).boundary_vertices.add(v, false);
+                    self.cl_mut(node).boundary_vertices.add(vertex, false);
                 } else {
                     panic!("vertex must be a boundary of one of the children");
                 }
@@ -800,24 +910,24 @@ where
         }
     }
 
-    fn is_path(&self, node: usize) -> bool {
+    fn is_path(&self, node: ClusterId) -> bool {
         self.cl(node).boundary_vertices.is_path()
     }
 
-    fn is_point(&self, node: usize) -> bool {
+    fn is_point(&self, node: ClusterId) -> bool {
         self.cl(node).boundary_vertices.is_point()
     }
 
-    fn num_path_children(&self, node: usize) -> usize {
+    fn num_path_children(&self, node: ClusterId) -> usize {
         let cluster = self.cl(node);
         if let Some(Children { left, right }) = cluster.children {
-            usize::from(self.is_path(left.get())) + usize::from(self.is_path(right.get()))
+            usize::from(self.is_path(left)) + usize::from(self.is_path(right))
         } else {
             0
         }
     }
 
-    fn has_middle_boundary(&self, node: usize) -> bool {
+    fn has_middle_boundary(&self, node: ClusterId) -> bool {
         if matches!(self.cl(node).boundary_vertices, BoundaryVertices::None) {
             return false;
         }
@@ -830,12 +940,12 @@ where
         }
     }
 
-    fn middle_boundary(&self, node: usize) -> Option<usize> {
+    fn middle_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         match self.cl(node).boundary_vertices {
             BoundaryVertices::None => None,
             BoundaryVertices::One(v) => {
                 if self.num_path_children(node) == 0 {
-                    Some(v.get())
+                    Some(v)
                 } else {
                     None
                 }
@@ -845,12 +955,12 @@ where
                     .cl(node)
                     .children
                     .expect("internal node must have children");
-                let (l, r) = (self.is_path(l.get()), self.is_path(r.get()));
+                let (l, r) = (self.is_path(l), self.is_path(r));
 
                 match (l, r) {
                     (true, true) => None,
-                    (true, false) => Some(right.get()),
-                    (false, true) => Some(left.get()),
+                    (true, false) => Some(right),
+                    (false, true) => Some(left),
                     (false, false) => None,
                 }
             }
@@ -859,33 +969,32 @@ where
 
     /// Returns the rightmost boundary vertex of `node`, or `None` if it has no boundary vertices.
     /// This is the rightmost vertex in the logical (unflipped) orientation of the cluster.
-    fn rightmost_boundary(&self, node: usize) -> Option<usize> {
+    fn rightmost_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         self.cl(node).boundary_vertices.right()
     }
 
     /// Returns the leftmost boundary vertex of `node`, or `None` if it has no boundary vertices.
     /// This is the leftmost vertex in the logical (unflipped) orientation of the cluster.
-    fn leftmost_boundary(&self, node: usize) -> Option<usize> {
+    fn leftmost_boundary(&self, node: ClusterId) -> Option<tree::VertexId> {
         self.cl(node).boundary_vertices.left()
     }
 
-    fn is_boundary_vertex(&self, vertex: usize) -> bool {
-        self.exposed.get(vertex) || self.tree.degree(vertex) >= 2
+    fn is_boundary_vertex(&self, vertex: tree::VertexId) -> bool {
+        self.exposed.get(vertex.index()) || self.tree.degree(vertex) >= 2
     }
 
-    fn has_left_boundary(&self, node: usize) -> bool {
+    fn has_left_boundary(&self, node: ClusterId) -> bool {
         match self.cl(node).data {
             ClusterData::Edge(edge) => {
                 let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
                 let endpoint = if self.cl(node).flipped { right } else { left };
                 self.is_boundary_vertex(endpoint)
             }
-            ClusterData::Label(label) => {
+            ClusterData::Node(label) => {
                 let vertex = self
                     .tree
-                    .label_index(label)
-                    .expect("label must exist")
-                    .node_id();
+                    .label_vertex(label)
+                    .expect("label vertex must exist");
                 self.is_boundary_vertex(vertex)
             }
             ClusterData::Internal => {
@@ -897,19 +1006,15 @@ where
         }
     }
 
-    fn has_right_boundary(&self, node: usize) -> bool {
+    fn has_right_boundary(&self, node: ClusterId) -> bool {
         match self.cl(node).data {
             ClusterData::Edge(edge) => {
                 let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
                 let endpoint = if self.cl(node).flipped { left } else { right };
                 self.is_boundary_vertex(endpoint)
             }
-            ClusterData::Label(label) => {
-                let vertex = self
-                    .tree
-                    .label_index(label)
-                    .expect("label must exist")
-                    .node_id();
+            ClusterData::Node(label) => {
+                let vertex = self.tree.label_vertex(label).expect("label must exist");
                 self.is_boundary_vertex(vertex)
             }
             ClusterData::Internal => {
@@ -921,11 +1026,11 @@ where
         }
     }
 
-    fn set_exposed(&mut self, vertex: usize, exposed: bool) {
-        self.exposed.set(vertex, exposed);
+    fn set_exposed(&mut self, vertex: tree::VertexId, exposed: bool) {
+        self.exposed.set(vertex.index(), exposed);
     }
 
-    fn incident_leaves(&self, vertex: usize) -> impl Iterator<Item = usize> + '_ {
+    fn incident_leaves(&self, vertex: tree::VertexId) -> impl Iterator<Item = ClusterId> + '_ {
         let edges = self.tree.incident_edge_weights(vertex);
 
         let labels = self.tree.incident_label_weights(vertex);
@@ -933,13 +1038,13 @@ where
         edges.chain(labels).cloned()
     }
 
-    fn has_at_most_one_incident_element(&self, vertex: usize) -> bool {
+    fn has_at_most_one_incident_element(&self, vertex: tree::VertexId) -> bool {
         self.tree.incident_edge_indices(vertex).count()
             + self.tree.incident_label_indices(vertex).count()
             <= 1
     }
 
-    fn apply_tag(&mut self, node: usize, tag: &S::Tag) {
+    fn apply_tag(&mut self, node: ClusterId, tag: &S::Tag) {
         S::apply(&mut self.cl_mut(node).sum, tag);
         S::compose(&mut self.cl_mut(node).tag, tag);
     }
@@ -948,14 +1053,14 @@ where
     /// exactly the children whose cluster path is contained in the path of
     /// `node`. Raked (point) children contain no path edges and are left
     /// untouched.
-    fn push_tag(&mut self, node: usize) {
+    fn push_tag(&mut self, node: ClusterId) {
         let tag = std::mem::take(&mut self.cl_mut(node).tag);
         if !self.is_path(node) {
             return;
         }
 
         if let Some(Children { left, right }) = self.cl(node).children {
-            for child in [left, right].map(NonMaxUsize::get) {
+            for child in [left, right] {
                 if self.is_path(child) {
                     S::apply(&mut self.cl_mut(child).sum, &tag);
                     S::compose(&mut self.cl_mut(child).tag, &tag);
@@ -964,7 +1069,7 @@ where
         }
     }
 
-    fn push_flip(&mut self, node: usize) {
+    fn push_flip(&mut self, node: ClusterId) {
         self.push_tag(node);
         if self.cl(node).flipped {
             let cluster = self.cl_mut(node);
@@ -973,14 +1078,14 @@ where
             cluster.boundary_vertices.flip();
 
             if let Some(Children { left, right }) = cluster.children {
-                self.toggle_flipped(left.get());
-                self.toggle_flipped(right.get());
+                self.toggle_flipped(left);
+                self.toggle_flipped(right);
             }
         }
     }
 
     /// Recomputes the summary of an internal node from its children.
-    fn recompute(&mut self, node: usize) {
+    fn recompute(&mut self, node: ClusterId) {
         self.push_tag(node);
         let (left, right) = self.flipped_children(node);
         let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
@@ -998,28 +1103,26 @@ where
 
     fn recompute_new_internal(
         &mut self,
-        left: usize,
-        right: usize,
+        left: ClusterId,
+        right: ClusterId,
         boundary_vertices: BoundaryVertices,
     ) -> Cluster<S> {
         let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
         let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
         let parent_vertices = boundary_vertices.to_boundary();
+
         let ctx = MergeContext {
             left_boundary: left_vertices,
             right_boundary: right_vertices,
             boundary: parent_vertices,
             central: shared(left_vertices, right_vertices),
         };
+
         let sum = S::combine(&self.cl(left).sum, &self.cl(right).sum, &ctx);
+
         Cluster {
             parent: None,
-            children: unsafe {
-                Some(Children {
-                    left: NonMaxUsize::new_unchecked(left),
-                    right: NonMaxUsize::new_unchecked(right),
-                })
-            },
+            children: Some(Children { left, right }),
             flipped: false,
             boundary_vertices,
             data: ClusterData::Internal,
@@ -1031,12 +1134,12 @@ where
     /// Creates a new internal node from `left` and `right`, linking them.
     fn new_internal(
         &mut self,
-        left: usize,
-        right: usize,
+        left: ClusterId,
+        right: ClusterId,
         boundary_vertices: BoundaryVertices,
-    ) -> usize {
+    ) -> ClusterId {
         let cluster = self.recompute_new_internal(left, right, boundary_vertices);
-        let node = self.alloc(cluster);
+        let node = self.clusters.push(cluster);
         self.set_parent(left, Some(node));
         self.set_parent(right, Some(node));
         node
@@ -1044,11 +1147,11 @@ where
 
     fn new_leaf_edge(
         &mut self,
-        edge: usize,
-        u: usize,
-        v: usize,
+        edge: tree::EdgeId,
+        u: tree::VertexId,
+        v: tree::VertexId,
         boundary_vertices: BoundaryVertices,
-    ) -> usize {
+    ) -> ClusterId {
         let sum = S::tree_edge(u, v);
         let cluster = Cluster {
             parent: None,
@@ -1060,22 +1163,27 @@ where
             tag: S::Tag::default(),
         };
 
-        self.alloc(cluster)
+        self.clusters.push(cluster)
     }
 
-    fn new_leaf_label(&mut self, label: usize, vertex: usize, boundary: BoundaryVertices) -> usize {
+    fn new_leaf_label(
+        &mut self,
+        label: tree::LabelId,
+        vertex: tree::VertexId,
+        boundary: BoundaryVertices,
+    ) -> ClusterId {
         let sum = S::label(vertex);
         let cluster = Cluster {
             parent: None,
             children: None,
             flipped: false,
             boundary_vertices: boundary,
-            data: ClusterData::Label(label),
+            data: ClusterData::Node(label),
             sum,
             tag: S::Tag::default(),
         };
 
-        self.alloc(cluster)
+        self.clusters.push(cluster)
     }
 
     /// Rotates `node` up, above its parent and grandparent.
@@ -1084,7 +1192,7 @@ where
     /// i.e. its children must share a vertex, and it must not have more than 2 boundary vertices.
     ///
     /// Returns `None` if `node` has no grandparent.
-    fn rotate_up(&mut self, node: usize) -> Option<()> {
+    fn rotate_up(&mut self, node: ClusterId) -> Option<()> {
         let sibling = self.sibling(node)?;
         let parent = self.parent(node)?;
         let uncle = self.sibling(parent)?;
@@ -1182,7 +1290,7 @@ where
 
     /// Performs one splay step at `node`, returning the next node to splay if
     /// the splay is not finished.
-    fn splay_step(&mut self, node: usize) -> Option<usize> {
+    fn splay_step(&mut self, node: ClusterId) -> Option<ClusterId> {
         let mut node = node;
         loop {
             let parent = self.parent(node)?;
@@ -1226,20 +1334,20 @@ where
         }
     }
 
-    fn semi_splay(&mut self, node: usize) {
+    fn semi_splay(&mut self, node: ClusterId) {
         let mut node = node;
         while let Some(next) = self.splay_step(node) {
             node = next;
         }
     }
 
-    fn full_splay(&mut self, node: usize) {
+    fn full_splay(&mut self, node: ClusterId) {
         while let Some(next) = self.splay_step(node) {
             self.splay_step(next);
         }
     }
 
-    fn find_root(&mut self, vertex: usize) -> Option<usize> {
+    fn find_root(&self, vertex: tree::VertexId) -> Option<ClusterId> {
         let mut node = self.incident_leaves(vertex).next()?;
 
         while let Some(parent) = self.parent(node) {
@@ -1250,34 +1358,31 @@ where
     }
 
     /// Finds the least common ancestor of all leaves incident to `vertex`.
-    fn find_consuming_node(&mut self, vertex: usize) -> Option<usize> {
-        let node = self.incident_leaves(vertex).next()?;
-        self.semi_splay(node);
+    fn find_consuming_node(&mut self, vertex: tree::VertexId) -> Option<ClusterId> {
+        let clid = self.incident_leaves(vertex).next()?;
+        self.semi_splay(clid);
 
         // if the vertex has exactly one incident leaf, then the consuming node is the incident leaf.
         if self.has_at_most_one_incident_element(vertex) {
-            return Some(node);
+            return Some(clid);
         }
 
-        let (left_endpoint, right_endpoint) = match self.cl(node).data {
+        let (left_endpoint, right_endpoint) = match self.cl(clid).data {
             ClusterData::Edge(edge) => self.tree.edge_endpoints(edge).expect("edge must exist"),
-            ClusterData::Label(label) => {
-                let v = self
-                    .tree
-                    .label_index(label)
-                    .expect("label must exist")
-                    .node_id();
-                (v, v)
+            ClusterData::Node(node) => {
+                let vertex = self.tree.label_vertex(node).expect("vertex must exist");
+
+                (vertex, vertex)
             }
             ClusterData::Internal => unreachable!("consuming node must be a leaf"),
         };
 
-        let flip = self.cl(node).flipped;
+        let flip = self.cl(clid).flipped;
         let mut is_left = (left_endpoint == vertex) != flip;
         let mut is_right = (right_endpoint == vertex) != flip;
         let mut is_middle = false;
         let mut last_middle_node = None;
-        let mut node = node;
+        let mut node = clid;
 
         while let Some(parent) = self.parent(node) {
             let is_left_child = self
@@ -1305,7 +1410,7 @@ where
     /// Increments the boundary count from `node` up to the root, flipping
     /// children as needed so that the exposed vertex ends up on the correct
     /// side.
-    fn expose_prepared(&mut self, node: usize, vertex: usize) -> usize {
+    fn expose_prepared(&mut self, node: ClusterId, vertex: tree::VertexId) -> ClusterId {
         let mut left = false;
         let mut right = false;
         let mut node = node;
@@ -1334,7 +1439,7 @@ where
     }
 
     /// There must be at most one exposed vertex in the tree containing `consuming_node`.
-    fn prepare_expose(&mut self, consuming_node: usize) -> usize {
+    fn prepare_expose(&mut self, consuming_node: ClusterId) -> ClusterId {
         let mut consuming_node = consuming_node;
         let mut node = consuming_node;
 
@@ -1426,10 +1531,10 @@ where
     }
 
     /// Exposes `vertex`, returning the root node of its top tree.
-    fn expose_vertex(&mut self, vertex: usize) -> Option<usize> {
+    fn expose_vertex(&mut self, vertex: tree::VertexId) -> Option<ClusterId> {
         // Exposing an already exposed vertex is a no-op: its boundary is
         // already present on the path to the root.
-        if self.exposed.get(vertex) {
+        if self.exposed.get(vertex.index()) {
             return self.find_root(vertex);
         }
 
@@ -1448,10 +1553,10 @@ where
     }
 
     /// Removes the exposed status of `vertex`, returning the root node.
-    fn deexpose_vertex(&mut self, vertex: usize) -> Option<usize> {
+    fn deexpose_vertex(&mut self, vertex: tree::VertexId) -> Option<ClusterId> {
         // Deexposing a vertex that is not exposed is a no-op, matching the
         // idempotent behaviour of `expose_vertex`.
-        if !self.exposed.get(vertex) {
+        if !self.exposed.get(vertex.index()) {
             return None;
         }
 
@@ -1477,13 +1582,10 @@ where
         let mut root = None;
         for &current in path.iter() {
             let before = self.cl(current).boundary_vertices;
-            let _contains = self
-                .cl_mut(current)
-                .boundary_vertices
-                .remove(unsafe { NonMaxUsize::new_unchecked(vertex) });
+            let _contains = self.cl_mut(current).boundary_vertices.remove(vertex);
             assert!(
                 _contains.is_some(),
-                "boundary of node {current} must contain vertex {vertex}, but was {before:?} \
+                "boundary of node {current:?} must contain vertex {vertex:?}, but was {before:?} \
                  (consuming={consuming:?})"
             );
 
@@ -1496,16 +1598,17 @@ where
         root
     }
 
-    fn delete_all_ancestors(&mut self, node: usize) {
+    fn delete_all_ancestors(&mut self, node: ClusterId) {
         if let Some(parent) = self.parent(node) {
             let sibling = self.sibling(node).expect("node with parent has sibling");
             self.delete_all_ancestors(parent);
             self.set_parent(sibling, None);
         }
-        self.dealloc(node);
+
+        self.clusters.remove(node);
     }
 
-    fn link_internal(&mut self, u: usize, v: usize) -> usize {
+    fn link_internal(&mut self, u: tree::VertexId, v: tree::VertexId) -> ClusterId {
         let mut root_u = self.expose_vertex(u);
         if let Some(node) = root_u
             && self.has_left_boundary(node)
@@ -1522,40 +1625,74 @@ where
         }
         self.set_exposed(v, false);
 
-        let leaf = self.new_leaf_edge(self.tree.edge_count(), u, v, unsafe {
-            BoundaryVertices::from_left_and_right(
-                root_u.map(|_| NonMaxUsize::new_unchecked(u)),
-                root_v.map(|_| NonMaxUsize::new_unchecked(v)),
-            )
+        let leaf = self.clusters.push_with(|id| {
+            let edge = self.tree.add_edge(u, v, id);
+
+            let sum = S::tree_edge(u, v);
+            let boundary_vertices =
+                BoundaryVertices::from_left_and_right(root_u.map(|_| u), root_v.map(|_| v));
+
+            let cluster = Cluster {
+                parent: None,
+                children: None,
+                flipped: false,
+                boundary_vertices,
+                data: ClusterData::Edge(edge),
+                sum,
+                tag: S::Tag::default(),
+            };
+
+            cluster
         });
-        let edge = self.tree.add_edge(u, v, leaf);
 
         let mut node = leaf;
         if let Some(root_u) = root_u.take() {
             node = self.new_internal(
                 root_u,
                 node,
-                BoundaryVertices::from_option(
-                    root_v.map(|_| unsafe { NonMaxUsize::new_unchecked(v) }),
-                ),
+                BoundaryVertices::from_option(root_v.map(|_| v)),
             );
         }
         if let Some(root_v) = root_v.take() {
             node = self.new_internal(
                 node,
                 root_v,
-                BoundaryVertices::from_option(
-                    root_u.map(|_| unsafe { NonMaxUsize::new_unchecked(u) }),
-                ),
+                BoundaryVertices::from_option(root_u.map(|_| u)),
             );
         }
 
-        let _ = node;
-        edge
+        node
     }
 
-    fn cut_internal(&mut self, u: usize, v: usize) -> Option<()> {
-        let edge = self.tree.edge_index_of(u, v)?;
+    fn swap_edge(
+        clusters: &mut Clusters<S>,
+        tree: &Tree<(), ClusterId, ClusterId>,
+        swap: SwapResult<tree::EdgeId>,
+    ) {
+        if let SwapResult::Some { current, .. } = swap {
+            let clid = *tree.edge_weight(current).expect("edge must exist");
+            clusters[clid].data = ClusterData::Edge(current);
+        }
+    }
+
+    fn swap_label(
+        clusters: &mut Clusters<S>,
+        tree: &Tree<(), ClusterId, ClusterId>,
+        swap: SwapResult<tree::LabelId>,
+    ) {
+        if let SwapResult::Some { current, .. } = swap {
+            let clid = *tree.label_weight(current).expect("label must exist");
+            clusters[clid].data = ClusterData::Node(current);
+        }
+    }
+
+    fn swap_vertex(exposed: &mut BitVec, swap: SwapResult<tree::VertexId>) {
+        if let SwapResult::Some { current, prev } = swap {
+            exposed.swap(current.index(), prev.index());
+        }
+    }
+
+    fn cut_edge(&mut self, u: tree::VertexId, v: tree::VertexId, edge: tree::EdgeId) {
         let leaf = *self.tree.edge_weight(edge).expect("edge must exist");
 
         self.full_splay(leaf);
@@ -1563,23 +1700,55 @@ where
 
         let (_weight, swap) = self.tree.remove_edge(edge).expect("edge must exist");
 
-        if let SwapResult::Some { current, .. } = swap {
-            let idx = self.tree.edge_index(current).unwrap().weight;
-            self.cl_mut(idx).data = ClusterData::Edge(current);
-        }
+        Self::swap_edge(&mut self.clusters, &self.tree, swap);
 
         self.set_exposed(u, true);
         self.set_exposed(v, true);
+
         self.deexpose_vertex(u);
         self.deexpose_vertex(v);
+    }
 
+    fn cut_internal(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<()> {
+        let edge = self.tree.edge_index_of(u, v)?;
+
+        self.cut_edge(u, v, edge);
         Some(())
     }
 
-    fn attach_internal(&mut self, vertex: usize, label: L)
-    where
-        L: Eq + Hash,
-    {
+    fn remove_node(&mut self, vertex: tree::VertexId) -> Option<SwapResult<tree::VertexId>> {
+        loop {
+            let Some(label) = self.tree.incident_label_ids(vertex).next() else {
+                break;
+            };
+
+            self.detach_internal(label);
+        }
+
+        loop {
+            let Some(edge) = self.tree.incident_edge_ids(vertex).next() else {
+                break;
+            };
+
+            let (u, v) = self.tree.edge_endpoints(edge).expect("edge must exist");
+            self.cut_edge(u, v, edge);
+        }
+
+        if let Some((_, swap @ SwapResult::Some { .. })) = self.tree.remove_node(
+            vertex,
+            &mut self.clusters,
+            |clusters, tree, swap| Self::swap_edge(clusters, tree, swap),
+            |clusters, tree, swap| Self::swap_label(clusters, tree, swap),
+        ) {
+            Self::swap_vertex(&mut self.exposed, swap);
+
+            Some(swap)
+        } else {
+            None
+        }
+    }
+
+    fn attach_internal(&mut self, vertex: tree::VertexId) -> ClusterId {
         let root_v = self.expose_vertex(vertex);
         if let Some(node) = root_v
             && self.has_left_boundary(node)
@@ -1588,23 +1757,33 @@ where
         }
         self.set_exposed(vertex, false);
 
-        let leaf = self.new_leaf_label(self.tree.label_count(), vertex, unsafe {
-            BoundaryVertices::from_option(root_v.map(|_| NonMaxUsize::new_unchecked(vertex)))
-        });
+        let leaf = self.clusters.push_with(|id| {
+            let label = self.tree.add_label(vertex, id);
 
-        self.tree.add_label(vertex, label, leaf);
+            let sum = S::label(vertex);
+            let boundary_vertices = BoundaryVertices::from_option(root_v.map(|_| vertex));
+            Cluster {
+                parent: None,
+                children: None,
+                flipped: false,
+                boundary_vertices,
+                data: ClusterData::Node(label),
+                sum,
+                tag: S::Tag::default(),
+            }
+        });
 
         if let Some(root_v) = root_v {
             self.new_internal(root_v, leaf, BoundaryVertices::None);
         }
+
+        leaf
     }
 
-    fn detach_internal(&mut self, label: &L)
-    where
-        L: Eq + Hash,
-    {
-        let vertex = self.tree.label(label).expect("label must exist").node_id();
+    fn detach_internal(&mut self, label: tree::LabelId) {
+        let vertex = self.tree.label_vertex(label).expect("label must exist");
         let label_node = *self.tree.label_weight(label).expect("label must exist");
+
         // Expose the vertex first so that removing the label undoes the
         // boundary the exposure added. This keeps `num_boundary` consistent
         // even though it is maintained relative to each cluster's parent
@@ -1623,16 +1802,13 @@ where
                 "splayed label parent must be root"
             );
             self.set_parent(sibling, None);
-            self.dealloc(parent);
+            self.clusters.remove(parent);
         }
-        self.dealloc(label_node);
+        self.clusters.remove(label_node);
 
         let (_weight, swap) = self.tree.remove_label(label).expect("label must exist");
 
-        if let SwapResult::Some { current, .. } = swap {
-            let idx = self.tree.label_index(current).unwrap().weight;
-            self.cl_mut(idx).data = ClusterData::Label(current);
-        }
+        Self::swap_label(&mut self.clusters, &self.tree, swap);
 
         let _ = self.deexpose_vertex(vertex);
     }

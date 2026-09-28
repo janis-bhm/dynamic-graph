@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::*;
 
@@ -216,35 +216,35 @@ impl Summary for DirectedPath {
 }
 
 struct Harness<S: Summary> {
-    tt: TopTree<u32, u32, S>,
-    adj: BTreeMap<usize, BTreeSet<usize>>,
+    tt: TopTree<S>,
+    adj: HashMap<tree::VertexId, HashSet<tree::VertexId>>,
 }
 
 impl<S: Summary> Harness<S> {
     fn new(n: usize) -> Self {
         let mut tt = TopTree::new();
-        let mut adj = BTreeMap::new();
+        let mut adj = HashMap::new();
         for i in 0..n {
-            tt.add_vertex(i as u32);
-            adj.insert(i, BTreeSet::new());
+            let id = tt.add_vertex();
+            adj.insert(id, Default::default());
         }
         Self { tt, adj }
     }
 
-    fn link(&mut self, u: usize, v: usize) {
+    fn link(&mut self, u: tree::VertexId, v: tree::VertexId) {
         self.tt.link(u, v);
         self.adj.get_mut(&u).unwrap().insert(v);
         self.adj.get_mut(&v).unwrap().insert(u);
     }
 
-    fn cut(&mut self, u: usize, v: usize) {
+    fn cut(&mut self, u: tree::VertexId, v: tree::VertexId) {
         self.tt.cut(u, v);
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
 
-    fn components(&self) -> Vec<Vec<usize>> {
-        let mut seen = BTreeSet::new();
+    fn components(&self) -> Vec<Vec<tree::VertexId>> {
+        let mut seen = HashSet::new();
         let mut out = Vec::new();
         for &start in self.adj.keys() {
             if !seen.insert(start) {
@@ -265,7 +265,7 @@ impl<S: Summary> Harness<S> {
         out
     }
 
-    fn component_edges(&self, v: usize) -> Vec<(usize, usize)> {
+    fn component_edges(&self, v: tree::VertexId) -> Vec<(tree::VertexId, tree::VertexId)> {
         let comp = self
             .components()
             .into_iter()
@@ -285,35 +285,31 @@ impl<S: Summary> Harness<S> {
     }
 }
 
-fn live_roots<S: Summary>(tt: &TopTree<u32, u32, S>) -> Vec<usize> {
-    tt.nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, node)| node.as_ref().filter(|c| c.parent.is_none()).map(|_| i))
-        .collect()
+fn live_roots<S: Summary>(tt: &TopTree<S>) -> Vec<ClusterId> {
+    let clusters = (0..tt.tree.nodes.len())
+        .map(|i| tt.tree.vertex_id_from_index(i))
+        .filter_map(|l| tt.find_root(l))
+        .collect::<HashSet<_>>();
+    clusters.into_iter().collect()
 }
 
 fn collect_leaves<S: Summary>(
-    tt: &TopTree<u32, u32, S>,
-    node: usize,
-    leaves: &mut Vec<usize>,
+    tt: &TopTree<S>,
+    node: ClusterId,
+    leaves: &mut Vec<ClusterId>,
     nodes: &mut usize,
 ) {
     *nodes += 1;
     let cluster = tt.cl(node);
     if let Some(Children { left, right }) = cluster.children {
+        assert_eq!(tt.cl(left).parent, Some(node), "left child parent mismatch");
         assert_eq!(
-            tt.cl(left.get()).parent.map(NonMaxUsize::get),
-            Some(node),
-            "left child parent mismatch"
-        );
-        assert_eq!(
-            tt.cl(right.get()).parent.map(NonMaxUsize::get),
+            tt.cl(right).parent,
             Some(node),
             "right child parent mismatch"
         );
-        collect_leaves(tt, left.get(), leaves, nodes);
-        collect_leaves(tt, right.get(), leaves, nodes);
+        collect_leaves(tt, left, leaves, nodes);
+        collect_leaves(tt, right, leaves, nodes);
     } else {
         leaves.push(node);
     }
@@ -324,9 +320,9 @@ fn collect_leaves<S: Summary>(
 /// right boundary. At most two slots are ever populated.
 #[derive(Clone, Copy, Debug, Default)]
 struct Boundaries {
-    left: Option<usize>,
-    mid: Option<usize>,
-    right: Option<usize>,
+    left: Option<tree::VertexId>,
+    mid: Option<tree::VertexId>,
+    right: Option<tree::VertexId>,
 }
 
 impl Boundaries {
@@ -336,15 +332,15 @@ impl Boundaries {
             + usize::from(self.right.is_some())
     }
 
-    fn leftmost(&self) -> Option<usize> {
+    fn leftmost(&self) -> Option<tree::VertexId> {
         self.left.or(self.mid)
     }
 
-    fn rightmost(&self) -> Option<usize> {
+    fn rightmost(&self) -> Option<tree::VertexId> {
         self.right.or(self.mid)
     }
 
-    fn set(&self) -> BTreeSet<usize> {
+    fn set(&self) -> BTreeSet<tree::VertexId> {
         [self.left, self.mid, self.right]
             .into_iter()
             .flatten()
@@ -362,26 +358,21 @@ impl Boundaries {
 
 /// Counts the leaves below `node` incident to `vertex`.
 fn count_incident_leaves<S: Summary>(
-    tt: &TopTree<u32, u32, S>,
-    node: usize,
-    vertex: usize,
+    tt: &TopTree<S>,
+    node: ClusterId,
+    vertex: tree::VertexId,
 ) -> usize {
     match tt.cl(node).data {
         ClusterData::Edge(edge) => {
             let (u, v) = tt.tree.edge_endpoints(edge).expect("edge must exist");
             usize::from(u == vertex || v == vertex)
         }
-        ClusterData::Label(label) => usize::from(
-            tt.tree
-                .label_index(label)
-                .expect("label must exist")
-                .node_id()
-                == vertex,
-        ),
+        ClusterData::Node(label) => {
+            usize::from(tt.tree.label_vertex(label).expect("label must exist") == vertex)
+        }
         ClusterData::Internal => {
             let Children { left, right } = tt.cl(node).children.expect("internal has children");
-            count_incident_leaves(tt, left.get(), vertex)
-                + count_incident_leaves(tt, right.get(), vertex)
+            count_incident_leaves(tt, left, vertex) + count_incident_leaves(tt, right, vertex)
         }
     }
 }
@@ -400,13 +391,13 @@ fn count_incident_leaves<S: Summary>(
 /// The invariant checked for every internal node is: the rightmost boundary of
 /// the materialized left child and the leftmost boundary of the materialized
 /// right child must both exist and equal the central vertex.
-fn check_node_boundaries<S: Summary>(tt: &TopTree<u32, u32, S>, node: usize) -> Boundaries {
+fn check_node_boundaries<S: Summary>(tt: &TopTree<S>, node: ClusterId) -> Boundaries {
     check_node_boundaries_in(tt, node, false)
 }
 
 fn check_node_boundaries_in<S: Summary>(
-    tt: &TopTree<u32, u32, S>,
-    node: usize,
+    tt: &TopTree<S>,
+    node: ClusterId,
     parity: bool,
 ) -> Boundaries {
     let cluster = tt.cl(node);
@@ -430,12 +421,8 @@ fn check_node_boundaries_in<S: Summary>(
             }
             c
         }
-        ClusterData::Label(label) => {
-            let vertex = tt
-                .tree
-                .label_index(label)
-                .expect("label must exist")
-                .node_id();
+        ClusterData::Node(label) => {
+            let vertex = tt.tree.label_vertex(label).expect("label must exist");
             let mut c = Boundaries::default();
             if tt.is_boundary_vertex(vertex) {
                 c.mid = Some(vertex);
@@ -446,9 +433,9 @@ fn check_node_boundaries_in<S: Summary>(
             let Children { left, right } = cluster.children.expect("internal has children");
             // Materialized left/right child of the node.
             let (materialized_left, materialized_right) = if effective_flip {
-                (right.get(), left.get())
+                (right, left)
             } else {
-                (left.get(), right.get())
+                (left, right)
             };
 
             let bl = check_node_boundaries_in(tt, materialized_left, effective_flip);
@@ -457,15 +444,15 @@ fn check_node_boundaries_in<S: Summary>(
             assert_eq!(
                 bl.rightmost(),
                 br.leftmost(),
-                "children of internal node {node} must share a central boundary vertex"
+                "children of internal node {node:?} must share a central boundary vertex"
             );
             let central = bl.rightmost().unwrap_or_else(|| {
-                panic!("left child must have a rightmost boundary at node {node}")
+                panic!("left child must have a rightmost boundary at node {node:?}")
             });
 
             let mut c = Boundaries::default();
             let inside = count_incident_leaves(tt, node, central);
-            if tt.exposed.get(central) || inside < tt.tree.degree(central) {
+            if tt.exposed.get(central.index()) || inside < tt.tree.degree(central) {
                 c.mid = Some(central);
             }
             if bl.leftmost() != bl.rightmost() {
@@ -488,15 +475,15 @@ fn check_node_boundaries_in<S: Summary>(
     assert_eq!(
         expected.count() as u8,
         stored.count(),
-        "boundary count mismatch at node {node} ({:?})",
+        "boundary count mismatch at node {node:?} ({:?})",
         cluster.data
     );
 
-    let expected_set: BTreeSet<usize> = expected.set();
-    let stored_set: BTreeSet<usize> = match stored {
+    let expected_set: BTreeSet<tree::VertexId> = expected.set();
+    let stored_set: BTreeSet<tree::VertexId> = match stored {
         BoundaryVertices::None => BTreeSet::new(),
-        BoundaryVertices::One(v) => BTreeSet::from([v.get()]),
-        BoundaryVertices::Two { left, right } => BTreeSet::from([left.get(), right.get()]),
+        BoundaryVertices::One(v) => BTreeSet::from([v]),
+        BoundaryVertices::Two { left, right } => BTreeSet::from([left, right]),
     };
     assert_eq!(
         expected_set, stored_set,
@@ -511,12 +498,12 @@ fn check_node_boundaries_in<S: Summary>(
         .as_slice()
     {
         [] => BoundaryVertices::None,
-        [v] => BoundaryVertices::One(NonMaxUsize::new(*v).unwrap()),
+        [v] => BoundaryVertices::One(*v),
         [l, r] => BoundaryVertices::Two {
-            left: NonMaxUsize::new(*l).unwrap(),
-            right: NonMaxUsize::new(*r).unwrap(),
+            left: *l,
+            right: *r,
         },
-        other => panic!("more than two boundary vertices {other:?} at node {node}"),
+        other => panic!("more than two boundary vertices {other:?} at node {node:?}"),
     };
     assert_eq!(
         stored, mapped,
@@ -538,11 +525,11 @@ fn check_node_boundaries_in<S: Summary>(
 fn check_invariants<S: Summary>(h: &Harness<S>) {
     let tt = &h.tt;
 
-    for (i, node) in tt.nodes.iter().enumerate() {
+    for (i, node) in tt.clusters.iter().enumerate() {
         if let Some(cluster) = node
             && let Some(parent) = cluster.parent.map(NonMaxUsize::get)
         {
-            let p = tt.nodes[parent].as_ref().expect("parent must be live");
+            let p = tt.clusters[parent].as_ref().expect("parent must be live");
             let is_child = p
                 .children
                 .is_some_and(|c| c.left.get() == i || c.right.get() == i);
@@ -583,7 +570,7 @@ fn check_invariants<S: Summary>(h: &Harness<S>) {
                 ClusterData::Edge(edge) => {
                     assert!(covered_edges.insert(edge), "edge leaf appears twice");
                 }
-                ClusterData::Label(label) => {
+                ClusterData::Node(label) => {
                     assert!(covered_labels.insert(label), "label leaf appears twice");
                 }
                 ClusterData::Internal => panic!("leaf cannot be internal"),
@@ -591,7 +578,7 @@ fn check_invariants<S: Summary>(h: &Harness<S>) {
         }
     }
 
-    let live_nodes = tt.nodes.iter().filter(|n| n.is_some()).count();
+    let live_nodes = tt.clusters.iter().filter(|n| n.is_some()).count();
     assert_eq!(total_nodes, live_nodes, "all live nodes must be reachable");
 
     assert_eq!(
@@ -698,7 +685,7 @@ fn update_label_summary_recomputes_ancestors_without_relinking() {
 
     let roots_before = live_roots(&h.tt);
     let structure_before: Vec<_> =
-        h.tt.nodes
+        h.tt.clusters
             .iter()
             .map(|node| {
                 node.as_ref()
@@ -710,7 +697,7 @@ fn update_label_summary_recomputes_ancestors_without_relinking() {
 
     assert_eq!(live_roots(&h.tt), roots_before);
     let structure_after: Vec<_> =
-        h.tt.nodes
+        h.tt.clusters
             .iter()
             .map(|node| {
                 node.as_ref()

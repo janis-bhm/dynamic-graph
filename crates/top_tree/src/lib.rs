@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```
-//! use top_tree::{MergeContext, Summary, TopTree};
+//! use top_tree::{MergeContext, Summary, TopTree, VertexId};
 //!
 //! /// The number of edges on the cluster path.
 //! #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,11 +50,11 @@
 //! impl Summary for PathLen {
 //!     type Tag = ();
 //!
-//!     fn tree_edge(_u: usize, _v: usize) -> Self {
+//!     fn tree_edge(_u: VertexId, _v: VertexId) -> Self {
 //!         PathLen { len: 1 }
 //!     }
 //!
-//!     fn label(_v: usize) -> Self {
+//!     fn label(_v: VertexId) -> Self {
 //!         PathLen { len: 0 }
 //!     }
 //!
@@ -70,10 +70,10 @@
 //!     }
 //! }
 //!
-//! let mut top_tree = TopTree::<u32, u32, PathLen>::new();
-//! let a = top_tree.add_vertex(0);
-//! let b = top_tree.add_vertex(1);
-//! let c = top_tree.add_vertex(2);
+//! let mut top_tree = TopTree::<PathLen>::new();
+//! let a = top_tree.add_vertex();
+//! let b = top_tree.add_vertex();
+//! let c = top_tree.add_vertex();
 //!
 //! top_tree.link(a, b);
 //! top_tree.link(b, c);
@@ -87,8 +87,8 @@ mod top_tree;
 mod tree;
 
 pub use summary::{Boundary, MergeContext, Summary};
-pub use top_tree::{LabelId, NodeData, NodeId, TopTree};
-pub use tree::{Edge, Label, Node, Tree};
+pub use top_tree::{ClusterId, NodeData, TopTree};
+pub use tree::{Edge, EdgeId, Label, LabelId, Node, Tree, VertexId};
 
 macro_rules! impl_nonmax_type {
     ($($vis:vis struct $name:ident($int:ident is $pat:pat)),* $(,)?) => {
@@ -174,4 +174,6 @@ macro_rules! impl_nonmax_type {
 impl_nonmax_type!(
     pub struct NonMaxUsize(usize is 0..=0xFFFFFFFFFFFFFFFE),
     pub struct NonMaxIsize(isize is 0..=0x7FFFFFFFFFFFFFFE),
+    pub struct NonMaxU32(u32 is 0..=0xFFFFFFFE),
+    pub struct NonMaxI32(i32 is 0..=0x7FFFFFFE)
 );
