@@ -1,6 +1,5 @@
 use super::{DynamicGraph, EdgeId, EdgeKind, VertexId};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use top_tree::VertexId as TopVertexId;
 
 /// A deliberately straightforward multigraph used as the test oracle.
 ///
@@ -232,12 +231,26 @@ impl Naive {
     }
 }
 
-fn normalized_pair(u: usize, v: usize) -> (usize, usize) {
+fn normalized_pair<T: Ord>(u: T, v: T) -> (T, T) {
     if u < v { (u, v) } else { (v, u) }
 }
 
-fn normalized_top_pair(u: TopVertexId, v: TopVertexId) -> (TopVertexId, TopVertexId) {
-    if u < v { (u, v) } else { (v, u) }
+fn assert_live_vertex_cluster(graph: &DynamicGraph, cluster: top_tree::ClusterId, context: &str) {
+    let public = graph
+        .vertex_of_cluster
+        .get(cluster.index())
+        .copied()
+        .flatten()
+        .unwrap_or_else(|| panic!("{context}: cluster {cluster:?} is not a live vertex cluster"));
+    assert_eq!(
+        graph.vertices.get(public.index()),
+        Some(&Some(cluster)),
+        "{context}: cluster {cluster:?} does not map back from public handle {public:?}"
+    );
+    assert!(
+        graph.fb.cluster_vertex(cluster).is_some(),
+        "{context}: cluster {cluster:?} is not a live vertex label cluster in the FindBridge forest"
+    );
 }
 
 fn label_sizes(labels: &[usize]) -> Vec<usize> {
@@ -303,6 +316,13 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         let Some(record) = record else {
             continue;
         };
+        for cluster in [record.endpoints.0, record.endpoints.1] {
+            assert_live_vertex_cluster(
+                graph,
+                cluster,
+                &format!("{context}: live edge {index} endpoint"),
+            );
+        }
         match record.kind {
             EdgeKind::Tree => {
                 tree_records += 1;
@@ -314,7 +334,7 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
                 assert_eq!(
                     graph
                         .tree_edge_at
-                        .get(&normalized_top_pair(record.endpoints.0, record.endpoints.1,)),
+                        .get(&normalized_pair(record.endpoints.0, record.endpoints.1)),
                     Some(&EdgeId(index)),
                     "{context}: tree edge {index} is not indexed by its endpoint pair"
                 );
@@ -355,6 +375,8 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         "{context}: tree_edge_at length mismatch"
     );
     for (&pair, &edge) in &graph.tree_edge_at {
+        assert_live_vertex_cluster(graph, pair.0, &format!("{context}: tree_edge_at key"));
+        assert_live_vertex_cluster(graph, pair.1, &format!("{context}: tree_edge_at key"));
         let record = graph
             .edges
             .get(edge.index())
@@ -366,7 +388,7 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         );
         assert_eq!(
             pair,
-            normalized_top_pair(record.endpoints.0, record.endpoints.1),
+            normalized_pair(record.endpoints.0, record.endpoints.1),
             "{context}: tree_edge_at key does not match edge {edge:?}"
         );
     }
@@ -392,11 +414,6 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
     }
 
     assert_eq!(
-        graph.internal_to_vertex.len(),
-        graph.vertex_count(),
-        "{context}: internal-to-public vertex map length mismatch"
-    );
-    assert_eq!(
         graph
             .vertices
             .iter()
@@ -405,25 +422,26 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
         graph.vertex_count(),
         "{context}: live public vertex count"
     );
-    for (public_index, internal_vertex) in graph.vertices.iter().enumerate() {
-        if let Some(internal_vertex) = internal_vertex {
+    for (public_index, cluster) in graph.vertices.iter().enumerate() {
+        if let Some(cluster) = cluster {
             assert_eq!(
-                graph.internal_to_vertex.get(internal_vertex.index()),
-                Some(&VertexId(public_index)),
-                "{context}: vertex {public_index} does not round-trip through internal index {internal_vertex:?}"
+                graph.vertex_of_cluster.get(cluster.index()),
+                Some(&Some(VertexId(public_index))),
+                "{context}: vertex {public_index} does not round-trip through cluster {cluster:?}"
             );
         }
     }
-    for (internal_index, &public_vertex) in graph.internal_to_vertex.iter().enumerate() {
-        assert_eq!(
-            graph
-                .vertices
-                .get(public_vertex.index())
-                .and_then(|internal| *internal)
-                .map(|internal| internal.index()),
-            Some(internal_index),
-            "{context}: internal vertex {internal_index} does not round-trip"
-        );
+    for (cluster_index, public) in graph.vertex_of_cluster.iter().enumerate() {
+        if let Some(public) = public {
+            let Some(Some(cluster)) = graph.vertices.get(public.index()) else {
+                panic!("{context}: cluster {cluster_index} maps to a non-live public vertex");
+            };
+            assert_eq!(
+                cluster.index(),
+                cluster_index,
+                "{context}: public vertex {public:?} maps to a different cluster"
+            );
+        }
     }
 }
 
@@ -896,7 +914,7 @@ fn delete_parallel_edge_keeps_bridge_status() {
 }
 
 #[test]
-fn remove_vertex_deletes_incident_edges_and_remaps_survivors() {
+fn remove_vertex_deletes_incident_edges_and_keeps_survivors() {
     let (mut graph, mut naive, vertices) = new_graph(4);
     let removed = vertices[0];
     let a = vertices[1];
@@ -926,8 +944,8 @@ fn remove_vertex_deletes_incident_edges_and_remaps_survivors() {
     assert_eq!(added.index(), naive_added);
     assert_ne!(added, removed, "removed public vertex ids are never reused");
 
-    assert_internal_invariants(&graph, "remove vertex replacement/remapping");
-    assert_matches_naive(&mut graph, &naive, "remove vertex replacement/remapping");
+    assert_internal_invariants(&graph, "remove vertex replacement/survivors");
+    assert_matches_naive(&mut graph, &naive, "remove vertex replacement/survivors");
     assert_eq!(graph.component_size(isolated), 1);
 
     assert!(graph.remove_vertex(added));
@@ -935,6 +953,76 @@ fn remove_vertex_deletes_incident_edges_and_remaps_survivors() {
     assert!(!graph.connected(added, added));
     assert_internal_invariants(&graph, "remove last vertex");
     assert_matches_naive(&mut graph, &naive, "remove last vertex");
+}
+
+#[test]
+fn remove_then_add_vertex_keeps_handles_valid() {
+    let (mut graph, mut naive, vertices) = new_graph(3);
+    let left = vertices[0];
+    let middle = vertices[1];
+    let right = vertices[2];
+
+    let incident = insert_both(&mut graph, &mut naive, middle, left);
+    let surviving = insert_both(&mut graph, &mut naive, left, right);
+
+    let middle_cluster =
+        graph.vertices[middle.index()].expect("a live vertex handle has a cluster");
+    assert!(graph.remove_vertex(middle));
+    assert_eq!(
+        graph.vertex_of_cluster.get(middle_cluster.index()),
+        Some(&None),
+        "removal must clear the inverse cluster entry"
+    );
+    assert_eq!(
+        graph.vertices.get(middle.index()),
+        Some(&None),
+        "removal must tombstone the public vertex handle"
+    );
+    assert!(naive.remove_vertex(middle.index()));
+    assert_eq!(graph.edge_endpoints(incident), None);
+    assert_endpoints_match(&graph, surviving, left, right);
+
+    // The new label cluster may reuse a slot freed by removal; which slot the
+    // forest free list returns is an implementation detail, so do not assert it.
+    let added = graph.add_vertex();
+    let naive_added = naive.add_vertex();
+    assert_eq!(added.index(), naive_added);
+    assert_ne!(added, middle, "removed public vertex ids are never reused");
+
+    assert!(!graph.remove_vertex(middle));
+    assert!(!graph.connected(middle, added));
+    assert_eq!(graph.component_size(middle), 0);
+    assert_eq!(graph.find_bridge(middle), None);
+    assert_eq!(graph.insert_edge(middle, added), None);
+
+    let added_edge = insert_both(&mut graph, &mut naive, added, left);
+    assert_endpoints_match(&graph, added_edge, added, left);
+    assert_eq!(
+        graph.component_size(added) as usize,
+        naive.component_size(added.index()),
+        "new vertex component size matches the Naive oracle"
+    );
+    assert_returned_separating_bridge(
+        &naive,
+        added.index(),
+        right.index(),
+        graph.find_bridge_between(added, right),
+    );
+    assert_eq!(
+        graph.two_edge_connected(added, right),
+        naive.two_edge_connected(added.index(), right.index()),
+        "new vertex two-edge connectivity matches the Naive oracle"
+    );
+
+    assert_internal_invariants(
+        &graph,
+        "remove-then-add vertex handle and cluster-slot reuse",
+    );
+    assert_matches_naive(
+        &mut graph,
+        &naive,
+        "remove-then-add vertex handle and cluster-slot reuse",
+    );
 }
 
 #[test]

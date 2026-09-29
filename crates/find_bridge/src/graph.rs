@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use top_tree::VertexId as TopVertexId;
+use top_tree::{ClusterId, VertexId as TopVertexId};
 
 use crate::cover_level::{FindBridge, Level, UserLabel};
 
@@ -50,7 +50,7 @@ enum EdgeKind {
 
 #[derive(Clone, Copy, Debug)]
 struct EdgeRecord {
-    endpoints: (TopVertexId, TopVertexId),
+    endpoints: (ClusterId, ClusterId),
     level: i32,
     kind: EdgeKind,
 }
@@ -65,6 +65,14 @@ struct EdgeRecord {
 /// spanning forest and edge levels. Removing a vertex deletes each incident
 /// edge through the normal deletion path before removing the forest vertex.
 ///
+/// Public vertex handles and edge endpoints are translated through each
+/// vertex's stable label-cluster ID, so endpoint IDs need no remapping, the
+/// reverse table is never `swap_remove`d, and `tree_edge_at` is never rebuilt.
+/// Incident edges are still deleted through `delete_edge`, whose delete/recover
+/// path may promote a surviving non-tree edge and change its level and labels.
+/// After those deletions, the removed handle is tombstoned and its inverse
+/// cluster entry is cleared.
+///
 /// # Vertex-count limit
 ///
 /// The fixed dense level cap is 32, so this structure is only guaranteed for
@@ -75,15 +83,21 @@ struct EdgeRecord {
 /// invariant used to guarantee a replacement edge may fail.
 pub struct DynamicGraph {
     fb: FindBridge,
-    /// Public handles are append-only; removed handles become tombstones and
-    /// are never reused. `VertexId.0 -> FindBridge`'s internal vertex id.
-    vertices: Vec<Option<TopVertexId>>,
-    /// `FindBridge`'s internal vertex index -> public handle.
-    internal_to_vertex: Vec<VertexId>,
+    /// `VertexId.0 -> the vertex's stable label cluster`. Public handles are
+    /// append-only; a removed handle becomes a `None` tombstone and is never
+    /// reused.
+    vertices: Vec<Option<ClusterId>>,
+    /// `ClusterId::index() -> VertexId` for live vertex label clusters.
+    ///
+    /// A freed vertex cluster slot may later be reused by an edge or internal
+    /// cluster; those never write here, and the slot is cleared to `None` when
+    /// the owning vertex is removed. Only read it for clusters known to be live
+    /// vertex label clusters.
+    vertex_of_cluster: Vec<Option<VertexId>>,
     /// `EdgeId.0 -> live edge record`; deleted edge handles are never reused.
     edges: Vec<Option<EdgeRecord>>,
-    /// Normalized internal endpoint pair -> the live tree-edge handle.
-    tree_edge_at: BTreeMap<(TopVertexId, TopVertexId), EdgeId>,
+    /// Normalized endpoint cluster pair -> the live tree-edge handle.
+    tree_edge_at: BTreeMap<(ClusterId, ClusterId), EdgeId>,
     /// Each live non-tree label -> the graph edge that owns it.
     label_to_edge: BTreeMap<UserLabel, EdgeId>,
     /// Highest supported cover level, also used by the paper for tree edges.
@@ -106,7 +120,7 @@ impl DynamicGraph {
         Self {
             fb: FindBridge::new(),
             vertices: Vec::new(),
-            internal_to_vertex: Vec::new(),
+            vertex_of_cluster: Vec::new(),
             edges: Vec::new(),
             tree_edge_at: BTreeMap::new(),
             label_to_edge: BTreeMap::new(),
@@ -124,9 +138,15 @@ impl DynamicGraph {
         );
         let id = VertexId(self.vertices.len());
         let internal = self.fb.add_vertex();
-        debug_assert_eq!(internal.index(), self.internal_to_vertex.len());
-        self.vertices.push(Some(internal));
-        self.internal_to_vertex.push(id);
+        let cluster = self
+            .fb
+            .vertex_cluster(internal)
+            .expect("every live vertex has a structural label cluster");
+        self.vertices.push(Some(cluster));
+        if self.vertex_of_cluster.len() <= cluster.index() {
+            self.vertex_of_cluster.resize(cluster.index() + 1, None);
+        }
+        self.vertex_of_cluster[cluster.index()] = Some(id);
         self.live_vertices += 1;
         id
     }
@@ -148,9 +168,10 @@ impl DynamicGraph {
     /// so replacement-edge search and level recovery run as usual. Removed
     /// public vertex handles are never reused.
     pub fn remove_vertex(&mut self, vertex: VertexId) -> bool {
-        let Some(internal) = self.vertices.get(vertex.0).copied().flatten() else {
+        let Some(cluster) = self.cluster(vertex) else {
             return false;
         };
+        let internal = self.internal(cluster);
 
         let incident_edges = self
             .edges
@@ -158,9 +179,7 @@ impl DynamicGraph {
             .enumerate()
             .filter_map(|(index, record)| {
                 record
-                    .filter(|record| {
-                        record.endpoints.0 == internal || record.endpoints.1 == internal
-                    })
+                    .filter(|record| record.endpoints.0 == cluster || record.endpoints.1 == cluster)
                     .map(|_| EdgeId(index))
             })
             .collect::<Vec<_>>();
@@ -171,46 +190,13 @@ impl DynamicGraph {
             );
         }
 
-        let swap = self
-            .fb
-            .remove_vertex(internal)
-            .expect("the internal vertex remains live after deleting its edges");
+        assert!(
+            self.fb.remove_vertex(internal),
+            "the internal vertex remains live after deleting its edges"
+        );
         self.vertices[vertex.0] = None;
-        let removed = self.internal_to_vertex.swap_remove(internal.index());
-        assert_eq!(removed, vertex, "internal vertex mapping must round-trip");
+        self.vertex_of_cluster[cluster.index()] = None;
         self.live_vertices -= 1;
-
-        if let top_tree::SwapResult::Some { prev, current } = swap {
-            debug_assert_eq!(current.index(), internal.index());
-            debug_assert_eq!(prev.index(), self.internal_to_vertex.len());
-            let moved_public = self.internal_to_vertex[internal.index()];
-            self.vertices[moved_public.0] = Some(current);
-
-            for record in self.edges.iter_mut().flatten() {
-                for endpoint in [&mut record.endpoints.0, &mut record.endpoints.1] {
-                    if *endpoint == prev {
-                        *endpoint = current;
-                    }
-                }
-            }
-        }
-
-        self.tree_edge_at.clear();
-        for (index, record) in self.edges.iter().enumerate() {
-            if let Some(EdgeRecord {
-                endpoints,
-                kind: EdgeKind::Tree,
-                ..
-            }) = record
-            {
-                assert!(
-                    self.tree_edge_at
-                        .insert(norm(endpoints.0, endpoints.1), EdgeId(index))
-                        .is_none(),
-                    "a forest cannot contain parallel tree edges"
-                );
-            }
-        }
 
         true
     }
@@ -222,20 +208,21 @@ impl DynamicGraph {
     /// becomes a tree edge. An edge whose endpoints are already connected
     /// becomes a level-0 non-tree edge that covers their tree path.
     pub fn insert_edge(&mut self, u: VertexId, v: VertexId) -> Option<EdgeId> {
-        let a = self.vertices.get(u.0).copied().flatten()?;
-        let b = self.vertices.get(v.0).copied().flatten()?;
-        if a == b {
+        let ca = self.cluster(u)?;
+        let cb = self.cluster(v)?;
+        if ca == cb {
             return None;
         }
+        let (a, b) = self.resolve(ca, cb);
 
         let edge = EdgeId(self.edges.len());
         self.edges.push(None);
 
         if !self.fb.connected(a, b) {
             self.fb.link(a, b);
-            let _ = self.tree_edge_at.insert(norm(a, b), edge);
+            let _ = self.tree_edge_at.insert(norm(ca, cb), edge);
             self.edges[edge.0] = Some(EdgeRecord {
-                endpoints: (a, b),
+                endpoints: (ca, cb),
                 level: self.l_max,
                 kind: EdgeKind::Tree,
             });
@@ -244,7 +231,7 @@ impl DynamicGraph {
             let (label1, label2) = self.add_edge_labels(edge, a, b, level);
             self.fb.cover(a, b, level);
             self.edges[edge.0] = Some(EdgeRecord {
-                endpoints: (a, b),
+                endpoints: (ca, cb),
                 level: 0,
                 kind: EdgeKind::NonTree { label1, label2 },
             });
@@ -264,7 +251,8 @@ impl DynamicGraph {
         let Some(mut record) = self.edges.get(e.0).and_then(Option::as_ref).copied() else {
             return false;
         };
-        let (mut v, mut w) = record.endpoints;
+        let (cu, cw) = record.endpoints;
+        let (v, w) = self.resolve(cu, cw);
         let mut alpha = record.level;
 
         // In the paper l_max identifies a tree edge. Here it is also the
@@ -273,7 +261,7 @@ impl DynamicGraph {
         if matches!(record.kind, EdgeKind::Tree) {
             if self.fb.cover_level_between(v, w) == -1 {
                 let _ = self.fb.cut(v, w);
-                let _ = self.tree_edge_at.remove(&norm(v, w));
+                let _ = self.tree_edge_at.remove(&norm(cu, cw));
                 self.edges[e.0] = None;
                 self.live_edges -= 1;
                 return true;
@@ -283,7 +271,6 @@ impl DynamicGraph {
             record = *self.edges[e.0]
                 .as_ref()
                 .expect("Swap keeps the deleted edge live as a non-tree edge");
-            (v, w) = record.endpoints;
             // Paper Appendix A, Delete line 30: for a tree edge the original
             // level is l_max, so use the cover level that Swap turned it into.
             alpha = record.level;
@@ -297,7 +284,7 @@ impl DynamicGraph {
         let level = Level::new(alpha).expect("a non-tree edge has a supported cover level");
         self.fb.uncover(v, w, level);
         for i in (0..=alpha).rev() {
-            self.recover(w, v, i);
+            self.recover(cw, cu, i);
         }
 
         self.edges[e.0] = None;
@@ -309,49 +296,62 @@ impl DynamicGraph {
     /// or deleted edge handle.
     pub fn edge_endpoints(&self, e: EdgeId) -> Option<(VertexId, VertexId)> {
         let record = self.edges.get(e.0)?.as_ref()?;
-        let u = *self.internal_to_vertex.get(record.endpoints.0.index())?;
-        let v = *self.internal_to_vertex.get(record.endpoints.1.index())?;
+        let u = self
+            .vertex_of_cluster
+            .get(record.endpoints.0.index())
+            .copied()
+            .flatten()?;
+        let v = self
+            .vertex_of_cluster
+            .get(record.endpoints.1.index())
+            .copied()
+            .flatten()?;
         Some((u, v))
     }
 
     /// Returns whether two valid vertices are connected; invalid handles
     /// return `false`.
     pub fn connected(&mut self, u: VertexId, v: VertexId) -> bool {
-        let (Some(a), Some(b)) = (self.internal_vertex(u), self.internal_vertex(v)) else {
+        let (Some(ca), Some(cb)) = (self.cluster(u), self.cluster(v)) else {
             return false;
         };
+        let (a, b) = self.resolve(ca, cb);
         self.fb.connected(a, b)
     }
 
     /// Returns any bridge in `v`'s connected component, if one exists.
     pub fn find_bridge(&mut self, v: VertexId) -> Option<EdgeId> {
-        let internal = self.internal_vertex(v)?;
+        let cluster = self.cluster(v)?;
+        let internal = self.internal(cluster);
         let edge = self.fb.find_bridge(internal)?;
-        self.tree_edge_at.get(&norm(edge.0, edge.1)).copied()
+        self.graph_edge_of(edge)
     }
 
     /// Returns any bridge on the `u`-`v` path, if one exists.
     pub fn find_bridge_between(&mut self, u: VertexId, v: VertexId) -> Option<EdgeId> {
-        let (a, b) = (self.internal_vertex(u)?, self.internal_vertex(v)?);
+        let (ca, cb) = (self.cluster(u)?, self.cluster(v)?);
+        let (a, b) = self.resolve(ca, cb);
         let edge = self.fb.find_bridge_between(a, b)?;
-        self.tree_edge_at.get(&norm(edge.0, edge.1)).copied()
+        self.graph_edge_of(edge)
     }
 
     /// Returns the number of vertices in `v`'s connected component, or zero
     /// for an invalid handle.
     pub fn component_size(&mut self, v: VertexId) -> u64 {
-        let Some(internal) = self.internal_vertex(v) else {
+        let Some(cluster) = self.cluster(v) else {
             return 0;
         };
+        let internal = self.internal(cluster);
         self.fb.find_size(internal, internal, -1)
     }
 
     /// Returns the number of vertices in `v`'s two-edge-connected component,
     /// or zero for an invalid handle.
     pub fn two_edge_component_size(&mut self, v: VertexId) -> u64 {
-        let Some(internal) = self.internal_vertex(v) else {
+        let Some(cluster) = self.cluster(v) else {
             return 0;
         };
+        let internal = self.internal(cluster);
         self.fb.find_size(internal, internal, 0)
     }
 
@@ -359,14 +359,39 @@ impl DynamicGraph {
     /// two-edge-connected to itself; invalid or disconnected handles return
     /// `false`.
     pub fn two_edge_connected(&mut self, u: VertexId, v: VertexId) -> bool {
-        let (Some(a), Some(b)) = (self.internal_vertex(u), self.internal_vertex(v)) else {
+        let (Some(ca), Some(cb)) = (self.cluster(u), self.cluster(v)) else {
             return false;
         };
+        let (a, b) = self.resolve(ca, cb);
         self.fb.connected(a, b) && self.fb.cover_level_between(a, b) >= 0
     }
 
-    fn internal_vertex(&self, vertex: VertexId) -> Option<TopVertexId> {
+    /// The stable cluster of a live public vertex handle.
+    fn cluster(&self, vertex: VertexId) -> Option<ClusterId> {
         self.vertices.get(vertex.0).copied().flatten()
+    }
+
+    /// The current internal handle of a live vertex cluster.
+    ///
+    /// `top_tree::VertexId`s are compacted by vertex removals, so they are
+    /// resolved here at the `FindBridge` boundary and never stored in
+    /// `DynamicGraph`.
+    fn internal(&self, cluster: ClusterId) -> TopVertexId {
+        self.fb
+            .cluster_vertex(cluster)
+            .expect("a live vertex owns a label cluster")
+    }
+
+    /// Both internal handles of a pair of live vertex clusters.
+    fn resolve(&self, a: ClusterId, b: ClusterId) -> (TopVertexId, TopVertexId) {
+        (self.internal(a), self.internal(b))
+    }
+
+    /// The live graph edge whose forest edge is `edge` (a `FindBridge` result).
+    fn graph_edge_of(&self, edge: (TopVertexId, TopVertexId)) -> Option<EdgeId> {
+        let a = self.fb.vertex_cluster(edge.0)?;
+        let b = self.fb.vertex_cluster(edge.1)?;
+        self.tree_edge_at.get(&norm(a, b)).copied()
     }
 
     fn add_edge_labels(
@@ -396,17 +421,19 @@ impl DynamicGraph {
         let record = *self.edges[edge.0]
             .as_ref()
             .expect("Swap is called for a live tree edge");
-        let (v, w) = record.endpoints;
+        let (cu, cw) = record.endpoints;
+        let (v, w) = self.resolve(cu, cw);
         let alpha = self.fb.cover_level_between(v, w);
         debug_assert!(alpha >= 0 && alpha <= self.l_max);
 
         let _ = self.fb.cut(v, w);
-        let _ = self.tree_edge_at.remove(&norm(v, w));
-        let replacement = self.find_replacement(v, w, alpha);
+        let _ = self.tree_edge_at.remove(&norm(cu, cw));
+        let replacement = self.find_replacement(cu, cw, alpha);
         let replacement_record = *self.edges[replacement.0]
             .as_ref()
             .expect("FindReplacement returns a live edge");
-        let (x, y) = replacement_record.endpoints;
+        let (cx, cy) = replacement_record.endpoints;
+        let (x, y) = self.resolve(cx, cy);
         let (replacement_label1, replacement_label2) = match replacement_record.kind {
             EdgeKind::NonTree { label1, label2 } => (label1, label2),
             EdgeKind::Tree => unreachable!("only labelled non-tree edges replace a tree edge"),
@@ -414,9 +441,9 @@ impl DynamicGraph {
 
         self.remove_edge_labels(replacement_label1, replacement_label2);
         self.fb.link(x, y);
-        let _ = self.tree_edge_at.insert(norm(x, y), replacement);
+        let _ = self.tree_edge_at.insert(norm(cx, cy), replacement);
         self.edges[replacement.0] = Some(EdgeRecord {
-            endpoints: (x, y),
+            endpoints: (cx, cy),
             level: self.l_max,
             kind: EdgeKind::Tree,
         });
@@ -424,7 +451,7 @@ impl DynamicGraph {
         let level = Level::new(alpha).expect("a covered tree edge has a supported level");
         let (label1, label2) = self.add_edge_labels(edge, v, w, level);
         self.edges[edge.0] = Some(EdgeRecord {
-            endpoints: (v, w),
+            endpoints: (cu, cw),
             level: alpha,
             kind: EdgeKind::NonTree { label1, label2 },
         });
@@ -432,9 +459,10 @@ impl DynamicGraph {
     }
 
     /// Appendix A's `FindReplacement` searches the smaller side after a cut.
-    fn find_replacement(&mut self, v: TopVertexId, w: TopVertexId, i: i32) -> EdgeId {
-        let size_v = self.fb.find_size(v, v, i);
-        let size_w = self.fb.find_size(w, w, i);
+    fn find_replacement(&mut self, v: ClusterId, w: ClusterId, i: i32) -> EdgeId {
+        let (internal_v, internal_w) = self.resolve(v, w);
+        let size_v = self.fb.find_size(internal_v, internal_v, i);
+        let size_w = self.fb.find_size(internal_w, internal_w, i);
         if size_v <= size_w {
             self.recover_phase(v, v, i, size_v)
         } else {
@@ -447,24 +475,20 @@ impl DynamicGraph {
 
     /// Appendix A's `Recover`: scan both orientations of a path with half its
     /// level-`i` size as the promotion threshold.
-    fn recover(&mut self, v: TopVertexId, w: TopVertexId, i: i32) {
-        let size = self.fb.find_size(v, w, i) / 2;
+    fn recover(&mut self, v: ClusterId, w: ClusterId, i: i32) {
+        let (internal_v, internal_w) = self.resolve(v, w);
+        let size = self.fb.find_size(internal_v, internal_w, i) / 2;
         let _ = self.recover_phase(v, w, i, size);
         let _ = self.recover_phase(w, v, i, size);
     }
 
     /// Appendix A's `RecoverPhase`: promote eligible labelled edges or return
     /// a non-tree edge crossing the cut currently being repaired.
-    fn recover_phase(
-        &mut self,
-        v: TopVertexId,
-        w: TopVertexId,
-        i: i32,
-        size: u64,
-    ) -> Option<EdgeId> {
+    fn recover_phase(&mut self, v: ClusterId, w: ClusterId, i: i32, size: u64) -> Option<EdgeId> {
         let level = Level::new(i).expect("RecoverPhase uses a supported level");
+        let (internal_v, internal_w) = self.resolve(v, w);
         loop {
-            let label = self.fb.find_first_label(v, w, level)?;
+            let label = self.fb.find_first_label(internal_v, internal_w, level)?;
             let edge = *self
                 .label_to_edge
                 .get(&label)
@@ -472,7 +496,8 @@ impl DynamicGraph {
             let record = *self.edges[edge.0]
                 .as_ref()
                 .expect("a live label belongs to a live edge");
-            let (q, r) = record.endpoints;
+            let (cq, cr) = record.endpoints;
+            let (q, r) = self.resolve(cq, cr);
 
             if !self.fb.connected(q, r) {
                 return Some(edge);
@@ -489,7 +514,7 @@ impl DynamicGraph {
                     Level::new(next_level).expect("the promotion guard keeps the level in range");
                 let (new_label1, new_label2) = self.add_edge_labels(edge, q, r, promoted);
                 self.edges[edge.0] = Some(EdgeRecord {
-                    endpoints: (q, r),
+                    endpoints: (cq, cr),
                     level: next_level,
                     kind: EdgeKind::NonTree {
                         label1: new_label1,
@@ -505,7 +530,7 @@ impl DynamicGraph {
     }
 }
 
-fn norm(a: TopVertexId, b: TopVertexId) -> (TopVertexId, TopVertexId) {
+fn norm(a: ClusterId, b: ClusterId) -> (ClusterId, ClusterId) {
     if a < b { (a, b) } else { (b, a) }
 }
 

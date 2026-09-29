@@ -911,23 +911,37 @@ impl FindBridge {
         index
     }
 
+    /// The stable cluster representing `vertex`, or `None` if `vertex` is stale.
+    ///
+    /// Every live vertex owns exactly one top-tree label leaf, and its
+    /// [`top_tree::ClusterId`] does not change when other vertices are removed.
+    pub fn vertex_cluster(&self, vertex: top_tree::VertexId) -> Option<top_tree::ClusterId> {
+        self.top_tree.first_label(vertex)
+    }
+
+    /// The current `top_tree::VertexId` of the vertex represented by `cluster`.
+    ///
+    /// This re-resolves the unstable internal handle after a vertex removal; it is
+    /// the inverse of [`FindBridge::vertex_cluster`] for a live vertex.
+    pub fn cluster_vertex(&self, cluster: top_tree::ClusterId) -> Option<top_tree::VertexId> {
+        self.top_tree.cluster_vertex(cluster)
+    }
+
     /// Removes an isolated-in-the-forest vertex, its structural label leaf,
     /// and all user labels attached to it.
     ///
-    /// If the underlying vertex storage compacts another vertex into this
-    /// vertex's slot, the returned [`top_tree::SwapResult`] describes that
-    /// handle remapping; callers holding the moved handle should apply
-    /// [`top_tree::VertexId::swap`]. Returns `None` for a stale vertex handle.
+    /// Returns whether `vertex` was live. Callers holding a stable
+    /// [`top_tree::ClusterId`] should re-resolve it with
+    /// [`FindBridge::cluster_vertex`] instead of applying a swap.
     ///
     /// # Panics
     ///
     /// Panics if a live vertex has any incident forest edge. Graph-level
     /// callers should first delete its incident graph edges.
-    pub fn remove_vertex(
-        &mut self,
-        vertex: top_tree::VertexId,
-    ) -> Option<top_tree::SwapResult<top_tree::VertexId>> {
-        let cluster = self.top_tree.first_label(vertex)?;
+    pub fn remove_vertex(&mut self, vertex: top_tree::VertexId) -> bool {
+        let Some(cluster) = self.top_tree.first_label(vertex) else {
+            return false;
+        };
 
         assert_eq!(
             self.top_tree.forest().incident_edge_indices(vertex).count(),
@@ -945,12 +959,12 @@ impl FindBridge {
             self.labels.remove(&label);
         }
 
-        let swap = self
+        let _ = self
             .top_tree
             .remove_vertex(vertex)
             .expect("the live vertex was validated before removal");
 
-        Some(swap)
+        true
     }
 
     /// The number of tree edges.

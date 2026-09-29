@@ -649,15 +649,20 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
         fb.find_first_label(left, moved_before, lvl(1)),
         Some(moved_label)
     );
-    let swap = fb
-        .remove_vertex(removed)
-        .expect("live isolated vertex is removed");
+    let moved_cluster = fb
+        .vertex_cluster(vertices[4].unwrap())
+        .expect("a live vertex has a stable cluster");
+    assert!(fb.remove_vertex(removed));
     naive.remove_isolated_vertex(0);
     vertices[0] = None;
-    vertices[4].as_mut().unwrap().swap(swap);
-    let moved = vertices[4].unwrap();
+    let moved = fb
+        .cluster_vertex(moved_cluster)
+        .expect("the moved vertex keeps its label cluster");
     assert_ne!(moved, moved_before);
     assert_eq!(moved.index(), removed.index());
+    vertices[4] = Some(moved);
+    assert!(fb.vertex_cluster(removed).is_none());
+    assert!(!fb.remove_vertex(removed));
 
     assert_eq!(fb.remove_label(removed_level0), None);
     assert_eq!(fb.remove_label(removed_level0_duplicate), None);
@@ -675,10 +680,7 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 
     let last_vertex = vertices[3].take().unwrap();
-    assert_eq!(
-        fb.remove_vertex(last_vertex),
-        Some(top_tree::SwapResult::None)
-    );
+    assert!(fb.remove_vertex(last_vertex));
     naive.remove_isolated_vertex(3);
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 }
