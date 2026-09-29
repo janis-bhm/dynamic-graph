@@ -14,11 +14,15 @@ use top_tree::VertexId as TopVertexId;
 use crate::cover_level::{FindBridge, Level, UserLabel};
 
 /// A stable handle for a vertex in a [`DynamicGraph`].
+///
+/// The index is the vertex's append-only public ID, not its current position
+/// in the internal forest. Removing a vertex invalidates its handle, and later
+/// additions never reuse it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct VertexId(usize);
 
 impl VertexId {
-    /// Returns the zero-based index of this vertex in the graph.
+    /// Returns this vertex's append-only public ID index.
     pub fn index(self) -> usize {
         self.0
     }
@@ -58,7 +62,8 @@ struct EdgeRecord {
 /// [`FindBridge`]: inserted edges that join components become tree edges;
 /// other edges are stored as levelled endpoint labels covering their tree
 /// path. Deletions use `Swap`, `FindReplacement`, and `Recover` to maintain the
-/// spanning forest and edge levels.
+/// spanning forest and edge levels. Removing a vertex deletes each incident
+/// edge through the normal deletion path before removing the forest vertex.
 ///
 /// # Vertex-count limit
 ///
@@ -70,8 +75,9 @@ struct EdgeRecord {
 /// invariant used to guarantee a replacement edge may fail.
 pub struct DynamicGraph {
     fb: FindBridge,
-    /// `VertexId.0 -> FindBridge`'s internal vertex id.
-    vertices: Vec<TopVertexId>,
+    /// Public handles are append-only; removed handles become tombstones and
+    /// are never reused. `VertexId.0 -> FindBridge`'s internal vertex id.
+    vertices: Vec<Option<TopVertexId>>,
     /// `FindBridge`'s internal vertex index -> public handle.
     internal_to_vertex: Vec<VertexId>,
     /// `EdgeId.0 -> live edge record`; deleted edge handles are never reused.
@@ -84,6 +90,8 @@ pub struct DynamicGraph {
     l_max: i32,
     /// Number of live graph edges (including both tree and non-tree edges).
     live_edges: usize,
+    /// Number of live vertices.
+    live_vertices: usize,
 }
 
 impl Default for DynamicGraph {
@@ -104,31 +112,107 @@ impl DynamicGraph {
             label_to_edge: BTreeMap::new(),
             l_max: i32::from(Level::MAX),
             live_edges: 0,
+            live_vertices: 0,
         }
     }
 
-    /// Adds an isolated vertex and returns its stable handle.
+    /// Adds an isolated vertex and returns its stable, append-only handle.
     pub fn add_vertex(&mut self) -> VertexId {
         debug_assert!(
-            self.vertices.len() < (1usize << 31) - 1,
+            self.live_vertices < (1usize << 31) - 1,
             "adding a vertex would exceed DynamicGraph's supported range (< 2^31 vertices; level cap 32)"
         );
         let id = VertexId(self.vertices.len());
         let internal = self.fb.add_vertex();
         debug_assert_eq!(internal.index(), self.internal_to_vertex.len());
-        self.vertices.push(internal);
+        self.vertices.push(Some(internal));
         self.internal_to_vertex.push(id);
+        self.live_vertices += 1;
         id
     }
 
-    /// Returns the number of vertices added to this graph.
+    /// Returns the number of live vertices in this graph.
     pub fn vertex_count(&self) -> usize {
-        self.vertices.len()
+        self.live_vertices
     }
 
     /// Returns the number of live graph edges.
     pub fn edge_count(&self) -> usize {
         self.live_edges
+    }
+
+    /// Removes a vertex and all incident edges, returning whether the vertex
+    /// handle was live.
+    ///
+    /// Every incident edge is removed through [`DynamicGraph::delete_edge`],
+    /// so replacement-edge search and level recovery run as usual. Removed
+    /// public vertex handles are never reused.
+    pub fn remove_vertex(&mut self, vertex: VertexId) -> bool {
+        let Some(internal) = self.vertices.get(vertex.0).copied().flatten() else {
+            return false;
+        };
+
+        let incident_edges = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                record
+                    .filter(|record| {
+                        record.endpoints.0 == internal || record.endpoints.1 == internal
+                    })
+                    .map(|_| EdgeId(index))
+            })
+            .collect::<Vec<_>>();
+        for edge in incident_edges {
+            assert!(
+                self.delete_edge(edge),
+                "an edge collected from a live vertex must still be live"
+            );
+        }
+
+        let swap = self
+            .fb
+            .remove_vertex(internal)
+            .expect("the internal vertex remains live after deleting its edges");
+        self.vertices[vertex.0] = None;
+        let removed = self.internal_to_vertex.swap_remove(internal.index());
+        assert_eq!(removed, vertex, "internal vertex mapping must round-trip");
+        self.live_vertices -= 1;
+
+        if let top_tree::SwapResult::Some { prev, current } = swap {
+            debug_assert_eq!(current.index(), internal.index());
+            debug_assert_eq!(prev.index(), self.internal_to_vertex.len());
+            let moved_public = self.internal_to_vertex[internal.index()];
+            self.vertices[moved_public.0] = Some(current);
+
+            for record in self.edges.iter_mut().flatten() {
+                for endpoint in [&mut record.endpoints.0, &mut record.endpoints.1] {
+                    if *endpoint == prev {
+                        *endpoint = current;
+                    }
+                }
+            }
+        }
+
+        self.tree_edge_at.clear();
+        for (index, record) in self.edges.iter().enumerate() {
+            if let Some(EdgeRecord {
+                endpoints,
+                kind: EdgeKind::Tree,
+                ..
+            }) = record
+            {
+                assert!(
+                    self.tree_edge_at
+                        .insert(norm(endpoints.0, endpoints.1), EdgeId(index))
+                        .is_none(),
+                    "a forest cannot contain parallel tree edges"
+                );
+            }
+        }
+
+        true
     }
 
     /// Inserts an undirected edge, returning `None` for invalid vertices or a
@@ -138,8 +222,8 @@ impl DynamicGraph {
     /// becomes a tree edge. An edge whose endpoints are already connected
     /// becomes a level-0 non-tree edge that covers their tree path.
     pub fn insert_edge(&mut self, u: VertexId, v: VertexId) -> Option<EdgeId> {
-        let a = *self.vertices.get(u.0)?;
-        let b = *self.vertices.get(v.0)?;
+        let a = self.vertices.get(u.0).copied().flatten()?;
+        let b = self.vertices.get(v.0).copied().flatten()?;
         if a == b {
             return None;
         }
@@ -225,12 +309,8 @@ impl DynamicGraph {
     /// or deleted edge handle.
     pub fn edge_endpoints(&self, e: EdgeId) -> Option<(VertexId, VertexId)> {
         let record = self.edges.get(e.0)?.as_ref()?;
-        let u = *self
-            .internal_to_vertex
-            .get(record.endpoints.0.index())?;
-        let v = *self
-            .internal_to_vertex
-            .get(record.endpoints.1.index())?;
+        let u = *self.internal_to_vertex.get(record.endpoints.0.index())?;
+        let v = *self.internal_to_vertex.get(record.endpoints.1.index())?;
         Some((u, v))
     }
 
@@ -286,7 +366,7 @@ impl DynamicGraph {
     }
 
     fn internal_vertex(&self, vertex: VertexId) -> Option<TopVertexId> {
-        self.vertices.get(vertex.0).copied()
+        self.vertices.get(vertex.0).copied().flatten()
     }
 
     fn add_edge_labels(

@@ -21,7 +21,8 @@
 ## Important constraints and maintenance notes
 
 - `Level` represents `-1..=32`; `NO_COVER` is the separate sentinel above real cover levels. The dense size vectors and incident masks are tied to this fixed cap. `DynamicGraph` documents a supported range of fewer than `2^31` vertices; revisit the level representation and promotion logic together if changing that limit.
-- `DynamicGraph::VertexId` and `DynamicGraph::EdgeId` are public stable handles, distinct from the internal `top_tree` IDs. Keep the translation tables and `tree_edge_at`/`label_to_edge` ownership maps consistent when changing swap, recovery, or deletion behavior.
+- `DynamicGraph::VertexId` and `DynamicGraph::EdgeId` are public stable handles, distinct from the internal `top_tree` IDs. Removed public vertex IDs are tombstoned and never reused. Keep the translation tables and `tree_edge_at`/`label_to_edge` ownership maps consistent when changing swap, recovery, or deletion behavior; vertex removal must delete incident edges through `delete_edge` first.
+- `FindBridge::remove_vertex` is only valid after a vertex has no incident forest edges; it removes the structural leaf and attached user labels. Its `SwapResult` must be applied to any held internal handle for the moved last vertex.
 - `CoverLevel::combine`, `flip`, `apply`, and `compose` must agree with `top_tree::Summary` semantics. Boundary-indexed `PartTree` entries must follow the logical boundary order when a cluster flips; tags must affect path children only.
 - Keep graph-edge policy in `graph.rs` and tree-level summary/query logic in `cover_level.rs`. The former should use `FindBridge` operations rather than editing top-tree summaries directly.
 

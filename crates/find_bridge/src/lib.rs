@@ -14,7 +14,8 @@
 //!   [`FindBridge::find_first_label`] implement the FindFirstLabel structure
 //!   of Section 6.
 //! * [`DynamicGraph`] implements Appendix A's graph-level reduction on top of
-//!   these tree operations.
+//!   these tree operations. Its `remove_vertex` deletes all incident graph
+//!   edges before removing the vertex; removed public handles are not reused.
 //!
 //! # Example
 //!

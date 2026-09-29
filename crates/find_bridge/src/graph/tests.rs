@@ -11,6 +11,7 @@ struct Naive {
     adj: BTreeMap<usize, BTreeMap<usize, usize>>,
     edges: BTreeMap<usize, (usize, usize)>,
     next_edge: usize,
+    next_vertex: usize,
 }
 
 impl Naive {
@@ -23,13 +24,18 @@ impl Naive {
     }
 
     fn add_vertex(&mut self) -> usize {
-        let vertex = self.adj.len();
+        let vertex = self.next_vertex;
+        self.next_vertex += 1;
         assert!(self.adj.insert(vertex, BTreeMap::new()).is_none());
         vertex
     }
 
     fn vertex_count(&self) -> usize {
         self.adj.len()
+    }
+
+    fn live_vertices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.adj.keys().copied()
     }
 
     fn insert(&mut self, u: usize, v: usize) -> usize {
@@ -51,6 +57,23 @@ impl Naive {
         };
         self.remove_adjacency_copy(u, v);
         self.remove_adjacency_copy(v, u);
+        true
+    }
+
+    fn remove_vertex(&mut self, vertex: usize) -> bool {
+        if !self.adj.contains_key(&vertex) {
+            return false;
+        }
+        let incident_edges = self
+            .edges
+            .iter()
+            .filter_map(|(&edge, &(u, v))| (u == vertex || v == vertex).then_some(edge))
+            .collect::<Vec<_>>();
+        for edge in incident_edges {
+            assert!(self.delete(edge));
+        }
+        assert!(self.adj[&vertex].is_empty());
+        self.adj.remove(&vertex);
         true
     }
 
@@ -105,8 +128,8 @@ impl Naive {
     }
 
     fn component_labels(&self, blocked: &BTreeSet<(usize, usize)>) -> Vec<usize> {
-        let mut labels = vec![usize::MAX; self.vertex_count()];
-        for root in 0..labels.len() {
+        let mut labels = vec![usize::MAX; self.next_vertex];
+        for &root in self.adj.keys() {
             if labels[root] != usize::MAX {
                 continue;
             }
@@ -220,9 +243,14 @@ fn normalized_top_pair(u: TopVertexId, v: TopVertexId) -> (TopVertexId, TopVerte
 fn label_sizes(labels: &[usize]) -> Vec<usize> {
     let mut sizes = vec![0; labels.len()];
     for &label in labels {
-        sizes[label] += 1;
+        if label != usize::MAX {
+            sizes[label] += 1;
+        }
     }
-    labels.iter().map(|&label| sizes[label]).collect()
+    labels
+        .iter()
+        .map(|&label| if label == usize::MAX { 0 } else { sizes[label] })
+        .collect()
 }
 
 fn new_graph(vertex_count: usize) -> (DynamicGraph, Naive, Vec<VertexId>) {
@@ -364,27 +392,34 @@ fn assert_internal_invariants(graph: &DynamicGraph, context: &str) {
     }
 
     assert_eq!(
-        graph.vertices.len(),
-        graph.vertex_count(),
-        "{context}: public-to-internal vertex map length mismatch"
-    );
-    assert_eq!(
         graph.internal_to_vertex.len(),
         graph.vertex_count(),
         "{context}: internal-to-public vertex map length mismatch"
     );
-    for (public_index, &internal_vertex) in graph.vertices.iter().enumerate() {
-        assert_eq!(
-            graph.internal_to_vertex.get(internal_vertex.index()),
-            Some(&VertexId(public_index)),
-            "{context}: vertex {public_index} does not round-trip through internal index {internal_vertex:?}"
-        );
+    assert_eq!(
+        graph
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.is_some())
+            .count(),
+        graph.vertex_count(),
+        "{context}: live public vertex count"
+    );
+    for (public_index, internal_vertex) in graph.vertices.iter().enumerate() {
+        if let Some(internal_vertex) = internal_vertex {
+            assert_eq!(
+                graph.internal_to_vertex.get(internal_vertex.index()),
+                Some(&VertexId(public_index)),
+                "{context}: vertex {public_index} does not round-trip through internal index {internal_vertex:?}"
+            );
+        }
     }
     for (internal_index, &public_vertex) in graph.internal_to_vertex.iter().enumerate() {
         assert_eq!(
             graph
                 .vertices
                 .get(public_vertex.index())
+                .and_then(|internal| *internal)
                 .map(|internal| internal.index()),
             Some(internal_index),
             "{context}: internal vertex {internal_index} does not round-trip"
@@ -411,6 +446,59 @@ fn assert_matches_naive(graph: &mut DynamicGraph, naive: &Naive, context: &str) 
         naive.next_edge,
         "{context}: stable edge handle count"
     );
+    assert_eq!(
+        graph.vertices.len(),
+        naive.next_vertex,
+        "{context}: stable vertex handle count"
+    );
+
+    for index in 0..naive.next_vertex {
+        let handle = VertexId(index);
+        assert_eq!(
+            graph.vertices[index].is_some(),
+            naive.adj.contains_key(&index),
+            "{context}: live status of vertex handle {index}"
+        );
+        if !naive.adj.contains_key(&index) {
+            assert!(
+                !graph.connected(handle, handle),
+                "{context}: stale connected"
+            );
+            assert_eq!(
+                graph.component_size(handle),
+                0,
+                "{context}: stale component size"
+            );
+            assert_eq!(
+                graph.two_edge_component_size(handle),
+                0,
+                "{context}: stale two-edge component size"
+            );
+            assert!(
+                !graph.two_edge_connected(handle, handle),
+                "{context}: stale 2-edge query"
+            );
+            assert_eq!(
+                graph.find_bridge(handle),
+                None,
+                "{context}: stale bridge query"
+            );
+            assert_eq!(
+                graph.find_bridge_between(handle, handle),
+                None,
+                "{context}: stale path bridge query"
+            );
+            assert_eq!(
+                graph.insert_edge(handle, handle),
+                None,
+                "{context}: stale endpoint accepted"
+            );
+            assert!(
+                !graph.remove_vertex(handle),
+                "{context}: stale vertex removed twice"
+            );
+        }
+    }
 
     for index in 0..naive.next_edge {
         let edge = EdgeId(index);
@@ -440,7 +528,8 @@ fn assert_matches_naive(graph: &mut DynamicGraph, naive: &Naive, context: &str) 
         })
         .collect::<Vec<_>>();
 
-    for vertex in 0..naive.vertex_count() {
+    let live_vertices = naive.live_vertices().collect::<Vec<_>>();
+    for &vertex in &live_vertices {
         let handle = VertexId(vertex);
         assert_eq!(
             graph.component_size(handle) as usize,
@@ -482,8 +571,8 @@ fn assert_matches_naive(graph: &mut DynamicGraph, naive: &Naive, context: &str) 
         }
     }
 
-    for u in 0..naive.vertex_count() {
-        for v in 0..naive.vertex_count() {
+    for &u in &live_vertices {
+        for &v in &live_vertices {
             let connected = component_labels[u] == component_labels[v];
             assert_eq!(
                 graph.connected(VertexId(u), VertexId(v)),
@@ -807,6 +896,48 @@ fn delete_parallel_edge_keeps_bridge_status() {
 }
 
 #[test]
+fn remove_vertex_deletes_incident_edges_and_remaps_survivors() {
+    let (mut graph, mut naive, vertices) = new_graph(4);
+    let removed = vertices[0];
+    let a = vertices[1];
+    let isolated = vertices[2];
+    let moved = vertices[3];
+
+    let first = insert_both(&mut graph, &mut naive, removed, a);
+    let second = insert_both(&mut graph, &mut naive, removed, moved);
+    let surviving = insert_both(&mut graph, &mut naive, moved, a);
+
+    // Deleting the first tree edge promotes the surviving edge as a
+    // replacement; the second incident tree edge is deleted afterwards.
+    assert!(graph.remove_vertex(removed));
+    assert!(naive.remove_vertex(removed.index()));
+    assert_eq!(graph.vertex_count(), 3);
+    assert_eq!(graph.edge_count(), 1);
+    assert_eq!(graph.edge_endpoints(first), None);
+    assert_eq!(graph.edge_endpoints(second), None);
+    assert_endpoints_match(&graph, surviving, moved, a);
+    assert!(graph.connected(a, moved));
+    assert_eq!(graph.component_size(a), 2);
+    assert_eq!(graph.find_bridge(a), Some(surviving));
+
+    assert!(!graph.remove_vertex(removed));
+    let added = graph.add_vertex();
+    let naive_added = naive.add_vertex();
+    assert_eq!(added.index(), naive_added);
+    assert_ne!(added, removed, "removed public vertex ids are never reused");
+
+    assert_internal_invariants(&graph, "remove vertex replacement/remapping");
+    assert_matches_naive(&mut graph, &naive, "remove vertex replacement/remapping");
+    assert_eq!(graph.component_size(isolated), 1);
+
+    assert!(graph.remove_vertex(added));
+    assert!(naive.remove_vertex(added.index()));
+    assert!(!graph.connected(added, added));
+    assert_internal_invariants(&graph, "remove last vertex");
+    assert_matches_naive(&mut graph, &naive, "remove last vertex");
+}
+
+#[test]
 fn invalid_handles_return_none() {
     let (mut graph, _naive, vertices) = new_graph(2);
     let a = vertices[0];
@@ -960,22 +1091,28 @@ impl Rng {
     }
 }
 
-fn random_distinct_pair(rng: &mut Rng, vertex_count: usize) -> (usize, usize) {
-    assert!(vertex_count > 1);
-    let u = rng.index(vertex_count);
-    let mut v = rng.index(vertex_count - 1);
-    if v >= u {
-        v += 1;
+fn random_distinct_pair(rng: &mut Rng, vertices: &[usize]) -> (usize, usize) {
+    assert!(vertices.len() > 1);
+    let u_index = rng.index(vertices.len());
+    let mut v_index = rng.index(vertices.len() - 1);
+    if v_index >= u_index {
+        v_index += 1;
     }
-    (u, v)
+    (vertices[u_index], vertices[v_index])
 }
 
-fn choose_insert_pair(rng: &mut Rng, naive: &Naive, parallel_bias: u64) -> (usize, usize) {
+fn choose_insert_pair(rng: &mut Rng, naive: &Naive, parallel_bias: u64) -> Option<(usize, usize)> {
+    if naive.vertex_count() < 2 {
+        return None;
+    }
     if !naive.edges.is_empty() && rng.next() % 100 < parallel_bias {
         let edge_index = rng.index(naive.edges.len());
-        *naive.edges.values().nth(edge_index).unwrap()
+        Some(*naive.edges.values().nth(edge_index).unwrap())
     } else {
-        random_distinct_pair(rng, naive.vertex_count())
+        Some(random_distinct_pair(
+            rng,
+            &naive.live_vertices().collect::<Vec<_>>(),
+        ))
     }
 }
 
@@ -1004,11 +1141,19 @@ fn assert_randomized_sample_matches_naive(
         naive.next_edge,
         "{context}: edge handle count"
     );
+    assert_eq!(
+        graph.vertices.len(),
+        naive.next_vertex,
+        "{context}: vertex handle count"
+    );
 
-    let vertex_count = naive.vertex_count();
-    let first = (step.wrapping_mul(7) + case) % vertex_count;
-    let second = (step.wrapping_mul(13) + case + 1) % vertex_count;
-    let third = (step.wrapping_mul(19) + case + 2) % vertex_count;
+    let live_vertices = naive.live_vertices().collect::<Vec<_>>();
+    if live_vertices.is_empty() {
+        return;
+    }
+    let first = live_vertices[(step.wrapping_mul(7) + case) % live_vertices.len()];
+    let second = live_vertices[(step.wrapping_mul(13) + case + 1) % live_vertices.len()];
+    let third = live_vertices[(step.wrapping_mul(19) + case + 2) % live_vertices.len()];
 
     for vertex in [first, second] {
         assert_eq!(
@@ -1016,12 +1161,29 @@ fn assert_randomized_sample_matches_naive(
             naive.component_size(vertex),
             "{context}: sampled component_size({vertex})"
         );
+        assert_eq!(
+            graph.two_edge_component_size(VertexId(vertex)) as usize,
+            naive.two_edge_component_size(vertex),
+            "{context}: sampled two_edge_component_size({vertex})"
+        );
+        assert_returned_bridge_in_component(naive, vertex, graph.find_bridge(VertexId(vertex)));
     }
     for (u, v) in [(first, second), (second, third)] {
         assert_eq!(
             graph.connected(VertexId(u), VertexId(v)),
             naive.connected(u, v),
             "{context}: sampled connected({u}, {v})"
+        );
+        assert_eq!(
+            graph.two_edge_connected(VertexId(u), VertexId(v)),
+            naive.two_edge_connected(u, v),
+            "{context}: sampled two_edge_connected({u}, {v})"
+        );
+        assert_returned_separating_bridge(
+            naive,
+            u,
+            v,
+            graph.find_bridge_between(VertexId(u), VertexId(v)),
         );
     }
 }
@@ -1038,21 +1200,44 @@ fn run_randomized_case(seed: u64, parallel_edges_bias: bool, case: usize) {
             let naive_vertex = naive.add_vertex();
             assert_eq!(graph_vertex.index(), naive_vertex);
             format!("scheduled add_vertex -> {naive_vertex}")
+        } else if naive.vertex_count() == 0 {
+            let graph_vertex = graph.add_vertex();
+            let naive_vertex = naive.add_vertex();
+            assert_eq!(graph_vertex.index(), naive_vertex);
+            format!("add_vertex (empty graph) -> {naive_vertex}")
         } else {
             match roll {
-                0 => {
+                0..=7 => {
                     let graph_vertex = graph.add_vertex();
                     let naive_vertex = naive.add_vertex();
                     assert_eq!(graph_vertex.index(), naive_vertex);
                     format!("add_vertex -> {naive_vertex}")
                 }
-                1..=40 => {
-                    let parallel_bias = if parallel_edges_bias { 75 } else { 12 };
-                    let (u, v) = choose_insert_pair(&mut rng, &naive, parallel_bias);
-                    let edge = insert_both(&mut graph, &mut naive, VertexId(u), VertexId(v));
-                    format!("insert_edge({u}, {v}) -> {}", edge.index())
+                8..=20 => {
+                    let vertices = naive.live_vertices().collect::<Vec<_>>();
+                    let index = vertices[rng.index(vertices.len())];
+                    let stale = VertexId(index);
+                    assert!(graph.remove_vertex(stale));
+                    assert!(naive.remove_vertex(index));
+                    assert!(!graph.remove_vertex(stale));
+                    if let Some(live) = naive.live_vertices().next() {
+                        assert_eq!(graph.insert_edge(stale, VertexId(live)), None);
+                    }
+                    format!("remove_vertex({index})")
                 }
-                41..=74 => {
+                21..=50 => {
+                    let parallel_bias = if parallel_edges_bias { 75 } else { 12 };
+                    if let Some((u, v)) = choose_insert_pair(&mut rng, &naive, parallel_bias) {
+                        let edge = insert_both(&mut graph, &mut naive, VertexId(u), VertexId(v));
+                        format!("insert_edge({u}, {v}) -> {}", edge.index())
+                    } else {
+                        let graph_vertex = graph.add_vertex();
+                        let naive_vertex = naive.add_vertex();
+                        assert_eq!(graph_vertex.index(), naive_vertex);
+                        format!("add_vertex (need endpoints) -> {naive_vertex}")
+                    }
+                }
+                51..=74 => {
                     let live_edges = naive.edges.keys().copied().collect::<Vec<_>>();
                     if live_edges.is_empty() {
                         let unused = EdgeId(naive.next_edge);
@@ -1069,8 +1254,9 @@ fn run_randomized_case(seed: u64, parallel_edges_bias: bool, case: usize) {
                     }
                 }
                 _ => {
-                    let u = rng.index(naive.vertex_count());
-                    let v = rng.index(naive.vertex_count());
+                    let vertices = naive.live_vertices().collect::<Vec<_>>();
+                    let u = vertices[rng.index(vertices.len())];
+                    let v = vertices[rng.index(vertices.len())];
                     match rng.next() % 5 {
                         0 => assert_eq!(
                             graph.connected(VertexId(u), VertexId(v)),
