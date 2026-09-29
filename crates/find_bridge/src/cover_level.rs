@@ -876,8 +876,6 @@ impl Summary for CoverLevel {
 /// [`FindBridge::uncover`] update the cover levels of a whole path lazily.
 pub struct FindBridge {
     top_tree: top_tree::TopTree<CoverLevel>,
-    /// Maps each vertex to its label cluster. We only need one label per vertex, so this is a bijection.
-    label_map: BTreeMap<top_tree::VertexId, top_tree::ClusterId>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
     labels: BTreeMap<UserLabel, (top_tree::VertexId, Level)>,
     /// Live label ids grouped by their (vertex, level), ordered by id.
@@ -897,7 +895,6 @@ impl FindBridge {
     pub fn new() -> Self {
         FindBridge {
             top_tree: top_tree::TopTree::new(),
-            label_map: BTreeMap::new(),
             labels: BTreeMap::new(),
             labels_at: BTreeMap::new(),
             next_label: 0,
@@ -910,8 +907,7 @@ impl FindBridge {
 
         // One label per vertex makes every vertex contribute exactly once to
         // FindSize and supplies the point cluster for that vertex.
-        let label = self.top_tree.attach(index);
-        self.label_map.insert(index, label);
+        self.top_tree.attach(index);
         index
     }
 
@@ -953,17 +949,9 @@ impl FindBridge {
             .top_tree
             .remove_vertex(vertex)
             .expect("the live vertex was validated before removal");
-        self.label_map
-            .remove(&vertex)
-            .expect("every live vertex has a structural label leaf");
 
         if let top_tree::SwapResult::Some { prev, current } = swap {
             debug_assert_eq!(current.index(), vertex.index());
-            let structural_label = self
-                .label_map
-                .remove(&prev)
-                .expect("the moved vertex has a structural label leaf");
-            assert!(self.label_map.insert(current, structural_label).is_none());
 
             // remove range of labels_at for the moved vertex, then reinsert
             // them under the new vertex handle
@@ -1140,14 +1128,12 @@ impl FindBridge {
         if first_at_level {
             // if our label is the first for this vertex at this level we have
             // to update the vertex's summary to reflect the new incident level.
+            let label = self.top_tree.first_label(v).unwrap();
+            let label = self.top_tree.node_label_key(label).unwrap();
 
             // updates incident_C and the part tree for this vertex's label cluster.
-            self.top_tree.update_label_summary(
-                self.top_tree
-                    .node_label_key(*self.label_map.get(&v).unwrap())
-                    .unwrap(),
-                |sum| sum.add_vertex_levels(level_bit(level)),
-            );
+            self.top_tree
+                .update_label_summary(label, |sum| sum.add_vertex_levels(level_bit(level)));
         }
         id
     }
@@ -1166,12 +1152,11 @@ impl FindBridge {
         };
 
         if last_at_level {
-            self.top_tree.update_label_summary(
-                self.top_tree
-                    .node_label_key(*self.label_map.get(&v).unwrap())
-                    .unwrap(),
-                |sum| sum.remove_vertex_levels(level_bit(level)),
-            );
+            let label = self.top_tree.first_label(v).unwrap();
+            let label = self.top_tree.node_label_key(label).unwrap();
+
+            self.top_tree
+                .update_label_summary(label, |sum| sum.remove_vertex_levels(level_bit(level)));
         }
         Some((v, level))
     }

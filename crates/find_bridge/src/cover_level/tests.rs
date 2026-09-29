@@ -664,7 +664,6 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     assert_eq!(fb.remove_label(removed_level1), None);
     assert_eq!(fb.labels.len(), 2);
     assert_eq!(fb.labels_at.len(), 2);
-    assert_eq!(fb.label_map.len(), 4);
     assert_eq!(fb.top_tree.label_count(), 4);
     assert_eq!(fb.find_first_label(left, moved, lvl(1)), Some(moved_label));
     assert_eq!(fb.find_first_label(left, moved, lvl(0)), Some(middle_label));

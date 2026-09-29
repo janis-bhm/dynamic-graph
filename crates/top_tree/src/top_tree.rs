@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[repr(transparent)]
-#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClusterId(NonMaxUsize);
 
 impl core::fmt::Display for ClusterId {
@@ -639,11 +639,23 @@ impl<S> TopTree<S>
 where
     S: Summary,
 {
-    /// Mutates the summary of the live label identified by `key` and recomputes
+    /// Mutates the summary of the live label identified by `label` and recomputes
     /// all of its ancestors. The label node itself is not re-linked, so the top
     /// tree's structure is unchanged.
     pub fn update_label_summary(&mut self, label: tree::LabelId, update: impl FnOnce(&mut S)) {
         let node = *self.tree.label_weight(label).expect("label must exist");
+        self.update_label_summary_by_cluster(node, update);
+    }
+
+    /// Mutates the summary of the live label identified by `cluster` and recomputes
+    /// all of its ancestors. The label node itself is not re-linked, so the top
+    /// tree's structure is unchanged.
+    pub fn update_label_summary_by_cluster(
+        &mut self,
+        cluster: ClusterId,
+        update: impl FnOnce(&mut S),
+    ) {
+        let node = cluster;
         assert!(
             matches!(self.cl(node).data, ClusterData::Node(_)),
             "update_label_summary expects a label node"
@@ -658,6 +670,14 @@ where
 
     pub fn label_vertex(&self, label: tree::LabelId) -> Option<tree::VertexId> {
         self.tree.label_vertex(label)
+    }
+
+    pub fn label_clusters(&self, v: tree::VertexId) -> impl Iterator<Item = ClusterId> + '_ {
+        self.tree.incident_label_weights(v).copied()
+    }
+
+    pub fn first_label(&self, v: tree::VertexId) -> Option<ClusterId> {
+        self.tree.incident_label_weights(v).next().copied()
     }
 }
 
