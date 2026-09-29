@@ -42,6 +42,7 @@ where
 {
     nodes: Vec<MaybeUninit<Cluster<S>>>,
     first_free: Option<NonMaxUsize>,
+    live: BitVec,
 }
 
 impl<S> Clusters<S>
@@ -52,52 +53,80 @@ where
         Self {
             nodes: Vec::new(),
             first_free: None,
+            live: BitVec::new(),
         }
     }
 
     fn get(&self, id: ClusterId) -> Option<&Cluster<S>> {
-        self.nodes
-            .get(id.index())
-            .map(|node| unsafe { &*node.as_ptr() })
+        if !self.live.get(id.index()) {
+            return None;
+        }
+
+        let node = self.nodes.get(id.index())?;
+        // SAFETY: A set liveness bit means this slot contains an initialized cluster.
+        Some(unsafe { &*node.as_ptr() })
     }
 
     fn get_mut(&mut self, id: ClusterId) -> Option<&mut Cluster<S>> {
-        self.nodes
-            .get_mut(id.index())
-            .map(|node| unsafe { &mut *node.as_mut_ptr() })
+        if !self.live.get(id.index()) {
+            return None;
+        }
+
+        let node = self.nodes.get_mut(id.index())?;
+        // SAFETY: A set liveness bit means this slot contains an initialized cluster.
+        Some(unsafe { &mut *node.as_mut_ptr() })
     }
 
     fn remove(&mut self, id: ClusterId) -> Cluster<S> {
-        let node = self.nodes.get_mut(id.index()).expect("cluster must exist");
+        let index = id.index();
+        assert!(self.live.get(index), "cluster must exist");
+        let node = self.nodes.get_mut(index).expect("cluster must exist");
+        // SAFETY: The liveness bit was checked above, so this slot is initialized.
         let removed = unsafe { node.assume_init_read() };
         let next_free = self.first_free;
-        self.first_free = NonMaxUsize::new(id.index());
+        self.first_free = NonMaxUsize::new(index);
 
         // write the next free index into the first word of the removed cluster
+        // SAFETY: The slot is now uninitialized, and its first word can store the
+        // free-list link until this slot is initialized again.
         unsafe {
             node.as_mut_ptr()
                 .cast::<Option<NonMaxUsize>>()
                 .write(next_free);
         }
+        self.live.set(index, false);
 
         removed
     }
 
     fn push(&mut self, cluster: Cluster<S>) -> ClusterId {
         if let Some(free_index) = self.first_free {
+            let index = free_index.get();
+            debug_assert!(index < self.nodes.len(), "cluster free list link out of bounds");
+            debug_assert!(
+                !self.live.get(index),
+                "cluster free list must not point at a live slot"
+            );
+            // SAFETY: The debug assertions above validate that `first_free` is
+            // in-bounds and its slot is not live; the free-list invariant says its
+            // first word contains the next link rather than initialized cluster data.
             unsafe {
-                let slot_ptr = self.nodes.as_mut_ptr().add(free_index.get());
+                let slot_ptr = self.nodes.as_mut_ptr().add(index);
                 let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
                 self.first_free = next_free;
 
                 slot_ptr.write(MaybeUninit::new(cluster));
-
-                ClusterId(free_index)
             }
+            self.live.set(index, true);
+            ClusterId(free_index)
         } else {
             assert!(self.nodes.len() < usize::MAX, "too many clusters");
-            let idx = unsafe { NonMaxUsize::new_unchecked(self.nodes.len()) };
+            let index = self.nodes.len();
+            // SAFETY: The length check above ensures the index is below usize::MAX.
+            let idx = unsafe { NonMaxUsize::new_unchecked(index) };
+            self.live.grow_to(index + 1);
             self.nodes.push(MaybeUninit::new(cluster));
+            self.live.set(index, true);
 
             ClusterId(idx)
         }
@@ -105,44 +134,42 @@ where
 
     fn push_with(&mut self, f: impl FnOnce(ClusterId) -> Cluster<S>) -> ClusterId {
         if let Some(free_index) = self.first_free {
+            let index = free_index.get();
+            debug_assert!(index < self.nodes.len(), "cluster free list link out of bounds");
+            debug_assert!(
+                !self.live.get(index),
+                "cluster free list must not point at a live slot"
+            );
+            // SAFETY: The debug assertions above validate that `first_free` is
+            // in-bounds and its slot is not live; the free-list invariant says its
+            // first word contains the next link rather than initialized cluster data.
             unsafe {
-                let slot_ptr = self.nodes.as_mut_ptr().add(free_index.get());
+                let slot_ptr = self.nodes.as_mut_ptr().add(index);
                 let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
                 self.first_free = next_free;
 
                 slot_ptr.write(MaybeUninit::new(f(ClusterId(free_index))));
-
-                ClusterId(free_index)
             }
+            self.live.set(index, true);
+            ClusterId(free_index)
         } else {
             assert!(self.nodes.len() < usize::MAX, "too many clusters");
-            let idx = unsafe { NonMaxUsize::new_unchecked(self.nodes.len()) };
+            let index = self.nodes.len();
+            // SAFETY: The length check above ensures the index is below usize::MAX.
+            let idx = unsafe { NonMaxUsize::new_unchecked(index) };
+            self.live.grow_to(index + 1);
             self.nodes.push(MaybeUninit::new(f(ClusterId(idx))));
+            self.live.set(index, true);
 
             ClusterId(idx)
         }
     }
 
-    // TODO: this kinda sucks, find a better way to iterate over live clusters
     fn for_each_mut(&mut self, mut f: impl FnMut(&mut Cluster<S>)) {
-        let mut free = vec![false; self.nodes.len()];
-        let mut current = self.first_free;
-        while let Some(index) = current {
-            let index = index.get();
-            assert!(!free[index], "cluster free list must not contain a cycle");
-            free[index] = true;
-            current = unsafe {
-                self.nodes[index]
-                    .as_ptr()
-                    .cast::<Option<NonMaxUsize>>()
-                    .read()
-            };
-        }
-
+        let live = &self.live;
         for (index, node) in self.nodes.iter_mut().enumerate() {
-            if !free[index] {
-                // SAFETY: every slot not listed in the free list contains an
-                // initialized live cluster.
+            if live.get(index) {
+                // SAFETY: A set liveness bit means this slot contains an initialized cluster.
                 f(unsafe { &mut *node.as_mut_ptr() });
             }
         }
@@ -150,28 +177,14 @@ where
 
     #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (ClusterId, &Cluster<S>)> + '_ {
-        let mut free = vec![false; self.nodes.len()];
-        let mut current = self.first_free;
-        while let Some(index) = current {
-            free[index.get()] = true;
-            current = unsafe {
-                self.nodes[index.get()]
-                    .as_ptr()
-                    .cast::<Option<NonMaxUsize>>()
-                    .read()
-            };
-        }
-        self.nodes
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, node)| {
-                if free[index] {
-                    None
-                } else {
-                    let id = ClusterId(unsafe { NonMaxUsize::new_unchecked(index) });
-                    Some((id, unsafe { &*node.as_ptr() }))
-                }
-            })
+        (0..self.nodes.len()).filter_map(move |index| {
+            if !self.live.get(index) {
+                return None;
+            }
+
+            let id = ClusterId(NonMaxUsize::new(index).expect("cluster index must fit"));
+            self.get(id).map(|cluster| (id, cluster))
+        })
     }
 }
 
@@ -596,6 +609,8 @@ where
 
     /// Removes a vertex and all of its incident forest edges and labels.
     ///
+    /// Any cluster IDs removed in the process must not be used afterward.
+    ///
     /// Returns `None` for a stale handle. A successful removal returns
     /// `Some(SwapResult::None)` when the vertex was last in storage, or the
     /// remapping of the moved last vertex otherwise.
@@ -630,6 +645,7 @@ where
     /// Removes the label identified by `label`, returning its weight.
     ///
     /// The handle is invalidated; all other [`LabelId`]s remain valid.
+    /// This also invalidates the [`ClusterId`] returned by [`Self::attach`].
     pub fn detach(&mut self, label: tree::LabelId) {
         self.detach_internal(label);
     }
@@ -677,7 +693,22 @@ where
     }
 
     pub fn first_label(&self, v: tree::VertexId) -> Option<ClusterId> {
+        if self.tree.node(v).is_none() {
+            return None;
+        }
         self.tree.incident_label_weights(v).next().copied()
+    }
+
+    /// The vertex whose label leaf is `cluster`, or `None` for a freed slot, an
+    /// edge leaf, or an internal cluster.
+    ///
+    /// A [`ClusterId`] must not be used after the cluster it names is removed,
+    /// because its freed slot may later be reused by an unrelated cluster.
+    pub fn cluster_vertex(&self, cluster: ClusterId) -> Option<tree::VertexId> {
+        match self.clusters.get(cluster)?.data {
+            ClusterData::Node(label) => self.tree.label_vertex(label),
+            ClusterData::Edge(_) | ClusterData::Internal => None,
+        }
     }
 }
 

@@ -227,6 +227,205 @@ impl Summary for DirectedPath {
 }
 
 #[test]
+fn cluster_vertex_tracks_attached_labels_across_compaction() {
+    let mut tt = TopTree::<PathLen>::new();
+    let removed_vertex = tt.add_vertex();
+    let a = tt.add_vertex();
+    let moved_vertex = tt.add_vertex();
+
+    let removed_cluster = tt.attach(removed_vertex);
+    let a_cluster = tt.attach(a);
+    let moved_cluster = tt.attach(moved_vertex);
+    assert_eq!(tt.cluster_vertex(removed_cluster), Some(removed_vertex));
+    assert_eq!(tt.cluster_vertex(a_cluster), Some(a));
+    assert_eq!(tt.cluster_vertex(moved_cluster), Some(moved_vertex));
+
+    let edge_cluster = tt.link(a, moved_vertex);
+    assert!(tt.cluster_vertex(edge_cluster).is_none());
+    let internal_cluster = tt
+        .expose_path_node(a, moved_vertex)
+        .expect("the linked path has a cluster");
+    assert!(tt.cluster_vertex(internal_cluster).is_none());
+
+    let swap = tt
+        .remove_vertex(removed_vertex)
+        .expect("the isolated vertex is removed");
+    let mut moved_after = moved_vertex;
+    moved_after.swap(swap);
+    assert_ne!(moved_after, moved_vertex);
+    assert_eq!(moved_after.index(), removed_vertex.index());
+    assert_eq!(tt.cluster_vertex(moved_cluster), Some(moved_after));
+}
+
+#[test]
+fn cluster_vertex_rejects_freed_cluster_handles() {
+    let mut tt = TopTree::<PathLen>::new();
+    let v = tt.add_vertex();
+    let cluster = tt.attach(v);
+    assert_eq!(tt.cluster_vertex(cluster), Some(v));
+
+    tt.remove_vertex(v).expect("the attached vertex is removed");
+    assert!(tt.cluster_vertex(cluster).is_none());
+    assert!(tt.clusters.get(cluster).is_none());
+    assert!(tt.clusters.get_mut(cluster).is_none());
+
+    let a = tt.add_vertex();
+    let b = tt.add_vertex();
+    let edge_cluster = tt.link(a, b);
+    assert!(tt.cut(a, b).is_some());
+    assert!(tt.cluster_vertex(edge_cluster).is_none());
+    assert!(tt.clusters.get(edge_cluster).is_none());
+
+    let a = tt.add_vertex();
+    let b = tt.add_vertex();
+    tt.link(a, b);
+    tt.attach(a);
+    let internal_cluster = tt
+        .expose_path_node(a, b)
+        .expect("the linked path has a cluster");
+    assert_eq!(tt.node_leaf_data(internal_cluster), NodeData::Internal);
+
+    tt.remove_vertex(a)
+        .expect("the attached endpoint and its edge are removed");
+    assert!(tt.clusters.get(internal_cluster).is_none());
+    assert!(tt.cluster_vertex(internal_cluster).is_none());
+}
+
+#[test]
+fn cluster_liveness_bitmap_matches_allocator() {
+    let mut tt = TopTree::<PathLen>::new();
+    let a = tt.add_vertex();
+    let b = tt.add_vertex();
+    let c = tt.add_vertex();
+    let d = tt.add_vertex();
+    let e = tt.add_vertex();
+
+    let initial_label_cluster = tt.attach(a);
+    let initial_label = tt
+        .node_label_key(initial_label_cluster)
+        .expect("attached cluster is a label leaf");
+    tt.link(a, b);
+    assert!(tt.cut(a, b).is_some());
+    tt.detach(initial_label);
+
+    let old_len = tt.clusters.nodes.len();
+    let cluster_to_remove = tt.attach(a);
+    assert!(
+        cluster_to_remove.index() < old_len,
+        "the first attach must reuse a free cluster slot"
+    );
+    tt.attach(b);
+    tt.attach(c);
+    let fresh_cluster = tt.attach(d);
+    tt.attach(e);
+    assert!(
+        fresh_cluster.index() >= old_len,
+        "attaching after exhausting the free list must grow the arena"
+    );
+    assert!(tt.clusters.nodes.len() > old_len);
+
+    tt.remove_vertex(a)
+        .expect("the vertex and its attached label are removed");
+    assert!(tt.clusters.get(cluster_to_remove).is_none());
+
+    for index in 0..tt.clusters.nodes.len() {
+        let id =
+            ClusterId(crate::NonMaxUsize::new(index).expect("cluster index must fit the ID type"));
+        assert_eq!(
+            tt.clusters.get(id).is_some(),
+            tt.clusters.live.get(index),
+            "liveness mismatch at cluster index {index}"
+        );
+    }
+
+    let iter_indices: Vec<_> = tt.clusters.iter().map(|(id, _)| id.index()).collect();
+    let live_indices: Vec<_> = (0..tt.clusters.nodes.len())
+        .filter(|&index| tt.clusters.live.get(index))
+        .collect();
+    assert_eq!(iter_indices, live_indices);
+}
+
+#[test]
+fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
+    let mut tt = TopTree::<PathLen>::new();
+    let vertices: Vec<_> = (0..6).map(|_| tt.add_vertex()).collect();
+    let initial_labels: Vec<_> = vertices
+        .iter()
+        .map(|&vertex| {
+            let cluster = tt.attach(vertex);
+            tt.node_label_key(cluster)
+                .expect("attached cluster is a label leaf")
+        })
+        .collect();
+
+    let assert_free_list_matches_live = |tt: &TopTree<PathLen>| {
+        let nodes_len = tt.clusters.nodes.len();
+        let mut free_slots = vec![false; nodes_len];
+        let mut free_count = 0;
+        let mut current = tt.clusters.first_free;
+
+        for _ in 0..=nodes_len {
+            let Some(free_index) = current else {
+                break;
+            };
+            let index = free_index.get();
+            assert!(index < nodes_len, "cluster free list link out of bounds");
+            assert!(!free_slots[index], "cluster free list must not contain a cycle");
+            assert!(
+                !tt.clusters.live.get(index),
+                "cluster free list must not point at a live slot"
+            );
+            free_slots[index] = true;
+            free_count += 1;
+
+            // SAFETY: The bounds/liveness checks above passed, and the free-list
+            // invariant means this slot's first word contains its next link.
+            current = unsafe {
+                tt.clusters.nodes[index]
+                    .as_ptr()
+                    .cast::<Option<crate::NonMaxUsize>>()
+                    .read()
+            };
+        }
+
+        assert!(current.is_none(), "cluster free list traversal exceeded arena length");
+        for index in 0..nodes_len {
+            assert_eq!(
+                free_slots[index],
+                !tt.clusters.live.get(index),
+                "free-list/liveness mismatch at cluster index {index}"
+            );
+        }
+        assert_eq!(
+            free_count,
+            (0..nodes_len)
+                .filter(|&index| !tt.clusters.live.get(index))
+                .count(),
+            "free-list length must match the number of non-live slots"
+        );
+    };
+
+    for label in initial_labels.iter().rev().take(4) {
+        tt.detach(*label);
+    }
+    let replacement_labels: Vec<_> = vertices
+        .iter()
+        .take(4)
+        .map(|&vertex| {
+            let cluster = tt.attach(vertex);
+            tt.node_label_key(cluster)
+                .expect("attached cluster is a label leaf")
+        })
+        .collect();
+    assert_free_list_matches_live(&tt);
+
+    for label in replacement_labels.iter().rev().take(3) {
+        tt.detach(*label);
+    }
+    assert_free_list_matches_live(&tt);
+}
+
+#[test]
 fn removing_isolated_vertex_remaps_surviving_clusters() {
     let mut tt = TopTree::<DirectedPath>::new();
     let removed = tt.add_vertex();
