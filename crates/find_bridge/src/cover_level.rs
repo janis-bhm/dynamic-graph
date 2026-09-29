@@ -877,9 +877,9 @@ impl Summary for CoverLevel {
 pub struct FindBridge {
     top_tree: top_tree::TopTree<CoverLevel>,
     /// The user labels of the FindFirstLabel structure, keyed by handle.
-    labels: BTreeMap<UserLabel, (top_tree::VertexId, Level)>,
+    labels: BTreeMap<UserLabel, (top_tree::ClusterId, Level)>,
     /// Live label ids grouped by their (vertex, level), ordered by id.
-    labels_at: BTreeMap<(top_tree::VertexId, Level), BTreeSet<UserLabel>>,
+    labels_at: BTreeMap<(top_tree::ClusterId, Level), BTreeSet<UserLabel>>,
     /// The next label handle to allocate.
     next_label: usize,
 }
@@ -927,7 +927,7 @@ impl FindBridge {
         &mut self,
         vertex: top_tree::VertexId,
     ) -> Option<top_tree::SwapResult<top_tree::VertexId>> {
-        self.top_tree.forest().node(vertex)?;
+        let cluster = self.top_tree.first_label(vertex)?;
 
         assert_eq!(
             self.top_tree.forest().incident_edge_indices(vertex).count(),
@@ -937,7 +937,7 @@ impl FindBridge {
 
         let user_labels = self
             .labels_at
-            .extract_if((vertex, Level::MIN)..=(vertex, Level::MAX), |_, _| true)
+            .extract_if((cluster, Level::MIN)..=(cluster, Level::MAX), |_, _| true)
             .flat_map(|((_, _), labels)| labels)
             .collect::<Vec<_>>();
 
@@ -949,24 +949,6 @@ impl FindBridge {
             .top_tree
             .remove_vertex(vertex)
             .expect("the live vertex was validated before removal");
-
-        if let top_tree::SwapResult::Some { prev, current } = swap {
-            debug_assert_eq!(current.index(), vertex.index());
-
-            // remove range of labels_at for the moved vertex, then reinsert
-            // them under the new vertex handle
-            let prev_labels = self
-                .labels_at
-                .extract_if((prev, Level::MIN)..=(prev, Level::MAX), |_, _| true)
-                .collect::<Vec<_>>();
-
-            for ((_, level), labels) in prev_labels {
-                for label in &labels {
-                    self.labels.get_mut(label).expect("asdf").0 = current;
-                }
-                assert!(self.labels_at.insert((current, level), labels).is_none());
-            }
-        }
 
         Some(swap)
     }
@@ -1115,11 +1097,16 @@ impl FindBridge {
     pub fn add_label(&mut self, v: top_tree::VertexId, level: Level) -> UserLabel {
         let id = UserLabel(self.next_label);
         self.next_label += 1;
-        self.labels.insert(id, (v, level));
+
+        let cluster = self
+            .top_tree
+            .first_label(v)
+            .expect("every live vertex has a structural label leaf");
+        self.labels.insert(id, (cluster, level));
 
         let first_at_level = {
             // labels are stored in a set addressed by (vertex, level).
-            let labels = self.labels_at.entry((v, level)).or_default();
+            let labels = self.labels_at.entry((cluster, level)).or_default();
             let first_at_level = labels.is_empty();
             labels.insert(id);
             first_at_level
@@ -1133,32 +1120,37 @@ impl FindBridge {
 
             // updates incident_C and the part tree for this vertex's label cluster.
             self.top_tree
-                .update_label_summary(label, |sum| sum.add_vertex_levels(level_bit(level)));
+                .update_label_summary_by_cluster(cluster, |sum| {
+                    sum.add_vertex_levels(level_bit(level))
+                });
         }
         id
     }
 
     /// `RemoveLabel(l)`: removes a user label.
-    pub fn remove_label(&mut self, label: UserLabel) -> Option<(top_tree::VertexId, Level)> {
-        let (v, level) = self.labels.remove(&label)?;
+    pub fn remove_label(&mut self, label: UserLabel) -> Option<Level> {
+        let (cluster, level) = self.labels.remove(&label)?;
 
         let last_at_level = {
             let labels = self
                 .labels_at
-                .get_mut(&(v, level))
+                .get_mut(&(cluster, level))
                 .expect("live label must have a (vertex, level) index bucket");
             assert!(labels.remove(&label));
             labels.is_empty()
         };
 
         if last_at_level {
-            let label = self.top_tree.first_label(v).unwrap();
-            let label = self.top_tree.node_label_key(label).unwrap();
+            // let label = self.top_tree.first_label(v).unwrap();
+            // let label = self.top_tree.node_label_key(label).unwrap();
 
             self.top_tree
-                .update_label_summary(label, |sum| sum.remove_vertex_levels(level_bit(level)));
+                .update_label_summary_by_cluster(cluster, |sum| {
+                    sum.remove_vertex_levels(level_bit(level))
+                });
         }
-        Some((v, level))
+
+        Some(level)
     }
 
     /// `FindFirstLabel(v, w, i)`.
@@ -1189,8 +1181,13 @@ impl FindBridge {
 
     /// The smallest live label id at `vertex` with the given exact level.
     fn smallest_label_at(&self, vertex: top_tree::VertexId, level: Level) -> Option<UserLabel> {
+        let structural_label = self
+            .top_tree
+            .first_label(vertex)
+            .expect("every live vertex has a structural label leaf");
+
         self.labels_at
-            .get(&(vertex, level))
+            .get(&(structural_label, level))
             .and_then(|labels| labels.iter().next().copied())
     }
 

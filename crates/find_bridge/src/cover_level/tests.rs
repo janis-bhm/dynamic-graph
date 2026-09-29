@@ -923,7 +923,7 @@ fn component_size_and_labels() {
     assert_eq!(fb.find_first_label(verts[3], verts[5], lvl(1)), Some(a));
     assert_eq!(fb.find_first_label(verts[0], verts[1], lvl(2)), Some(b));
 
-    assert_eq!(fb.remove_label(b), Some((verts[4], lvl(2))));
+    assert_eq!(fb.remove_label(b), Some(lvl(2)));
     assert_eq!(fb.find_first_label(verts[0], verts[5], lvl(2)), None);
     let _ = a;
 }
@@ -942,10 +942,10 @@ fn find_first_label_multiple_labels_at_same_vertex_and_level() {
         Some(smaller)
     );
 
-    assert_eq!(fb.remove_label(smaller), Some((verts[1], lvl(1))));
+    assert_eq!(fb.remove_label(smaller), Some(lvl(1)));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(other));
 
-    assert_eq!(fb.remove_label(other), Some((verts[1], lvl(1))));
+    assert_eq!(fb.remove_label(other), Some(lvl(1)));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
 }
 
@@ -967,7 +967,7 @@ fn find_first_label_removing_one_level_preserves_another() {
         Some(level_one)
     );
 
-    assert_eq!(fb.remove_label(level_zero), Some((verts[1], lvl(0))));
+    assert_eq!(fb.remove_label(level_zero), Some(lvl(0)));
     assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(0)), None);
     assert_eq!(
         fb.find_first_label(verts[0], verts[2], lvl(1)),
