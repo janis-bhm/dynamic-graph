@@ -66,9 +66,7 @@
 //! ```
 
 mod cover_level;
-mod graph;
 
 pub use cover_level::{
     CoverLevel, CoverTag, Edge, FindBridge, Level, NO_COVER, UserLabel,
 };
-pub use graph::{DynamicGraph, EdgeId, VertexId};
