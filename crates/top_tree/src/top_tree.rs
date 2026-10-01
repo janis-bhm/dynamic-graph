@@ -1572,14 +1572,14 @@ where
             );
         }
         if let Some(root_v) = root_v.take() {
-            node = self.new_internal(
+            self.new_internal(
                 node,
                 root_v,
                 BoundaryVertices::from_option(root_u.map(|_| u)),
             );
         }
 
-        node
+        leaf
     }
 
     fn swap_edge(
