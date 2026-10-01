@@ -2,8 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::*;
 
-
-
 fn lvl(i: i32) -> Level {
     Level::new(i).unwrap()
 }
@@ -23,7 +21,8 @@ fn new_vertices(fb: &mut FindBridge, n: usize) -> Vec<VertexId> {
 /// [`FindBridge::vertex_cluster`]; the private Section 5/6 entry points take
 /// this handle, while the public API takes the stable [`VertexId`].
 fn internal(fb: &FindBridge, v: VertexId) -> top_tree::VertexId {
-    fb.cluster_vertex(v.0).expect("a live vertex has a stable cluster")
+    fb.cluster_vertex(v.0)
+        .expect("a live vertex has a stable cluster")
 }
 
 /// The internal handles of both endpoints of a live forest edge.
@@ -68,7 +67,9 @@ fn edge_endpoints(fb: &FindBridge, edge: EdgeId) -> (VertexId, VertexId) {
 /// labels at the same vertex and level are several distinct self edges; the
 /// smallest [`EdgeId`] wins, which is the first one added.
 fn add_label(fb: &mut FindBridge, v: VertexId, level: Level) -> EdgeId {
-    let cluster = fb.vertex_cluster(internal(fb, v)).expect("a live vertex has a cluster");
+    let cluster = fb
+        .vertex_cluster(internal(fb, v))
+        .expect("a live vertex has a cluster");
     fb.add_non_tree_edge(cluster, cluster, level)
 }
 
@@ -621,7 +622,10 @@ fn check_sparse_forest_against_naive(
     };
 
     for &(model, vertex) in &live {
-        assert_eq!(fb.cover_level(internal(fb, vertex)), naive.cover_level(model));
+        assert_eq!(
+            fb.cover_level(internal(fb, vertex)),
+            naive.cover_level(model)
+        );
         assert_eq!(
             fb.find_size_internal(internal(fb, vertex), internal(fb, vertex), -1) as usize,
             naive.component(model).len(),
@@ -840,12 +844,15 @@ fn path_cover_and_uncover() {
     assert_eq!(fb.cover_level_between(verts[1], verts[6]), -1);
     assert_eq!(fb.cover_level_between(verts[0], verts[5]), -1);
     check_against_naive(&mut fb, &naive, &verts);
-    assert_eq!(fb.edge_count(), n - 1);
+    assert_eq!(fb.tree_edge_count(), n - 1);
 
     // The links above produced tree edges, in the order the paths expect.
     for (i, edge) in edges.iter().enumerate() {
         let (a, b) = edge_endpoints(&fb, *edge);
-        assert_eq!(key(model_index(&verts, a), model_index(&verts, b)), key(i, i + 1));
+        assert_eq!(
+            key(model_index(&verts, a), model_index(&verts, b)),
+            key(i, i + 1)
+        );
     }
 
     fb.cover(verts[0], verts[6], lvl(5));
@@ -1009,10 +1016,7 @@ fn naive_find_first_label(
     let projection = naive.projections(&path);
     for &m in &path {
         for (&id, &(u, level)) in labels {
-            if level == i
-                && projection.get(&u) == Some(&m)
-                && naive.cover_between(u, m) >= i
-            {
+            if level == i && projection.get(&u) == Some(&m) && naive.cover_between(u, m) >= i {
                 return Some(id);
             }
         }
@@ -1330,9 +1334,7 @@ fn randomized_find_size_and_labels() {
                         assert_eq!(l, i, "wrong level ({v},{w},{i}, seed {seed})");
                         let path = naive.path_vertices(v, w).unwrap();
                         let projection = naive.projections(&path);
-                        let m = *projection
-                            .get(&u)
-                            .expect("label must be in the component");
+                        let m = *projection.get(&u).expect("label must be in the component");
                         assert!(
                             naive.cover_between(u, m) >= i,
                             "invalid label ({v},{w},{i}, seed {seed})"
@@ -1442,8 +1444,11 @@ fn incident_mask_matches_naive() {
                 let level = (rng.next() % (levels as u64 + 2)) as i32 - 1;
                 let connected = naive.path_vertices(v, w).is_some();
                 let (a, b) = internal_endpoints(&fb, verts[v], verts[w]);
-                assert_eq!(fb.connected(verts[v], verts[w]), connected,
-                    "connected({v}, {w}) mismatch (seed {seed})");
+                assert_eq!(
+                    fb.connected(verts[v], verts[w]),
+                    connected,
+                    "connected({v}, {w}) mismatch (seed {seed})"
+                );
                 if connected {
                     let expected = naive_has_incident(&naive, &labels, v, w, level);
                     let mask = fb.debug_root_incident(a, b);
@@ -1675,13 +1680,13 @@ fn link_on_disconnected_pair_is_a_tree_edge() {
     let b = fb.add_vertex();
     let c = fb.add_vertex();
 
-    assert_eq!(fb.edge_count(), 0);
+    assert_eq!(fb.tree_edge_count(), 0);
     let ab = fb.link(a, b);
-    assert_eq!(fb.edge_count(), 1);
+    assert_eq!(fb.tree_edge_count(), 1);
     assert!(matches!(fb.edges[ab], Edge::Tree(_)));
 
     let cb = fb.link(c, b);
-    assert_eq!(fb.edge_count(), 2);
+    assert_eq!(fb.tree_edge_count(), 2);
     assert!(fb.connected(a, c));
     // The endpoints are the two vertices that were linked.
     assert_eq!(unordered(edge_endpoints(&fb, ab)), unordered((a, b)));
@@ -1701,14 +1706,17 @@ fn link_on_connected_pair_is_a_non_tree_edge() {
     assert!(matches!(fb.edges[ba], Edge::NonTree(_)));
     // The forest is untouched: no new tree edge, and the recorded graph edge
     // sits at level 0 at both endpoints.
-    assert_eq!(fb.edge_count(), 1);
+    assert_eq!(fb.tree_edge_count(), 1);
     assert!(fb.connected(a, b));
     assert_eq!(live_non_tree_edges(&fb), [ba].into());
     let Edge::NonTree(ref record) = fb.edges[ba] else {
         panic!("link on a connected pair must record a non-tree edge");
     };
     assert_eq!(record.level, lvl(0));
-    assert_eq!(unordered((VertexId(record.u), VertexId(record.v))), unordered((a, b)));
+    assert_eq!(
+        unordered((VertexId(record.u), VertexId(record.v))),
+        unordered((a, b))
+    );
 
     // Its level is what `find_first_label` reports at level 0.
     let (x, y) = internal_endpoints(&fb, a, b);
@@ -1725,18 +1733,18 @@ fn cut_edge_on_tree_edge() {
     let verts = new_vertices(&mut fb, 3);
     let ab = fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
-    assert_eq!(fb.edge_count(), 2);
+    assert_eq!(fb.tree_edge_count(), 2);
     assert!(fb.connected(verts[0], verts[2]));
 
     assert!(fb.cut_edge(ab));
-    assert_eq!(fb.edge_count(), 1);
+    assert_eq!(fb.tree_edge_count(), 1);
     assert!(!fb.connected(verts[0], verts[2]));
     assert!(fb.connected(verts[1], verts[2]));
     assert!(fb.edges.get(ab).is_none());
 
     // Cutting it again reports that nothing was there.
     assert!(!fb.cut_edge(ab));
-    assert_eq!(fb.edge_count(), 1);
+    assert_eq!(fb.tree_edge_count(), 1);
 }
 
 #[test]
@@ -1755,7 +1763,7 @@ fn cut_edge_on_non_tree_edge() {
     assert!(fb.cut_edge(cycle));
     assert!(fb.edges.get(cycle).is_none());
     assert_eq!(live_non_tree_edges(&fb), BTreeSet::new());
-    assert_eq!(fb.edge_count(), 2);
+    assert_eq!(fb.tree_edge_count(), 2);
     // The label is gone from both endpoints.
     assert_eq!(fb.find_first_label(a, b, lvl(0)), None);
 
@@ -1767,14 +1775,14 @@ fn cut_edge_on_non_tree_edge() {
 fn connected_and_edge_count_across_link_and_cut() {
     let mut fb = FindBridge::new();
     let verts = new_vertices(&mut fb, 4);
-    assert_eq!(fb.edge_count(), 0);
+    assert_eq!(fb.tree_edge_count(), 0);
     assert!(!fb.connected(verts[0], verts[1]));
 
     let mut live: Vec<EdgeId> = Vec::new();
     for (u, v) in [(0, 1), (1, 2), (2, 3)] {
         assert!(!fb.connected(verts[u], verts[v]));
         live.push(fb.link(verts[u], verts[v]));
-        assert_eq!(fb.edge_count(), live.len());
+        assert_eq!(fb.tree_edge_count(), live.len());
         assert!(fb.connected(verts[u], verts[v]));
     }
     // The three links form the path 0-1-2-3.
@@ -1782,10 +1790,10 @@ fn connected_and_edge_count_across_link_and_cut() {
 
     for (index, edge) in live.iter().enumerate() {
         assert!(fb.cut_edge(*edge));
-        assert_eq!(fb.edge_count(), live.len() - index - 1);
+        assert_eq!(fb.tree_edge_count(), live.len() - index - 1);
         assert!(!fb.connected(verts[0], verts[3]));
     }
-    assert_eq!(fb.edge_count(), 0);
+    assert_eq!(fb.tree_edge_count(), 0);
     // The vertices survive; only the edges are gone.
     for v in &verts {
         assert_eq!(fb.component_size(*v), 1);
@@ -1866,7 +1874,7 @@ fn remove_edge_on_bridge_tree_edge_splits_the_component() {
     // `ab` is a bridge, so removing it must not reach the replacement path.
     fb.remove_edge(ab);
     assert!(fb.edges.get(ab).is_none());
-    assert_eq!(fb.edge_count(), 1);
+    assert_eq!(fb.tree_edge_count(), 1);
     assert!(!fb.connected(verts[0], verts[2]));
     assert_eq!(fb.component_size(verts[0]), 1);
     assert_eq!(fb.component_size(verts[2]), 2);
@@ -1889,7 +1897,7 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
 
     fb.remove_edge(ca);
     assert!(fb.edges.get(ca).is_none());
-    assert_eq!(fb.edge_count(), 2);
+    assert_eq!(fb.tree_edge_count(), 2);
     assert_eq!(fb.component_size(verts[0]), 3);
     // The cycle is gone, so every path edge is a bridge once more.
     assert!(matches!(fb.edges[ab], Edge::Tree(_)));
@@ -1937,8 +1945,14 @@ fn remove_edge_on_covered_tree_edge_frees_deleted_edge_id() {
     fb.cover(verts[2], verts[0], lvl(0));
     fb.remove_edge(ab);
 
-    assert!(fb.edges.get(ab).is_none(), "the deleted edge slot must be freed");
-    assert!(!fb.cut_edge(ab), "a deleted edge cannot be cut a second time");
+    assert!(
+        fb.edges.get(ab).is_none(),
+        "the deleted edge slot must be freed"
+    );
+    assert!(
+        !fb.cut_edge(ab),
+        "a deleted edge cannot be cut a second time"
+    );
 }
 
 #[test]

@@ -883,6 +883,12 @@ struct NonTreeEdge {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EdgeId(NonMaxUsize);
 
+impl EdgeId {
+    pub fn index(&self) -> usize {
+        self.0.get()
+    }
+}
+
 impl top_tree::slot::Indexing for EdgeId {
     type Optional = Option<Self>;
 
@@ -898,6 +904,12 @@ impl top_tree::slot::Indexing for EdgeId {
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VertexId(top_tree::ClusterId);
+
+impl VertexId {
+    pub fn index(&self) -> usize {
+        self.0.index()
+    }
+}
 
 struct VertexLabels(BTreeMap<Level, BTreeSet<EdgeId>>);
 
@@ -990,6 +1002,24 @@ impl FindBridge {
         self.top_tree.cluster_vertex(cluster)
     }
 
+    pub fn endpoints(&self, edge_id: EdgeId) -> Option<(VertexId, VertexId)> {
+        match self.edges.get(edge_id) {
+            Some(Edge::NonTree(non_tree_edge)) => {
+                Some((VertexId(non_tree_edge.u), VertexId(non_tree_edge.v)))
+            }
+            Some(Edge::Tree(cluster_id)) => {
+                let (u, v) = self.top_tree.edge_endpoints(*cluster_id)?;
+                let (u, v) = (
+                    self.vertex_cluster(u).expect("the u cluster must exist"),
+                    self.vertex_cluster(v).expect("the v cluster must exist"),
+                );
+
+                Some((VertexId(u), VertexId(v)))
+            }
+            None => None,
+        }
+    }
+
     /// Removes an isolated-in-the-forest vertex, its structural label leaf,
     /// and all user labels attached to it.
     ///
@@ -1030,7 +1060,7 @@ impl FindBridge {
     }
 
     /// The number of tree edges.
-    pub fn edge_count(&self) -> usize {
+    pub fn tree_edge_count(&self) -> usize {
         self.top_tree.edge_count()
     }
 
