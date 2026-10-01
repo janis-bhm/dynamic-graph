@@ -1062,20 +1062,7 @@ impl FindBridge {
         match self.edges.remove(edge_id) {
             Some(Edge::NonTree(non_tree_edge)) => {
                 let level = non_tree_edge.level;
-                for cluster in [non_tree_edge.u, non_tree_edge.v] {
-                    if self
-                        .top_tree
-                        .leaf_weight_mut(cluster)
-                        .into_label()
-                        .expect("the non-tree edge's u cluster must be a label")
-                        .remove_from_level(level, edge_id)
-                    {
-                        self.top_tree
-                            .update_label_summary_by_cluster(cluster, |sum| {
-                                sum.remove_vertex_levels(level_bit(level))
-                            });
-                    }
-                }
+                self.remove_edge_labels(edge_id, level, non_tree_edge.u, non_tree_edge.v);
 
                 true
             }
@@ -1116,6 +1103,52 @@ impl FindBridge {
         self.with_path_tag(u, v, CoverTag::uncover(level));
     }
 
+    fn remove_edge_labels(
+        &mut self,
+        edge_id: EdgeId,
+        level: Level,
+        u: top_tree::ClusterId,
+        v: top_tree::ClusterId,
+    ) {
+        for cluster in [u, v] {
+            if self
+                .top_tree
+                .leaf_weight_mut(cluster)
+                .into_label()
+                .expect("the non-tree edge's u cluster must be a label")
+                .remove_from_level(level, edge_id)
+            {
+                self.top_tree
+                    .update_label_summary_by_cluster(cluster, |sum| {
+                        sum.remove_vertex_levels(level_bit(level))
+                    });
+            }
+        }
+    }
+
+    fn add_edge_labels(
+        &mut self,
+        edge_id: EdgeId,
+        level: Level,
+        u: top_tree::ClusterId,
+        v: top_tree::ClusterId,
+    ) {
+        for cluster in [u, v] {
+            if self
+                .top_tree
+                .leaf_weight_mut(cluster)
+                .into_label()
+                .expect("the non-tree edge's u cluster must be a label")
+                .add_to_level(level, edge_id)
+            {
+                self.top_tree
+                    .update_label_summary_by_cluster(cluster, |sum| {
+                        sum.add_vertex_levels(level_bit(level))
+                    });
+            }
+        }
+    }
+
     pub fn remove_edge(&mut self, edge_id: EdgeId) {
         let ((u, v), level) = match self.edges[edge_id] {
             Edge::Tree(cluster_id) => {
@@ -1136,20 +1169,7 @@ impl FindBridge {
                 (endpoints, level)
             }
             Edge::NonTree(NonTreeEdge { u, v, level }) => {
-                for cluster in [u, v] {
-                    if self
-                        .top_tree
-                        .leaf_weight_mut(cluster)
-                        .into_label()
-                        .expect("the non-tree edge's u cluster must be a label")
-                        .remove_from_level(level, edge_id)
-                    {
-                        self.top_tree
-                            .update_label_summary_by_cluster(cluster, |sum| {
-                                sum.remove_vertex_levels(level_bit(level))
-                            });
-                    }
-                }
+                self.remove_edge_labels(edge_id, level, u, v);
                 self.edges.remove(edge_id);
 
                 let (u, v) = {
@@ -1234,20 +1254,7 @@ impl FindBridge {
             panic!("replacement edge must be a non-tree edge")
         };
 
-        for cluster in [cr, cq] {
-            if self
-                .top_tree
-                .leaf_weight_mut(cluster)
-                .into_label()
-                .expect("replacement edge's cluster must be a label")
-                .remove_from_level(level, replacement)
-            {
-                self.top_tree
-                    .update_label_summary_by_cluster(cluster, |sum| {
-                        sum.remove_vertex_levels(level_bit(level))
-                    });
-            }
-        }
+        self.remove_edge_labels(replacement, level, cr, cq);
 
         let (r, q) = (
             self.cluster_vertex(cr)
@@ -1342,33 +1349,8 @@ impl FindBridge {
             if let Some(next_level) = level.increment()
                 && self.find_size_internal(q, r, next_level.0) <= size
             {
-                for cluster in [cr, cq] {
-                    if self
-                        .top_tree
-                        .leaf_weight_mut(cluster)
-                        .into_label()
-                        .expect("the non-tree edge's u cluster must be a label")
-                        .remove_from_level(level, edge)
-                    {
-                        self.top_tree
-                            .update_label_summary_by_cluster(cluster, |sum| {
-                                sum.remove_vertex_levels(level_bit(level))
-                            });
-                    }
-
-                    if self
-                        .top_tree
-                        .leaf_weight_mut(cluster)
-                        .into_label()
-                        .expect("the non-tree edge's u cluster must be a label")
-                        .add_to_level(next_level, edge)
-                    {
-                        self.top_tree
-                            .update_label_summary_by_cluster(cluster, |sum| {
-                                sum.add_vertex_levels(level_bit(next_level))
-                            });
-                    }
-                }
+                self.remove_edge_labels(edge, level, cr, cq);
+                self.add_edge_labels(edge, next_level, cr, cq);
 
                 self.edges.get_mut(edge).unwrap().set_level(next_level);
                 self.with_vertex_id_path_tag(r, q, CoverTag::cover(next_level));
@@ -1548,20 +1530,7 @@ impl FindBridge {
     ) -> EdgeId {
         let id = self.edges.push(Edge::NonTree(NonTreeEdge { u, v, level }));
 
-        for cluster in [u, v] {
-            if self
-                .top_tree
-                .leaf_weight_mut(cluster)
-                .into_label()
-                .unwrap()
-                .add_to_level(level, id)
-            {
-                self.top_tree
-                    .update_label_summary_by_cluster(cluster, |sum| {
-                        sum.add_vertex_levels(level_bit(level))
-                    });
-            }
-        }
+        self.add_edge_labels(id, level, u, v);
 
         id
     }
