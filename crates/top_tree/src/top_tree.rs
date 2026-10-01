@@ -15,7 +15,7 @@
 use std::{hash::Hash, mem::MaybeUninit};
 
 use crate::{
-    NonMaxUsize,
+    BitVec, NonMaxUsize,
     summary::{Boundary, MergeContext, Summary},
     tree::{self, SwapResult, Tree},
 };
@@ -102,7 +102,10 @@ where
     fn push(&mut self, cluster: Cluster<S>) -> ClusterId {
         if let Some(free_index) = self.first_free {
             let index = free_index.get();
-            debug_assert!(index < self.nodes.len(), "cluster free list link out of bounds");
+            debug_assert!(
+                index < self.nodes.len(),
+                "cluster free list link out of bounds"
+            );
             debug_assert!(
                 !self.live.get(index),
                 "cluster free list must not point at a live slot"
@@ -135,7 +138,10 @@ where
     fn push_with(&mut self, f: impl FnOnce(ClusterId) -> Cluster<S>) -> ClusterId {
         if let Some(free_index) = self.first_free {
             let index = free_index.get();
-            debug_assert!(index < self.nodes.len(), "cluster free list link out of bounds");
+            debug_assert!(
+                index < self.nodes.len(),
+                "cluster free list link out of bounds"
+            );
             debug_assert!(
                 !self.live.get(index),
                 "cluster free list must not point at a live slot"
@@ -205,58 +211,6 @@ where
 {
     fn index_mut(&mut self, index: ClusterId) -> &mut Self::Output {
         self.get_mut(index).expect("cluster must exist")
-    }
-}
-
-/// A compact growable bit vector, used to track which vertices are exposed.
-///
-/// Bits are packed into `u64` blocks, so each vertex costs a single bit rather
-/// than the byte a `Vec<bool>` would use.
-#[derive(Default)]
-struct BitVec {
-    blocks: Vec<u64>,
-}
-
-impl BitVec {
-    const BITS: usize = u64::BITS as usize;
-
-    fn new() -> Self {
-        Self { blocks: Vec::new() }
-    }
-
-    /// Grows the vector to hold at least `len` bits, zero-filling new bits.
-    fn grow_to(&mut self, len: usize) {
-        let blocks = len.div_ceil(Self::BITS);
-        if blocks > self.blocks.len() {
-            self.blocks.resize(blocks, 0);
-        }
-    }
-
-    /// Returns whether the bit at `index` is set; `false` if out of range.
-    fn get(&self, index: usize) -> bool {
-        let block = index / Self::BITS;
-        self.blocks
-            .get(block)
-            .is_some_and(|bits| bits >> (index % Self::BITS) & 1 == 1)
-    }
-
-    fn remove(&mut self, index: usize, last: usize) {
-        self.set(index, self.get(last));
-        self.set(last, false);
-    }
-
-    /// Sets the bit at `index`, ignoring indices past the end.
-    fn set(&mut self, index: usize, value: bool) {
-        let block = index / Self::BITS;
-        let Some(bits) = self.blocks.get_mut(block) else {
-            return;
-        };
-        let mask = 1u64 << (index % Self::BITS);
-        if value {
-            *bits |= mask;
-        } else {
-            *bits &= !mask;
-        }
     }
 }
 
@@ -1810,6 +1764,7 @@ where
 
         Self::remove_vertex_bit(&mut self.exposed, vertex, swap);
 
+        // TODO: just find the root and ascend
         if let SwapResult::Some { prev, current } = swap {
             self.clusters.for_each_mut(|cluster| {
                 cluster.boundary_vertices.remap(prev, current);

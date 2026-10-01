@@ -178,3 +178,260 @@ impl_nonmax_type!(
     pub struct NonMaxU32(u32 is 0..=0xFFFFFFFE),
     pub struct NonMaxI32(i32 is 0..=0x7FFFFFFE)
 );
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Generation(u32);
+
+impl Generation {
+    fn increment(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+
+    fn current(&self) -> Self {
+        *self
+    }
+}
+
+/// A compact growable bit vector, used to track which vertices are exposed.
+///
+/// Bits are packed into `u64` blocks, so each vertex costs a single bit rather
+/// than the byte a `Vec<bool>` would use.
+#[derive(Default)]
+struct BitVec {
+    blocks: Vec<u64>,
+}
+
+impl BitVec {
+    const BITS: usize = u64::BITS as usize;
+
+    fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    /// Grows the vector to hold at least `len` bits, zero-filling new bits.
+    fn grow_to(&mut self, len: usize) {
+        let blocks = len.div_ceil(Self::BITS);
+        if blocks > self.blocks.len() {
+            self.blocks.resize(blocks, 0);
+        }
+    }
+
+    #[expect(dead_code)]
+    fn all_in_range(&self, range: std::ops::Range<usize>) -> bool {
+        /// Iterator over the N-sized block indices and masks from bits `start` to `end` exclusively.
+        struct BlockIter<const N: usize> {
+            start: usize,
+            end: usize,
+        }
+
+        impl<const N: usize> Iterator for BlockIter<N> {
+            type Item = (usize, u64);
+
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.start > self.end {
+                    return None;
+                }
+
+                let block_idx = self.start.div_euclid(N);
+                let mask_start = self.start.rem_euclid(N);
+                let mask_size = if self.start + N < self.end {
+                    N - mask_start
+                } else {
+                    self.end - self.start
+                };
+
+                let mask = ((1u64 << mask_size) - 1) << mask_start;
+                self.start += mask_size;
+                Some((block_idx, mask))
+            }
+        }
+
+        for (block_idx, mask) in {
+            BlockIter::<{ u64::BITS as usize }> {
+                start: range.start,
+                end: range.end,
+            }
+        } {
+            let block = self.blocks.get(block_idx).copied().unwrap_or(0);
+            if block & mask != mask {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Returns whether the bit at `index` is set; `false` if out of range.
+    fn get(&self, index: usize) -> bool {
+        let block = index / Self::BITS;
+        self.blocks
+            .get(block)
+            .is_some_and(|bits| bits >> (index % Self::BITS) & 1 == 1)
+    }
+
+    fn remove(&mut self, index: usize, last: usize) {
+        self.set(index, self.get(last));
+        self.set(last, false);
+    }
+
+    /// Sets the bit at `index`, ignoring indices past the end.
+    fn set(&mut self, index: usize, value: bool) {
+        let block = index / Self::BITS;
+        let Some(bits) = self.blocks.get_mut(block) else {
+            return;
+        };
+        let mask = 1u64 << (index % Self::BITS);
+        if value {
+            *bits |= mask;
+        } else {
+            *bits &= !mask;
+        }
+    }
+}
+
+pub mod slot {
+    use std::mem::{self, ManuallyDrop};
+
+    use crate::{BitVec, NonMaxUsize};
+
+    union Slot<T> {
+        value: ManuallyDrop<T>,
+        next: Option<NonMaxUsize>,
+    }
+
+    pub struct SlotVec<T> {
+        slots: Vec<Slot<T>>,
+        occupancy: BitVec,
+        first_free: Option<NonMaxUsize>,
+    }
+
+    impl<T> SlotVec<T> {
+        pub fn new() -> Self {
+            Self {
+                slots: Vec::new(),
+                occupancy: BitVec::new(),
+                first_free: None,
+            }
+        }
+
+        pub fn push(&mut self, value: T) -> NonMaxUsize {
+            let index = if let Some(free) = self.first_free {
+                let free_index = free.get();
+                self.first_free = unsafe { self.slots[free_index].next };
+                self.slots[free_index] = Slot {
+                    value: ManuallyDrop::new(value),
+                };
+
+                free
+            } else {
+                let index = self.slots.len();
+                self.slots.push(Slot {
+                    value: ManuallyDrop::new(value),
+                });
+
+                // SAFETY: Vec cannot grow beyond isize::MAX elements.
+                unsafe { NonMaxUsize::new_unchecked(index) }
+            };
+
+            self.occupancy.grow_to(index.get() + 1);
+            self.occupancy.set(index.get(), true);
+
+            index
+        }
+
+        pub fn push_with(&mut self, f: impl FnOnce(NonMaxUsize) -> T) -> NonMaxUsize {
+            let index = if let Some(free) = self.first_free {
+                let free_index = free.get();
+                self.first_free = unsafe { self.slots[free_index].next };
+                self.slots[free_index] = Slot {
+                    value: ManuallyDrop::new(f(free)),
+                };
+
+                free
+            } else {
+                // SAFETY: Vec cannot grow beyond isize::MAX elements.
+                let index = unsafe { NonMaxUsize::new_unchecked(self.slots.len()) };
+                self.slots.push(Slot {
+                    value: ManuallyDrop::new(f(index)),
+                });
+
+                index
+            };
+
+            self.occupancy.grow_to(index.get() + 1);
+            self.occupancy.set(index.get(), true);
+
+            index
+        }
+
+        pub fn remove(&mut self, index: NonMaxUsize) -> Option<T> {
+            let idx = index.get();
+            if !self.occupancy.get(idx) {
+                return None;
+            }
+
+            let elt = unsafe {
+                let next_free = self.first_free;
+                let elt = ManuallyDrop::take(&mut self.slots[idx].value);
+                _ = mem::replace(&mut self.slots[idx], Slot { next: next_free });
+
+                elt
+            };
+
+            self.occupancy.set(idx, false);
+            if idx == self.slots.len() - 1 {
+                self.slots.pop();
+                // self.occupancy.shrink_to(self.slots.len());
+            } else {
+                self.first_free = Some(index);
+            }
+
+            Some(elt)
+        }
+
+        pub fn get(&self, index: NonMaxUsize) -> Option<&T> {
+            let idx = index.get();
+            if !self.occupancy.get(idx) {
+                return None;
+            }
+
+            unsafe { Some(&self.slots[idx].value) }
+        }
+
+        pub fn get_mut(&mut self, index: NonMaxUsize) -> Option<&mut T> {
+            let idx = index.get();
+            if !self.occupancy.get(idx) {
+                return None;
+            }
+
+            unsafe { Some(&mut self.slots[idx].value) }
+        }
+
+        pub fn for_each_mut(&mut self, mut f: impl FnMut(NonMaxUsize, &mut T)) {
+            for (i, slot) in self.slots.iter_mut().enumerate() {
+                let index = unsafe { NonMaxUsize::new_unchecked(i) };
+                if self.occupancy.get(i) {
+                    unsafe { f(index, &mut slot.value) }
+                }
+            }
+        }
+
+        pub fn iter(&self) -> impl Iterator<Item = (NonMaxUsize, &T)> {
+            self.slots.iter().enumerate().filter_map(move |(i, slot)| {
+                let index = unsafe { NonMaxUsize::new_unchecked(i) };
+                if self.occupancy.get(i) {
+                    Some((index, unsafe { &*slot.value }))
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    impl<T> Default for SlotVec<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}

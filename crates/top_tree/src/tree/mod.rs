@@ -4,7 +4,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::{NonMaxU32, NonMaxUsize};
+use crate::{Generation, NonMaxU32, NonMaxUsize};
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VertexId {
@@ -168,20 +168,6 @@ impl<W> Edge<W> {
 impl<W> Label<W> {
     pub fn node_index(&self) -> usize {
         self.node
-    }
-}
-
-#[repr(transparent)]
-#[derive(Clone, Copy, Default, Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Generation(u32);
-
-impl Generation {
-    fn increment(&mut self) {
-        self.0 = self.0.wrapping_add(1);
-    }
-
-    fn current(&self) -> Self {
-        *self
     }
 }
 
