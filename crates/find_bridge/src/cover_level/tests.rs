@@ -525,7 +525,7 @@ fn check_sparse_forest_against_naive(
     for &(model, vertex) in &live {
         assert_eq!(fb.cover_level(vertex), naive.cover_level(model));
         assert_eq!(
-            fb.find_size(vertex, vertex, -1) as usize,
+            fb.find_size_internal(vertex, vertex, -1) as usize,
             naive.component(model).len(),
             "find_size for model vertex {model}"
         );
@@ -903,8 +903,8 @@ fn component_size_and_labels() {
     }
 
     // The whole path is one component of size 6.
-    assert_eq!(fb.find_size(verts[0], verts[0], -1), 6);
-    assert_eq!(fb.find_size(verts[3], verts[3], -1), 6);
+    assert_eq!(fb.find_size_internal(verts[0], verts[0], -1), 6);
+    assert_eq!(fb.find_size_internal(verts[3], verts[3], -1), 6);
 
     // Cover 1..4 at level 2.
     fb.cover(verts[1], verts[4], lvl(2));
@@ -915,7 +915,7 @@ fn component_size_and_labels() {
     // All path vertices count at any level; off-path vertices here do not
     // exist except the path itself, so the counts are just the component size
     // for i <= 2.
-    assert_eq!(fb.find_size(verts[0], verts[5], 2), 6);
+    assert_eq!(fb.find_size_internal(verts[0], verts[5], 2), 6);
 
     let a = fb.add_label(verts[2], lvl(1));
     let b = fb.add_label(verts[4], lvl(2));
@@ -1167,7 +1167,7 @@ fn randomized_find_size_and_labels() {
                 let w = (rng.next() as usize) % n;
                 let i = (rng.next() % (levels as u64 + 1)) as i32 - 1;
                 assert_eq!(
-                    fb.find_size(verts[v], verts[w], i),
+                    fb.find_size_internal(verts[v], verts[w], i),
                     naive_find_size(&naive, n, v, w, i),
                     "find_size({v}, {w}, {i}) mismatch (seed {seed})"
                 );
@@ -1331,7 +1331,7 @@ fn find_size_above_level_cap_counts_path_vertices() {
         fb.link(verts[vertex - 1], verts[vertex]);
     }
 
-    assert_eq!(fb.find_size(verts[0], verts[3], LEVEL_CAP + 1), 4);
+    assert_eq!(fb.find_size_internal(verts[0], verts[3], LEVEL_CAP + 1), 4);
 }
 
 #[test]
@@ -1343,9 +1343,12 @@ fn find_size_above_level_cap_on_point_cluster() {
     }
 
     for vertex in 0..6 {
-        assert_eq!(fb.find_size(verts[vertex], verts[vertex], LEVEL_CAP + 1), 1);
         assert_eq!(
-            fb.find_size(verts[vertex], verts[vertex], LEVEL_CAP + 100),
+            fb.find_size_internal(verts[vertex], verts[vertex], LEVEL_CAP + 1),
+            1
+        );
+        assert_eq!(
+            fb.find_size_internal(verts[vertex], verts[vertex], LEVEL_CAP + 100),
             1
         );
     }
@@ -1362,12 +1365,12 @@ fn find_size_above_level_cap_is_path_length() {
     for (u, v) in [(1, 4), (0, 5), (2, 3)] {
         let expected = (v - u + 1) as u64;
         assert_eq!(
-            fb.find_size(verts[u], verts[v], LEVEL_CAP + 1),
+            fb.find_size_internal(verts[u], verts[v], LEVEL_CAP + 1),
             expected,
             "forward pair {u}->{v}"
         );
         assert_eq!(
-            fb.find_size(verts[v], verts[u], LEVEL_CAP + 1),
+            fb.find_size_internal(verts[v], verts[u], LEVEL_CAP + 1),
             expected,
             "reverse pair {v}->{u}"
         );
@@ -1414,8 +1417,8 @@ fn find_size_is_symmetric() {
             for _ in 0..8 {
                 let u = (rng.next() as usize) % n;
                 let v = (rng.next() as usize) % n;
-                let forward = fb.find_size(verts[u], verts[v], level);
-                let reverse = fb.find_size(verts[v], verts[u], level);
+                let forward = fb.find_size_internal(verts[u], verts[v], level);
+                let reverse = fb.find_size_internal(verts[v], verts[u], level);
                 assert_eq!(
                     forward, reverse,
                     "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
@@ -1429,8 +1432,8 @@ fn find_size_is_symmetric() {
             let u = (rng.next() as usize) % n;
             let v = (rng.next() as usize) % n;
             let level = (rng.next() % (LEVEL_CAP as u64 + 2)) as i32 - 1;
-            let forward = fb.find_size(verts[u], verts[v], level);
-            let reverse = fb.find_size(verts[v], verts[u], level);
+            let forward = fb.find_size_internal(verts[u], verts[v], level);
+            let reverse = fb.find_size_internal(verts[v], verts[u], level);
             assert_eq!(
                 forward, reverse,
                 "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
@@ -1453,7 +1456,7 @@ fn find_size_at_minus_one_is_component_size() {
     for vertex in 0..n {
         let expected = naive.component(vertex).len() as u64;
         assert_eq!(
-            fb.find_size(verts[vertex], verts[vertex], -1),
+            fb.find_size_internal(verts[vertex], verts[vertex], -1),
             expected,
             "component size mismatch at vertex {vertex}"
         );
@@ -1466,10 +1469,10 @@ fn find_size_above_level_cap_on_single_edge() {
     let verts = new_vertices(&mut fb, 2);
     fb.link(verts[0], verts[1]);
 
-    assert_eq!(fb.find_size(verts[0], verts[0], LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size(verts[1], verts[1], LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size(verts[0], verts[1], LEVEL_CAP + 1), 2);
-    assert_eq!(fb.find_size(verts[1], verts[0], LEVEL_CAP + 1), 2);
+    assert_eq!(fb.find_size_internal(verts[0], verts[0], LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size_internal(verts[1], verts[1], LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size_internal(verts[0], verts[1], LEVEL_CAP + 1), 2);
+    assert_eq!(fb.find_size_internal(verts[1], verts[0], LEVEL_CAP + 1), 2);
 }
 
 #[test]
@@ -1477,8 +1480,8 @@ fn find_size_above_level_cap_on_isolated_vertex() {
     let mut fb = FindBridge::new();
     let vertex = fb.add_vertex();
 
-    assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size(vertex, vertex, LEVEL_CAP + 100), 1);
+    assert_eq!(fb.find_size_internal(vertex, vertex, LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size_internal(vertex, vertex, LEVEL_CAP + 100), 1);
 }
 
 #[test]
@@ -1489,9 +1492,12 @@ fn find_size_above_level_cap_on_star() {
         fb.link(verts[0], verts[leaf]);
     }
 
-    assert_eq!(fb.find_size(verts[0], verts[0], LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size_internal(verts[0], verts[0], LEVEL_CAP + 1), 1);
     for leaf in 1..=5 {
-        assert_eq!(fb.find_size(verts[0], verts[leaf], LEVEL_CAP + 1), 2);
+        assert_eq!(
+            fb.find_size_internal(verts[0], verts[leaf], LEVEL_CAP + 1),
+            2
+        );
     }
-    assert_eq!(fb.find_size(verts[1], verts[2], LEVEL_CAP + 1), 3);
+    assert_eq!(fb.find_size_internal(verts[1], verts[2], LEVEL_CAP + 1), 3);
 }

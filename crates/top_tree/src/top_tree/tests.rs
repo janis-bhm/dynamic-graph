@@ -22,14 +22,14 @@ struct Agg {
 impl Summary for Agg {
     type Tag = ();
 
-    fn tree_edge(u: tree::VertexId, v: tree::VertexId) -> Self {
+    fn tree_edge(e: ClusterId) -> Self {
         Agg {
             edges: 1,
             xor: edge_weight(u, v),
         }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         Agg { edges: 0, xor: 0 }
     }
 
@@ -51,11 +51,11 @@ struct PathLen {
 impl Summary for PathLen {
     type Tag = ();
 
-    fn tree_edge(_u: tree::VertexId, _v: tree::VertexId) -> Self {
+    fn tree_edge(_u: ClusterId) -> Self {
         PathLen { len: 1 }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         PathLen { len: 0 }
     }
 
@@ -81,11 +81,11 @@ struct LabelValue {
 impl Summary for LabelValue {
     type Tag = ();
 
-    fn tree_edge(_u: tree::VertexId, _v: tree::VertexId) -> Self {
+    fn tree_edge(_u: ClusterId) -> Self {
         LabelValue { value: 0 }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         LabelValue { value: 1 }
     }
 
@@ -108,14 +108,14 @@ struct PathSum {
 impl Summary for PathSum {
     type Tag = i64;
 
-    fn tree_edge(u: tree::VertexId, v: tree::VertexId) -> Self {
+    fn tree_edge(u: ClusterId) -> Self {
         PathSum {
             sum: edge_weight(u, v) as i64,
             len: 1,
         }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         PathSum { sum: 0, len: 0 }
     }
 
@@ -155,13 +155,13 @@ struct PathMax {
 impl Summary for PathMax {
     type Tag = ();
 
-    fn tree_edge(u: tree::VertexId, v: tree::VertexId) -> Self {
+    fn tree_edge(e: ClusterId) -> Self {
         PathMax {
             max: edge_weight(u, v) * 10,
         }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         PathMax { max: 0 }
     }
 
@@ -183,19 +183,17 @@ impl Summary for PathMax {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirectedPath {
-    edges: Vec<(tree::VertexId, tree::VertexId)>,
+    edges: Vec<ClusterId>,
 }
 
 impl Summary for DirectedPath {
     type Tag = ();
 
-    fn tree_edge(u: tree::VertexId, v: tree::VertexId) -> Self {
-        DirectedPath {
-            edges: vec![(u, v)],
-        }
+    fn tree_edge(e: ClusterId) -> Self {
+        DirectedPath { edges: vec![e] }
     }
 
-    fn label(_v: tree::VertexId) -> Self {
+    fn label(_v: ClusterId) -> Self {
         DirectedPath { edges: Vec::new() }
     }
 
@@ -208,21 +206,6 @@ impl Summary for DirectedPath {
             edges.extend_from_slice(&right.edges);
         }
         DirectedPath { edges }
-    }
-
-    fn flip(&mut self) {
-        self.edges = self.edges.drain(..).rev().map(|(u, v)| (v, u)).collect();
-    }
-
-    fn remap_vertex(&mut self, old: tree::VertexId, new: tree::VertexId) {
-        for (u, v) in &mut self.edges {
-            if *u == old {
-                *u = new;
-            }
-            if *v == old {
-                *v = new;
-            }
-        }
     }
 }
 

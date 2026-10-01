@@ -19,7 +19,7 @@
 //! boundary vertices each child and the resulting cluster have. From this a
 //! summary can recover the case it is in:
 
-use crate::tree::VertexId;
+use crate::{ClusterId, tree::VertexId};
 
 /// The boundary vertices of a cluster, in its logical frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,13 +115,13 @@ pub trait Summary: Sized {
     /// propagation is needed.
     type Tag: Sized + Clone + Default;
 
-    /// Summary of the leaf representing the tree edge `u`-`v`.
+    /// Summary of the leaf representing the tree edge `e`.
     ///
     /// `u` and `v` are given in the orientation stored in the leaf.
-    fn tree_edge(u: VertexId, v: VertexId) -> Self;
+    fn tree_edge(e: ClusterId) -> Self;
 
     /// Summary of the leaf representing the label at `v`.
-    fn label(v: VertexId) -> Self;
+    fn label(l: ClusterId) -> Self;
 
     /// Combine the summaries of the left and right child of a cluster.
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
@@ -133,12 +133,6 @@ pub trait Summary: Sized {
     /// fields; summaries that do not depend on orientation can use this
     /// default no-op implementation.
     fn flip(&mut self) {}
-
-    /// Remap any vertex handle stored in this summary after the forest moves a
-    /// surviving vertex from `old` to `new` while compacting its vertex
-    /// storage. Summaries that do not store vertex handles can use this
-    /// default no-op implementation.
-    fn remap_vertex(&mut self, _old: VertexId, _new: VertexId) {}
 
     /// Apply a lazy `tag` to this summary.
     fn apply(&mut self, _tag: &Self::Tag) {}

@@ -670,9 +670,9 @@ pub struct CoverLevel {
     /// Minimum cover level off the cluster path, or [`NO_COVER`].
     pub global_cover: i32,
     /// An edge of the cluster path attaining `cover`.
-    pub min_path_edge: Option<Edge>,
+    pub min_path_edge: Option<top_tree::ClusterId>,
     /// An edge off the cluster path attaining `global_cover`.
-    pub min_global_edge: Option<Edge>,
+    pub min_global_edge: Option<top_tree::ClusterId>,
     /// User-label levels incident to this cluster's path or point boundary.
     pub incident: u64,
     /// The composed lazy cover operation. The vectors below remain raw while
@@ -731,14 +731,17 @@ fn pointincident_has(
 
 /// Picks the smaller of two `(level, edge)` candidates, preferring the first
 /// on ties.
-fn min_candidate(left: (i32, Option<Edge>), right: (i32, Option<Edge>)) -> (i32, Option<Edge>) {
+fn min_candidate(
+    left: (i32, Option<top_tree::ClusterId>),
+    right: (i32, Option<top_tree::ClusterId>),
+) -> (i32, Option<top_tree::ClusterId>) {
     if right.0 < left.0 { right } else { left }
 }
 
 impl Summary for CoverLevel {
     type Tag = CoverTag;
 
-    fn tree_edge(u: top_tree::VertexId, v: top_tree::VertexId) -> Self {
+    fn tree_edge(e: top_tree::ClusterId) -> Self {
         // A freshly linked tree edge is a bridge: its cover level is -1. The
         // same value is stored as the global cover so that an edge leaf can
         // serve as the root of an `expose`; whether the edge is on or off the
@@ -747,8 +750,8 @@ impl Summary for CoverLevel {
         CoverLevel {
             cover: -1,
             global_cover: -1,
-            min_path_edge: Some((u, v)),
-            min_global_edge: Some((u, v)),
+            min_path_edge: Some(e),
+            min_global_edge: Some(e),
             incident: 0,
             pending: CoverTag::identity(),
             size: zero_vector(),
@@ -759,7 +762,7 @@ impl Summary for CoverLevel {
         }
     }
 
-    fn label(_v: top_tree::VertexId) -> Self {
+    fn label(_v: top_tree::ClusterId) -> Self {
         let size = SizeVector::from_vec(vec![1; SLOTS]);
         let tree = single_key_tree(LEVEL_CAP, &size, 0);
         CoverLevel {
@@ -801,7 +804,7 @@ impl Summary for CoverLevel {
         // wholesale counts even if it was that child's path edge. An edge leaf
         // is special: it carries a single edge, which is on the parent's path
         // exactly when the leaf is a path child of a path parent.
-        let candidate = |child: &Self, child_is_path: bool| -> (i32, Option<Edge>) {
+        let candidate = |child: &Self, child_is_path: bool| -> (i32, Option<top_tree::ClusterId>) {
             if child.leaf == LeafKind::Edge {
                 if parent_is_path && child_is_path {
                     (NO_COVER, None)
@@ -846,17 +849,6 @@ impl Summary for CoverLevel {
 
     fn flip(&mut self) {
         self.part.swap(0, 1);
-    }
-
-    fn remap_vertex(&mut self, old: top_tree::VertexId, new: top_tree::VertexId) {
-        let remap = |(u, v): Edge| {
-            (
-                if u == old { new } else { u },
-                if v == old { new } else { v },
-            )
-        };
-        self.min_path_edge = self.min_path_edge.map(remap);
-        self.min_global_edge = self.min_global_edge.map(remap);
     }
 
     fn apply(&mut self, tag: &Self::Tag) {
@@ -930,20 +922,21 @@ impl FindBridge {
     }
 
     /// Adds a vertex and returns its internal forest handle.
-    pub fn add_vertex(&mut self) -> top_tree::VertexId {
+    pub fn add_vertex(&mut self) -> VertexId {
         let index = self.top_tree.add_vertex();
 
         // One label per vertex makes every vertex contribute exactly once to
         // FindSize and supplies the point cluster for that vertex.
-        self.top_tree.attach(index, BTreeMap::new());
-        index
+        let cluster = self.top_tree.attach(index, BTreeMap::new());
+
+        VertexId(cluster)
     }
 
     /// The stable cluster representing `vertex`, or `None` if `vertex` is stale.
     ///
     /// Every live vertex owns exactly one top-tree label leaf, and its
     /// [`top_tree::ClusterId`] does not change when other vertices are removed.
-    pub fn vertex_cluster(&self, vertex: top_tree::VertexId) -> Option<top_tree::ClusterId> {
+    fn vertex_cluster(&self, vertex: top_tree::VertexId) -> Option<top_tree::ClusterId> {
         self.top_tree.first_label(vertex)
     }
 
@@ -951,7 +944,7 @@ impl FindBridge {
     ///
     /// This re-resolves the unstable internal handle after a vertex removal; it is
     /// the inverse of [`FindBridge::vertex_cluster`] for a live vertex.
-    pub fn cluster_vertex(&self, cluster: top_tree::ClusterId) -> Option<top_tree::VertexId> {
+    fn cluster_vertex(&self, cluster: top_tree::ClusterId) -> Option<top_tree::VertexId> {
         self.top_tree.cluster_vertex(cluster)
     }
 
@@ -966,10 +959,11 @@ impl FindBridge {
     ///
     /// Panics if a live vertex has any incident forest edge. Graph-level
     /// callers should first delete its incident graph edges.
-    pub fn remove_vertex(&mut self, vertex: top_tree::VertexId) -> bool {
-        let Some(cluster) = self.top_tree.first_label(vertex) else {
-            return false;
-        };
+    pub fn remove_vertex(&mut self, vertex: VertexId) -> bool {
+        let cluster = vertex.0;
+        let vertex = self
+            .cluster_vertex(cluster)
+            .expect("the vertex must be live");
 
         assert_eq!(
             self.top_tree.forest().incident_edge_indices(vertex).count(),
@@ -999,7 +993,12 @@ impl FindBridge {
     }
 
     /// Links two vertices that are in different trees with a new tree edge.
-    pub fn link(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) {
+    pub fn link(&mut self, u: VertexId, v: VertexId) {
+        let (u, v) = (
+            self.cluster_vertex(u.0).expect("the u cluster must exist"),
+            self.cluster_vertex(v.0).expect("the v cluster must exist"),
+        );
+
         if !self.top_tree.connected(u, v) {
             self.top_tree.link(u, v, ());
         } else {
@@ -1010,32 +1009,23 @@ impl FindBridge {
                 )
             };
 
-            let edge = self.non_tree_edges.push(NonTreeEdge {
-                u,
-                v,
-                level: Level(0),
-            });
-
-            for cluster in [u, v] {
-                self.top_tree
-                    .leaf_weight_mut(cluster)
-                    .into_label()
-                    .expect("the non-tree edge's endpoint {cluster} must be a label")
-                    .entry(Level(0))
-                    .or_default()
-                    .insert(edge);
-            }
+            self.add_non_tree_edge(u, v, Level(0));
         }
     }
 
     /// Cuts the tree edge between `u` and `v`, returning whether it existed.
-    pub fn cut(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> bool {
+    pub fn cut(&mut self, u: VertexId, v: VertexId) -> bool {
+        let (u, v) = (
+            self.cluster_vertex(u.0).expect("the u cluster must exist"),
+            self.cluster_vertex(v.0).expect("the v cluster must exist"),
+        );
+
         self.top_tree.cut(u, v).is_some()
     }
 
     /// Returns whether `u` and `v` are in the same tree.
-    pub fn connected(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> bool {
-        self.top_tree.connected(u, v)
+    pub fn connected(&mut self, u: VertexId, v: VertexId) -> bool {
+        self.top_tree.connected_clusters(u.0, v.0)
     }
 
     #[cfg(test)]
@@ -1048,13 +1038,13 @@ impl FindBridge {
 
     /// Applies `Cover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is below `level` is raised to `level`.
-    pub fn cover(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, level: Level) {
+    pub fn cover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::cover(level));
     }
 
     /// Applies `Uncover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is at most `level` gets cover level `-1`.
-    pub fn uncover(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, level: Level) {
+    pub fn uncover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::uncover(level));
     }
 
@@ -1067,7 +1057,7 @@ impl FindBridge {
                     .expect("the tree edge must exist");
 
                 if self.cover_level_between(u, v) == -1 {
-                    self.cut(u, v);
+                    self.top_tree.cut(u, v);
                     return;
                 }
 
@@ -1110,7 +1100,7 @@ impl FindBridge {
             }
         };
 
-        self.uncover(u, v, level);
+        self.with_vertex_id_path_tag(u, v, CoverTag::uncover(level));
         for level in (0..=level.0).rev() {
             self.recover(u, v, Level(level));
         }
@@ -1124,9 +1114,9 @@ impl FindBridge {
             .top_tree
             .edge_endpoints(edge)
             .expect("the tree edge must exist");
-        let alpha = self.cover_level_between(v, w);
+        let alpha = self.cover_level_between_internal_connected_neq(v, w);
 
-        _ = self.cut(v, w);
+        _ = self.top_tree.cut(v, w);
         let replacement = self
             .find_repalcement(v, w, Level(alpha))
             .expect("edge was covered, and is now cut");
@@ -1162,7 +1152,7 @@ impl FindBridge {
                 .expect("replacement edge's v cluster must exist"),
         );
 
-        self.link(r, q);
+        self.top_tree.link(r, q, ());
 
         let (cv, cw) = (
             self.vertex_cluster(r).expect("r must be live"),
@@ -1196,7 +1186,7 @@ impl FindBridge {
     }
 
     fn recover(&mut self, v: top_tree::VertexId, w: top_tree::VertexId, level: Level) {
-        let size = self.find_size(v, w, level.0) / 2;
+        let size = self.find_size_internal(v, w, level.0) / 2;
 
         _ = self.recover_phase(v, w, level, size);
         _ = self.recover_phase(w, v, level, size);
@@ -1208,8 +1198,8 @@ impl FindBridge {
         w: top_tree::VertexId,
         level: Level,
     ) -> Option<NonTreeEdgeId> {
-        let size_v = self.find_size(v, w, level.0);
-        let size_w = self.find_size(w, v, level.0);
+        let size_v = self.find_size_internal(v, w, level.0);
+        let size_w = self.find_size_internal(w, v, level.0);
         if size_v <= size_w {
             self.recover_phase(v, w, level, size_v)
         } else {
@@ -1226,15 +1216,14 @@ impl FindBridge {
     ) -> Option<NonTreeEdgeId> {
         loop {
             let edge = self.find_first_label(v, w, level)?;
-            let &NonTreeEdge { u: cr, v: cq, .. } = self.non_tree_edges.get(edge)?;
-            let (r, q) = (self.cluster_vertex(cr)?, self.cluster_vertex(cq)?);
+            let &NonTreeEdge { u: r, v: q, .. } = self.non_tree_edges.get(edge)?;
 
-            if !self.connected(r, q) {
+            if !self.top_tree.connected_clusters(r, q) {
                 return Some(edge);
             }
 
             if let Some(next_level) = level.increment()
-                && self.find_size(q, r, next_level.0) <= size
+                && self.find_size_internal(q, r, next_level.0) <= size
             {
                 let nontree_edges_r = self.top_tree.leaf_weight_mut(cr).into_label().unwrap();
                 nontree_edges_r.get_mut(&level).unwrap().remove(&edge);
@@ -1246,60 +1235,108 @@ impl FindBridge {
 
                 self.non_tree_edges.get_mut(edge).unwrap().level = next_level;
             } else {
-                self.cover(q, r, level);
+                self.with_vertex_id_path_tag(r, q, CoverTag::cover(level));
                 return None;
             }
         }
     }
 
-    fn with_path_tag(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, tag: CoverTag) {
+    fn with_vertex_id_path_tag(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+        tag: CoverTag,
+    ) {
         if u == v {
             // A trivial path has no edges, so there is nothing to tag.
             return;
         }
+
         self.top_tree.expose_path_tagged(u, v, tag);
         self.top_tree.deexpose(v);
         self.top_tree.deexpose(u);
     }
 
+    fn with_path_tag(&mut self, u: VertexId, v: VertexId, tag: CoverTag) {
+        if u == v {
+            // A trivial path has no edges, so there is nothing to tag.
+            return;
+        }
+
+        let (u, v) = (
+            self.cluster_vertex(u.0).expect("the u cluster must exist"),
+            self.cluster_vertex(v.0).expect("the v cluster must exist"),
+        );
+
+        self.with_vertex_id_path_tag(u, v, tag);
+    }
+
     /// `CoverLevel(v)`: the minimum cover level of any edge in `v`'s tree, or
     /// [`NO_COVER`] if there are none.
-    pub fn cover_level(&mut self, v: top_tree::VertexId) -> i32 {
+    fn cover_level(&mut self, v: top_tree::VertexId) -> i32 {
         let summary = self.top_tree.expose(v);
         self.top_tree.deexpose(v);
         summary.map_or(NO_COVER, |node| node.global_cover)
     }
 
     /// `MinCoveredEdge(v)`: an edge attaining [`FindBridge::cover_level`].
-    pub fn min_covered_edge(&mut self, v: top_tree::VertexId) -> Option<Edge> {
+    fn min_covered_edge(&mut self, v: top_tree::VertexId) -> Option<Edge> {
         let summary = self.top_tree.expose(v);
         self.top_tree.deexpose(v);
         summary.and_then(|node| node.min_global_edge)
     }
 
-    /// `CoverLevel(u, v)`: the minimum cover level on the `u`-`v` path. If
-    /// `u == v` (or the two are not connected and there is no path) this is
-    /// [`NO_COVER`].
-    pub fn cover_level_between(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) -> i32 {
-        if u == v || !self.connected(u, v) {
+    fn cover_level_between_internal(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+    ) -> i32 {
+        if u == v || !self.top_tree.connected(u, v) {
             return NO_COVER;
         }
+
+        self.cover_level_between_internal_connected_neq(u, v)
+    }
+
+    fn cover_level_between_internal_connected_neq(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+    ) -> i32 {
         let summary = self.top_tree.expose_path(u, v);
         self.top_tree.deexpose(v);
         self.top_tree.deexpose(u);
         summary.map_or(NO_COVER, |node| node.cover)
     }
 
+    /// `CoverLevel(u, v)`: the minimum cover level on the `u`-`v` path. If
+    /// `u == v` (or the two are not connected and there is no path) this is
+    /// [`NO_COVER`].
+    pub fn cover_level_between(&mut self, u: VertexId, v: VertexId) -> i32 {
+        if u == v || !self.connected(u, v) {
+            return NO_COVER;
+        }
+
+        let (u, v) = (
+            self.cluster_vertex(u.0).expect("the u cluster must exist"),
+            self.cluster_vertex(v.0).expect("the v cluster must exist"),
+        );
+
+        self.cover_level_between_internal_connected_neq(u, v)
+    }
+
     /// `MinCoveredEdge(u, v)`: an edge on the `u`-`v` path attaining
     /// [`FindBridge::cover_level_between`].
-    pub fn min_covered_edge_between(
-        &mut self,
-        u: top_tree::VertexId,
-        v: top_tree::VertexId,
-    ) -> Option<Edge> {
+    pub fn min_covered_edge_between(&mut self, u: VertexId, v: VertexId) -> Option<Edge> {
         if u == v || !self.connected(u, v) {
             return None;
         }
+
+        let (u, v) = (
+            self.cluster_vertex(u.0).expect("the u cluster must exist"),
+            self.cluster_vertex(v.0).expect("the v cluster must exist"),
+        );
+
         let summary = self.top_tree.expose_path(u, v);
         self.top_tree.deexpose(v);
         self.top_tree.deexpose(u);
@@ -1307,7 +1344,9 @@ impl FindBridge {
     }
 
     /// `FindBridge(v)`: a bridge in `v`'s tree, if one exists.
-    pub fn find_bridge(&mut self, v: top_tree::VertexId) -> Option<Edge> {
+    pub fn find_bridge(&mut self, v: VertexId) -> Option<Edge> {
+        let v = self.cluster_vertex(v.0).expect("the v cluster must exist");
+
         if self.cover_level(v) == -1 {
             self.min_covered_edge(v)
         } else {
@@ -1316,11 +1355,7 @@ impl FindBridge {
     }
 
     /// `FindBridge(u, v)`: a bridge on the `u`-`v` path, if one exists.
-    pub fn find_bridge_between(
-        &mut self,
-        u: top_tree::VertexId,
-        v: top_tree::VertexId,
-    ) -> Option<Edge> {
+    pub fn find_bridge_between(&mut self, u: VertexId, v: VertexId) -> Option<Edge> {
         if self.cover_level_between(u, v) == -1 {
             self.min_covered_edge_between(u, v)
         } else {
@@ -1328,14 +1363,25 @@ impl FindBridge {
         }
     }
 
+    pub fn component_size(&mut self, v: VertexId) -> u64 {
+        let v = self.cluster_vertex(v.0).expect("the v cluster must exist");
+        self.find_size_internal(v, v, -1)
+    }
+
+    pub fn two_edge_component_size(&mut self, v: VertexId) -> u64 {
+        let v = self.cluster_vertex(v.0).expect("the v cluster must exist");
+        self.find_size_internal(v, v, 0)
+    }
+
     /// `FindSize(v, w, i)`: the number of vertices `u` with
     /// `CoverLevel(u, meet(u, v, w)) >= i`.
     ///
     /// In particular `find_size(v, v, -1)` is the size of `v`'s component.
-    pub fn find_size(&mut self, v: top_tree::VertexId, w: top_tree::VertexId, i: i32) -> u64 {
-        if !self.connected(v, w) {
+    fn find_size_internal(&mut self, v: top_tree::VertexId, w: top_tree::VertexId, i: i32) -> u64 {
+        if !self.top_tree.connected(v, w) {
             return 0;
         }
+
         let summary = self.top_tree.expose_path(v, w);
         self.top_tree.deexpose(w);
         self.top_tree.deexpose(v);
@@ -1352,27 +1398,15 @@ impl FindBridge {
         }
     }
 
-    pub fn add_non_tree_edge(
+    fn add_non_tree_edge(
         &mut self,
-        u: top_tree::VertexId,
-        v: top_tree::VertexId,
+        u: top_tree::ClusterId,
+        v: top_tree::ClusterId,
         level: Level,
     ) -> NonTreeEdgeId {
-        let u_cluster = self
-            .top_tree
-            .first_label(u)
-            .expect("every live vertex has a structural label leaf");
-        let v_cluster = self
-            .top_tree
-            .first_label(v)
-            .expect("every live vertex has a structural label leaf");
-        let id = self.non_tree_edges.push(NonTreeEdge {
-            u: u_cluster,
-            v: v_cluster,
-            level,
-        });
+        let id = self.non_tree_edges.push(NonTreeEdge { u, v, level });
 
-        for cluster in [u_cluster, v_cluster] {
+        for cluster in [u, v] {
             let labels = self
                 .top_tree
                 .leaf_weight_mut(cluster)
@@ -1410,7 +1444,7 @@ impl FindBridge {
         w: top_tree::VertexId,
         level: Level,
     ) -> Option<NonTreeEdgeId> {
-        if !self.connected(v, w) {
+        if !self.top_tree.connected(v, w) {
             return None;
         }
         let root = self.top_tree.expose_path_node(v, w)?;

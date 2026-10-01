@@ -663,6 +663,21 @@ where
     }
 
     /// Returns whether `u` and `v` are in the same tree.
+    pub fn connected_clusters(&self, u: ClusterId, v: ClusterId) -> bool {
+        if u == v {
+            return true;
+        }
+
+        let root_u = self.find_cluster_root(u);
+        let root_v = self.find_cluster_root(v);
+
+        match (root_u, root_v) {
+            (Some(u), Some(v)) => u == v,
+            _ => false,
+        }
+    }
+
+    /// Returns whether `u` and `v` are in the same tree.
     pub fn connected(&mut self, u: tree::VertexId, v: tree::VertexId) -> bool {
         if u == v {
             return true;
@@ -1242,14 +1257,19 @@ where
         }
     }
 
-    fn find_root(&self, vertex: tree::VertexId) -> Option<ClusterId> {
-        let mut node = self.incident_leaves(vertex).next()?;
+    fn find_cluster_root(&self, cluster: ClusterId) -> Option<ClusterId> {
+        let mut node = cluster;
 
         while let Some(parent) = self.parent(node) {
             node = parent;
         }
 
         Some(node)
+    }
+
+    fn find_root(&self, vertex: tree::VertexId) -> Option<ClusterId> {
+        let cluster = self.incident_leaves(vertex).next()?;
+        self.find_cluster_root(cluster)
     }
 
     /// Finds the least common ancestor of all leaves incident to `vertex`.
@@ -1525,7 +1545,7 @@ where
         let leaf = self.clusters.push_with(|id| {
             let edge = self.tree.add_edge(u, v, id);
 
-            let sum = S::tree_edge(u, v);
+            let sum = S::tree_edge(id);
             let boundary_vertices =
                 BoundaryVertices::from_left_and_right(root_u.map(|_| u), root_v.map(|_| v));
 
@@ -1674,7 +1694,6 @@ where
         if let SwapResult::Some { prev, current } = swap {
             self.clusters.for_each_mut(|_, cluster| {
                 cluster.boundary_vertices.remap(prev, current);
-                cluster.sum.remap_vertex(prev, current);
             });
         }
 
@@ -1693,7 +1712,7 @@ where
         let leaf = self.clusters.push_with(|id| {
             let label = self.tree.add_label(vertex, id);
 
-            let sum = S::label(vertex);
+            let sum = S::label(id);
             let boundary_vertices = BoundaryVertices::from_option(root_v.map(|_| vertex));
             Cluster {
                 parent: None,
