@@ -1002,6 +1002,21 @@ impl FindBridge {
         self.top_tree.cluster_vertex(cluster)
     }
 
+    /// The two endpoints of a live edge handle, or `None` if `edge_id` names no
+    /// live record.
+    ///
+    /// `None` covers both a freed slot and a handle that was never issued: the
+    /// method looks `edge_id` up in the private `edges` arena, so an
+    /// out-of-range index answers `None` instead of panicking. Since freed slots
+    /// are recycled by the next [`FindBridge::link`], that lookup is also the
+    /// only liveness signal a caller has.
+    ///
+    /// **The endpoint order is unspecified for a tree edge.** Its endpoints come
+    /// from `top_tree::edge_endpoints`, so compare the pair unordered. A non-tree
+    /// record does report the orientation it was created with -- the argument
+    /// order of the [`FindBridge::link`] that made it -- except for a record
+    /// promoted by `swap_edge_for_delete`, which rewrites it with the
+    /// orientation the forest reports.
     pub fn endpoints(&self, edge_id: EdgeId) -> Option<(VertexId, VertexId)> {
         match self.edges.get(edge_id) {
             Some(Edge::NonTree(non_tree_edge)) => {
@@ -1088,6 +1103,17 @@ impl FindBridge {
         }
     }
 
+    /// Cuts `edge_id` out of the forest, returning whether its handle was live.
+    ///
+    /// This is the low-level *forest* cut, not the graph-level delete. On a tree
+    /// edge it only splits the forest: it runs neither Appendix A's `Swap` nor
+    /// its `Recover`, so the cover levels and the non-tree labels left behind
+    /// still describe the pre-cut path. A non-tree record loses its labels at
+    /// both endpoints, but its path is not uncovered either.
+    ///
+    /// A caller wanting graph-level deletion semantics -- the `Delete` reduction,
+    /// which cuts a bridge or `Swap`s a covered tree edge and then recovers --
+    /// must use [`FindBridge::remove_edge`] instead.
     pub fn cut_edge(&mut self, edge_id: EdgeId) -> bool {
         match self.edges.remove(edge_id) {
             Some(Edge::NonTree(non_tree_edge)) => {
