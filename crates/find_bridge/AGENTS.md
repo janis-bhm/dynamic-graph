@@ -6,13 +6,13 @@ The public API is therefore the single module's worth of items re-exported from 
 
 ## Structure
 
-- `src/lib.rs` is 72 lines of crate docs, then `mod cover_level;` and one `pub use`. Those crate docs are stale — see *Known gaps*.
-- `src/cover_level.rs` (1679 lines) holds everything that is compiled:
+- `src/lib.rs` contains the current `FindBridge` crate docs, followed by `mod cover_level;` and one `pub use`.
+- `src/cover_level.rs` (1718 lines) holds everything that is compiled:
   - `PartTree = BTree<i32, PartEntry>` with `SizeVector`, `PartEntry`, and the FindSize helpers (`along_path_find_size`, `off_path_find_size`, `total_sum`, `range_sum`, `restrict`, `diagonal_sum`, ...). `augmented_tree` supplies the aggregated balanced `BTree`.
   - `CoverLevel`, the `top_tree::Summary` impl with `type Tag = CoverTag`; `CoverTag`; `NO_COVER`; `Level` over `-1..=LEVEL_CAP` with `LEVEL_CAP = 32` and `SLOTS = LEVEL_CAP + 2`.
   - Handles `VertexId(top_tree::ClusterId)`, `EdgeId(NonMaxUsize)`, `UserLabel(NonMaxUsize)`.
   - `FindBridge`, owning `top_tree::TopTree<CoverLevel, VertexLabels, EdgeId>` and `edges: SlotVec<Edge, EdgeId>`.
-  - The Appendix A reduction: `add_non_tree_edge`, `find_first_label`, `smallest_label_at`, `first_path`, `find_label_vertex`, `remove_edge`, `swap_edge_for_delete`, `recover`, `find_repalcement` (typo is in the source, `cover_level.rs:1265`), `recover_phase`, `with_path_tag`, `with_vertex_id_path_tag`.
+  - The Appendix A reduction: `add_non_tree_edge`, `find_first_label`, `smallest_label_at`, `first_path`, `find_label_vertex`, `remove_edge`, `swap_edge_for_delete`, `recover`, `find_repalcement` (typo is in the source, `cover_level.rs:1303`), `recover_phase`, `with_path_tag`, `with_vertex_id_path_tag`.
 - `FindBridge`'s public methods: `new`, `add_vertex() -> VertexId` (takes no arguments), `remove_vertex`, `edge_count`, `link -> EdgeId`, `cut_edge -> bool`, `connected`, `remove_edge`, `cover`, `uncover`, `cover_level_between -> i32`, `min_covered_edge_between -> Option<EdgeId>`, `find_bridge -> Option<EdgeId>`, `find_bridge_between -> Option<EdgeId>`, `component_size -> u64`, `two_edge_component_size -> u64`.
 - `src/graph.rs` and `src/graph/tests.rs` are on disk but outside the build — see *Known gaps*.
 - `top_tree` supplies the forest and summary callbacks; it needs nightly (`#![feature(pattern_types, pattern_type_macro, structural_match)]` in `crates/top_tree/src/lib.rs`).
@@ -30,8 +30,6 @@ The public API is therefore the single module's worth of items re-exported from 
 
 - `mod graph;` is absent from `lib.rs` (commit `953782c`, "disable graph module"), so `src/graph.rs`'s `DynamicGraph` and `src/graph/tests.rs` are dead code. `DynamicGraph` is **not** part of the public API; its docs are the only place the graph-level `< 2^31` limit is written down.
 - `graph.rs` has uncommitted WIP on `main`: a half-finished migration from `EdgeRecord`/`EdgeKind` to a new `Edge`/`EdgeLabels` pair plus a `Vertex { cluster, generation }` record using `top_tree::Generation`. The field is already `edges: Vec<Option<Edge>>` while most of the file still constructs `EdgeRecord`, so the module would not compile if re-enabled. Do not treat it as a description of the current API.
-- The last two lines of `cover_level.rs` are `// #[cfg(test)]` / `// mod tests;`, so `src/cover_level/tests.rs` is not compiled.
-- `lib.rs`'s crate docs still describe `DynamicGraph`, `FindBridge::find_size`, `add_label`, `remove_label`, and `find_first_label`, none of which are public today.
 
 ## Paper references
 
@@ -47,8 +45,6 @@ Use those sections for the algorithmic invariants, but check the Rust before att
 
 ## Tests
 
-`cargo test -p find_bridge` currently **fails**: the only two tests are the stale doctests in `lib.rs`, and both fail to compile — the one at `lib.rs:22` asserts `graph.find_bridge(a) == Some((a, b))` (`E0308`, `find_bridge` now returns `Option<EdgeId>`) and the one at `lib.rs:48` does `use find_bridge::DynamicGraph;` (`E0432`).
+`cargo test -p find_bridge --lib` runs 45 tests in the active `cover_level::tests` module. `cargo test -p find_bridge` passes those 45 tests plus 2 doctests, and `cargo test -p top_tree` passes.
 
-`cargo test -p find_bridge --lib` runs **0 tests**, because `mod tests;` is commented out in `cover_level.rs`. `cargo build -p find_bridge` is clean; the lib-test build warns about the unused private `FindBridge::debug_root_incident`.
-
-Intended test locations once re-enabled: `src/cover_level/tests.rs` for the tree-level operations against a simple forest model, and `src/graph/tests.rs` for differential/randomized dynamic-graph behavior against a naive oracle (it still imports the old `EdgeKind`, so it needs porting too).
+`src/graph.rs` and `src/graph/tests.rs` remain outside the build; the latter is intended for differential/randomized dynamic-graph behavior against a naive oracle and still imports the old `EdgeKind`.

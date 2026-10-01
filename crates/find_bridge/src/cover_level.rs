@@ -1126,10 +1126,14 @@ impl FindBridge {
 
                 if self.cover_level_between_internal(u, v) == -1 {
                     self.top_tree.cut(u, v);
+                    self.edges.remove(edge_id);
                     return;
                 }
 
-                self.swap_edge_for_delete(cluster_id)
+                let (endpoints, level) = self.swap_edge_for_delete(cluster_id);
+                _ = self.edges.remove(edge_id);
+
+                (endpoints, level)
             }
             Edge::NonTree(NonTreeEdge { u, v, level }) => {
                 for cluster in [u, v] {
@@ -1146,6 +1150,7 @@ impl FindBridge {
                             });
                     }
                 }
+                self.edges.remove(edge_id);
 
                 let (u, v) = {
                     (
@@ -1162,10 +1167,45 @@ impl FindBridge {
             }
         };
 
+        // if swapped {
+        //     let (cv, cw) = (
+        //         self.vertex_cluster(u).expect("u must be live"),
+        //         self.vertex_cluster(v).expect("v must be live"),
+        //     );
+
+        //     debug_assert!(
+        //         matches!(
+        //             self.edges.get(edge_id),
+        //             Some(Edge::NonTree(NonTreeEdge { u, v, .. }))
+        //                 if (*u == cv && *v == cw) || (*u == cw && *v == cv)
+        //         ),
+        //         "Swap lines 50-52 must record the deleted edge's endpoint clusters"
+        //     );
+
+        //     for cluster in [cv, cw] {
+        //         if self
+        //             .top_tree
+        //             .leaf_weight_mut(cluster)
+        //             .into_label()
+        //             .expect("the deleted edge's endpoint cluster must be a label")
+        //             .remove_from_level(level, edge_id)
+        //         {
+        //             self.top_tree
+        //                 .update_label_summary_by_cluster(cluster, |sum| {
+        //                     sum.remove_vertex_levels(level_bit(level))
+        //                 });
+        //         }
+        //     }
+        // }
+
         self.with_vertex_id_path_tag(u, v, CoverTag::uncover(level));
         for level in (0..=level.0).rev() {
             self.recover(u, v, Level(level));
         }
+
+        // if swapped {
+        //     _ = self.edges.remove(edge_id);
+        // }
     }
 
     fn swap_edge_for_delete(
@@ -1222,8 +1262,8 @@ impl FindBridge {
         };
 
         let (cv, cw) = (
-            self.vertex_cluster(r).expect("r must be live"),
-            self.vertex_cluster(q).expect("q must be live"),
+            self.vertex_cluster(v).expect("v must be live"),
+            self.vertex_cluster(w).expect("w must be live"),
         );
 
         self.edges.replace(
@@ -1235,22 +1275,22 @@ impl FindBridge {
             }),
         );
 
-        // self.top_tree
-        //     .leaf_weight_mut(cv)
-        //     .into_label()
-        //     .expect("r's cluster must be a label")
-        //     .entry(Level(alpha))
-        //     .or_default()
-        //     .insert(edge);
-        // self.top_tree
-        //     .leaf_weight_mut(cw)
-        //     .into_label()
-        //     .expect("q's cluster must be a label")
-        //     .entry(Level(alpha))
-        //     .or_default()
-        //     .insert(edge);
+        // for cluster in [cv, cw] {
+        //     if self
+        //         .top_tree
+        //         .leaf_weight_mut(cluster)
+        //         .into_label()
+        //         .expect("the deleted edge's endpoint cluster must be a label")
+        //         .add_to_level(Level(alpha), edge_id)
+        //     {
+        //         self.top_tree
+        //             .update_label_summary_by_cluster(cluster, |sum| {
+        //                 sum.add_vertex_levels(level_bit(Level(alpha)))
+        //             });
+        //     }
+        // }
 
-        // self.cover(v, w, Level(alpha));
+        // self.with_vertex_id_path_tag(v, w, CoverTag::cover(Level(alpha)));
 
         ((v, w), Level(alpha))
     }
@@ -1268,12 +1308,12 @@ impl FindBridge {
         w: top_tree::VertexId,
         level: Level,
     ) -> Option<EdgeId> {
-        let size_v = self.find_size_internal(v, w, level.0);
-        let size_w = self.find_size_internal(w, v, level.0);
+        let size_v = self.find_size_internal(v, v, level.0);
+        let size_w = self.find_size_internal(w, w, level.0);
         if size_v <= size_w {
-            self.recover_phase(v, w, level, size_v)
+            self.recover_phase(v, v, level, size_v)
         } else {
-            self.recover_phase(w, v, level, size_w)
+            self.recover_phase(w, w, level, size_w)
         }
     }
 
@@ -1331,6 +1371,7 @@ impl FindBridge {
                 }
 
                 self.edges.get_mut(edge).unwrap().set_level(next_level);
+                self.with_vertex_id_path_tag(r, q, CoverTag::cover(next_level));
             } else {
                 self.with_vertex_id_path_tag(r, q, CoverTag::cover(level));
                 return None;

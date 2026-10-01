@@ -1924,15 +1924,80 @@ fn remove_edge_on_covered_tree_edge_keeps_the_component_connected() {
     assert_eq!(fb.component_size(verts[1]), 3);
     assert_eq!(fb.component_size(verts[2]), 3);
 }
+
 #[test]
-fn zz_debug_probe() {
+fn remove_edge_on_covered_tree_edge_frees_deleted_edge_id() {
     let mut fb = FindBridge::new();
-    let v = new_vertices(&mut fb, 3);
-    let ab = fb.link(v[0], v[1]);
-    let bc = fb.link(v[1], v[2]);
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    let ca = fb.link(verts[2], verts[0]);
+    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+
+    fb.cover(verts[2], verts[0], lvl(0));
     fb.remove_edge(ab);
-    eprintln!("about to cut_edge(ab) after remove_edge(ab)");
-    let r = fb.cut_edge(ab);
-    eprintln!("cut_edge returned {r}");
-    let _ = bc;
+
+    assert!(fb.edges.get(ab).is_none(), "the deleted edge slot must be freed");
+    assert!(!fb.cut_edge(ab), "a deleted edge cannot be cut a second time");
+}
+
+#[test]
+fn remove_edge_on_covered_tree_edge_restores_bridge_state() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    let ca = fb.link(verts[2], verts[0]);
+    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+
+    fb.cover(verts[2], verts[0], lvl(0));
+    fb.remove_edge(ab);
+
+    for (i, vertex) in verts.iter().copied().enumerate() {
+        assert_eq!(
+            fb.two_edge_component_size(vertex),
+            1,
+            "Swap/Delete must leave only vertex {i} in its two-edge component"
+        );
+        assert!(
+            fb.find_bridge(vertex).is_some(),
+            "Delete must expose an incident bridge for vertex {i} on the b-c-a path"
+        );
+        assert_eq!(
+            fb.component_size(vertex),
+            3,
+            "Swap/Delete must keep all three vertices in the component for vertex {i}"
+        );
+    }
+}
+
+#[test]
+fn recover_phase_promotion_covers_the_promoted_edge_path() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 4);
+    fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    fb.link(verts[2], verts[3]);
+    let promoted = fb.link(verts[0], verts[1]);
+    assert_eq!(
+        unordered(edge_endpoints(&fb, promoted)),
+        unordered((verts[0], verts[1]))
+    );
+
+    fb.cover(verts[0], verts[3], lvl(0));
+    assert_eq!(fb.cover_level_between(verts[0], verts[3]), 0);
+    assert_eq!(fb.cover_level(internal(&fb, verts[0])), 0);
+    assert_eq!(fb.two_edge_component_size(verts[0]), 4);
+
+    let (v, w) = internal_endpoints(&fb, verts[0], verts[3]);
+    fb.recover(v, w, lvl(0));
+
+    assert!(matches!(
+        fb.edges[promoted],
+        Edge::NonTree(NonTreeEdge {
+            level: Level(1),
+            ..
+        })
+    ));
+    assert_eq!(fb.cover_level_between(verts[0], verts[1]), 1);
 }
