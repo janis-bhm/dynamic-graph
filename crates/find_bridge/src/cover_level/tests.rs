@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::*;
-use top_tree::VertexId;
+
+
 
 fn lvl(i: i32) -> Level {
     Level::new(i).unwrap()
@@ -9,11 +10,89 @@ fn lvl(i: i32) -> Level {
 
 /// Adds `n` vertices to `fb` and returns their handles.
 ///
-/// The new [`FindBridge::add_vertex`] API takes no index argument; vertex
+/// The [`FindBridge::add_vertex`] API takes no index argument; vertex
 /// identity is the returned [`VertexId`]. The naive oracle still uses
 /// `0..n` usizes, so `verts[i]` corresponds to naive vertex `i`.
 fn new_vertices(fb: &mut FindBridge, n: usize) -> Vec<VertexId> {
     (0..n).map(|_| fb.add_vertex()).collect()
+}
+
+/// The volatile internal forest handle of a live vertex.
+///
+/// [`FindBridge::cluster_vertex`] is the inverse of
+/// [`FindBridge::vertex_cluster`]; the private Section 5/6 entry points take
+/// this handle, while the public API takes the stable [`VertexId`].
+fn internal(fb: &FindBridge, v: VertexId) -> top_tree::VertexId {
+    fb.cluster_vertex(v.0).expect("a live vertex has a stable cluster")
+}
+
+/// The internal handles of both endpoints of a live forest edge.
+fn internal_endpoints(
+    fb: &FindBridge,
+    u: VertexId,
+    v: VertexId,
+) -> (top_tree::VertexId, top_tree::VertexId) {
+    (internal(fb, u), internal(fb, v))
+}
+
+/// The stable endpoint pair of `edge`.
+///
+/// `FindBridge` has no public `EdgeId -> endpoints` accessor, so the test
+/// module reaches the private `edges: SlotVec<Edge, EdgeId>` directly: a tree
+/// edge stores its [`top_tree::ClusterId`] and is resolved through
+/// [`top_tree::TopTree::edge_endpoints`], while a non-tree edge stores both
+/// endpoint clusters directly.
+fn edge_endpoints(fb: &FindBridge, edge: EdgeId) -> (VertexId, VertexId) {
+    match fb.edges[edge] {
+        Edge::Tree(cluster) => {
+            let (u, v) = fb
+                .top_tree
+                .edge_endpoints(cluster)
+                .expect("a live tree edge has endpoints");
+            (
+                VertexId(fb.vertex_cluster(u).expect("a live endpoint has a cluster")),
+                VertexId(fb.vertex_cluster(v).expect("a live endpoint has a cluster")),
+            )
+        }
+        Edge::NonTree(NonTreeEdge { u, v, .. }) => (VertexId(u), VertexId(v)),
+    }
+}
+
+/// Attaches a level-tagged label at exactly one vertex.
+///
+/// The current design has no one-vertex label operation: a label *is* a
+/// non-tree edge, and [`FindBridge::add_non_tree_edge`] attaches it at *both*
+/// endpoints. A non-tree edge whose two endpoints are the same vertex's
+/// cluster therefore attaches a label at exactly that vertex, and
+/// [`FindBridge::find_first_label`] reports the resulting [`EdgeId`]. Several
+/// labels at the same vertex and level are several distinct self edges; the
+/// smallest [`EdgeId`] wins, which is the first one added.
+fn add_label(fb: &mut FindBridge, v: VertexId, level: Level) -> EdgeId {
+    let cluster = fb.vertex_cluster(internal(fb, v)).expect("a live vertex has a cluster");
+    fb.add_non_tree_edge(cluster, cluster, level)
+}
+
+/// Removes a label added by [`add_label`], returning its level, or `None` if
+/// the label is no longer live (for instance because its vertex was removed).
+fn remove_label(fb: &mut FindBridge, label: EdgeId) -> Option<Level> {
+    match fb.edges.get(label) {
+        Some(Edge::NonTree(NonTreeEdge { level, .. })) => {
+            let level = *level;
+            assert!(fb.cut_edge(label), "a live non-tree edge can be cut");
+            Some(level)
+        }
+        _ => None,
+    }
+}
+
+/// The live non-tree edge ids, i.e. the currently attached labels and recorded
+/// graph edges.
+fn live_non_tree_edges(fb: &FindBridge) -> BTreeSet<EdgeId> {
+    fb.edges
+        .iter()
+        .filter(|(_, edge)| matches!(edge, Edge::NonTree(_)))
+        .map(|(id, _)| id)
+        .collect()
 }
 
 #[test]
@@ -450,26 +529,37 @@ fn part_tree_diagonal_aggregates_are_recomputed() {
 }
 
 fn check_against_naive(fb: &mut FindBridge, naive: &Naive, verts: &[VertexId]) {
-    let n = verts.len();
+    let model_of = |v: VertexId| -> usize {
+        verts
+            .iter()
+            .position(|x| *x == v)
+            .expect("summary edge endpoint maps to a live model vertex")
+    };
+
     for (v, &vv) in verts.iter().enumerate() {
         assert_eq!(
-            fb.cover_level(vv),
+            fb.cover_level(internal(fb, vv)),
             naive.cover_level(v),
             "cover_level({v}) mismatch"
         );
         let expected = naive.cover_level(v);
-        match fb.min_covered_edge(vv) {
+        match fb.min_covered_edge(internal(fb, vv)) {
             Some(e) => {
-                assert!(naive.cover.contains_key(&key(e.0.index(), e.1.index())));
-                assert_eq!(naive.cover[&key(e.0.index(), e.1.index())], expected);
+                let edge = {
+                    let (a, b) = edge_endpoints(fb, e);
+                    key(model_of(a), model_of(b))
+                };
+                assert!(naive.cover.contains_key(&edge));
+                assert_eq!(naive.cover[&edge], expected);
             }
             None => assert_eq!(expected, NO_COVER),
         }
         let found = fb.find_bridge(vv);
         if expected == -1 {
             let e = found.expect("a bridge must be reported");
-            assert_eq!(naive.cover[&key(e.0.index(), e.1.index())], -1);
-            assert!(naive.component(v).contains(&e.0.index()));
+            let (a, b) = edge_endpoints(fb, e);
+            assert_eq!(naive.cover[&key(model_of(a), model_of(b))], -1);
+            assert!(naive.component(v).contains(&model_of(a)));
         } else {
             assert!(found.is_none());
         }
@@ -488,22 +578,26 @@ fn check_against_naive(fb: &mut FindBridge, naive: &Naive, verts: &[VertexId]) {
             assert_eq!(expected, naive.cover_level_between(v, u));
             match fb.min_covered_edge_between(uu, vv) {
                 Some(e) => {
-                    assert_eq!(naive.cover[&key(e.0.index(), e.1.index())], expected);
+                    let edge = {
+                        let (a, b) = edge_endpoints(fb, e);
+                        key(model_of(a), model_of(b))
+                    };
+                    assert_eq!(naive.cover[&edge], expected);
                     let path: BTreeSet<_> = naive.path_edges(u, v).unwrap().into_iter().collect();
-                    assert!(path.contains(&key(e.0.index(), e.1.index())));
+                    assert!(path.contains(&edge));
                 }
                 None => assert_eq!(expected, NO_COVER),
             }
             let found = fb.find_bridge_between(uu, vv);
             if expected == -1 {
                 let e = found.expect("a bridge must be reported");
-                assert_eq!(naive.cover[&key(e.0.index(), e.1.index())], -1);
+                let (a, b) = edge_endpoints(fb, e);
+                assert_eq!(naive.cover[&key(model_of(a), model_of(b))], -1);
             } else {
                 assert!(found.is_none());
             }
         }
     }
-    let _ = n;
 }
 
 fn check_sparse_forest_against_naive(
@@ -511,34 +605,38 @@ fn check_sparse_forest_against_naive(
     naive: &Naive,
     vertices: &[Option<VertexId>],
 ) {
-    let live = vertices
+    let live: Vec<(usize, VertexId)> = vertices
         .iter()
         .enumerate()
         .filter_map(|(model, vertex)| vertex.map(|vertex| (model, vertex)))
-        .collect::<Vec<_>>();
-    let model_vertex = |internal: VertexId| {
+        .collect();
+    let model_of = |v: VertexId| -> usize {
         live.iter()
-            .find_map(|&(model, vertex)| (vertex == internal).then_some(model))
+            .find_map(|&(model, vertex)| (vertex == v).then_some(model))
             .expect("summary edge endpoint maps to a live model vertex")
+    };
+    let model_edge = |fb: &FindBridge, e: EdgeId| -> (usize, usize) {
+        let (a, b) = edge_endpoints(fb, e);
+        key(model_of(a), model_of(b))
     };
 
     for &(model, vertex) in &live {
-        assert_eq!(fb.cover_level(vertex), naive.cover_level(model));
+        assert_eq!(fb.cover_level(internal(fb, vertex)), naive.cover_level(model));
         assert_eq!(
-            fb.find_size_internal(vertex, vertex, -1) as usize,
+            fb.find_size_internal(internal(fb, vertex), internal(fb, vertex), -1) as usize,
             naive.component(model).len(),
             "find_size for model vertex {model}"
         );
-        match fb.min_covered_edge(vertex) {
-            Some((u, v)) => {
-                let edge = key(model_vertex(u), model_vertex(v));
+        match fb.min_covered_edge(internal(fb, vertex)) {
+            Some(e) => {
+                let edge = model_edge(fb, e);
                 assert_eq!(naive.cover.get(&edge), Some(&naive.cover_level(model)));
             }
             None => assert_eq!(naive.cover_level(model), NO_COVER),
         }
         match fb.find_bridge(vertex) {
-            Some((u, v)) => {
-                let edge = key(model_vertex(u), model_vertex(v));
+            Some(e) => {
+                let edge = model_edge(fb, e);
                 assert_eq!(naive.cover.get(&edge), Some(&-1));
             }
             None => assert_ne!(naive.cover_level(model), -1),
@@ -550,8 +648,8 @@ fn check_sparse_forest_against_naive(
             let expected = naive.cover_level_between(*u_model, *v_model);
             assert_eq!(fb.cover_level_between(*u, *v), expected);
             match fb.min_covered_edge_between(*u, *v) {
-                Some((a, b)) => {
-                    let edge = key(model_vertex(a), model_vertex(b));
+                Some(e) => {
+                    let edge = model_edge(fb, e);
                     assert_eq!(naive.cover.get(&edge), Some(&expected));
                     assert!(
                         naive
@@ -563,8 +661,8 @@ fn check_sparse_forest_against_naive(
                 None => assert_eq!(expected, NO_COVER),
             }
             match fb.find_bridge_between(*u, *v) {
-                Some((a, b)) => {
-                    let edge = key(model_vertex(a), model_vertex(b));
+                Some(e) => {
+                    let edge = model_edge(fb, e);
                     assert_eq!(naive.cover.get(&edge), Some(&-1));
                     assert!(
                         naive
@@ -587,18 +685,18 @@ fn single_edge_is_a_bridge() {
     fb.link(a, b);
 
     assert!(fb.connected(a, b));
-    assert_eq!(fb.cover_level(a), -1);
+    assert_eq!(fb.cover_level(internal(&fb, a)), -1);
     assert_eq!(fb.cover_level_between(a, b), -1);
     assert!(fb.find_bridge(a).is_some());
     assert!(fb.find_bridge_between(a, b).is_some());
 
     fb.cover(a, b, lvl(2));
-    assert_eq!(fb.cover_level(a), 2);
+    assert_eq!(fb.cover_level(internal(&fb, a)), 2);
     assert_eq!(fb.cover_level_between(a, b), 2);
     assert!(fb.find_bridge(a).is_none());
 
     fb.uncover(a, b, lvl(2));
-    assert_eq!(fb.cover_level(a), -1);
+    assert_eq!(fb.cover_level(internal(&fb, a)), -1);
     assert!(fb.find_bridge_between(a, b).is_some());
 
     // Uncovering with a too small level does nothing.
@@ -639,43 +737,60 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     fb.cover(left, moved_before, lvl(1));
     naive.cover_path(1, 4, 1);
 
-    let removed_level0 = fb.add_label(removed, lvl(0));
-    let removed_level0_duplicate = fb.add_label(removed, lvl(0));
-    let removed_level1 = fb.add_label(removed, lvl(1));
-    let middle_label = fb.add_label(middle, lvl(0));
-    let moved_label = fb.add_label(moved_before, lvl(1));
+    let removed_level0 = add_label(&mut fb, removed, lvl(0));
+    let removed_level0_duplicate = add_label(&mut fb, removed, lvl(0));
+    let removed_level1 = add_label(&mut fb, removed, lvl(1));
+    let middle_label = add_label(&mut fb, middle, lvl(0));
+    let moved_label = add_label(&mut fb, moved_before, lvl(1));
 
     assert_eq!(
-        fb.find_first_label(left, moved_before, lvl(1)),
+        fb.find_first_label(internal(&fb, left), internal(&fb, moved_before), lvl(1)),
         Some(moved_label)
     );
+
+    // The stable handles do not change across a removal, but the volatile
+    // internal handles do: the last vertex moves into the freed slot.
     let moved_cluster = fb
-        .vertex_cluster(vertices[4].unwrap())
+        .vertex_cluster(internal(&fb, moved_before))
         .expect("a live vertex has a stable cluster");
+    let moved_before_internal = internal(&fb, moved_before);
+    let removed_internal = internal(&fb, removed);
+
     assert!(fb.remove_vertex(removed));
     naive.remove_isolated_vertex(0);
     vertices[0] = None;
+
     let moved = fb
         .cluster_vertex(moved_cluster)
         .expect("the moved vertex keeps its label cluster");
-    assert_ne!(moved, moved_before);
-    assert_eq!(moved.index(), removed.index());
-    vertices[4] = Some(moved);
-    assert!(fb.vertex_cluster(removed).is_none());
-    assert!(!fb.remove_vertex(removed));
+    assert_ne!(moved, moved_before_internal);
+    assert_eq!(moved.index(), removed_internal.index());
+    // The stable handle of the moved vertex is unaffected.
+    assert_eq!(moved_cluster, moved_before.0);
+    assert!(fb.vertex_cluster(removed_internal).is_none());
 
-    assert_eq!(fb.remove_label(removed_level0), None);
-    assert_eq!(fb.remove_label(removed_level0_duplicate), None);
-    assert_eq!(fb.remove_label(removed_level1), None);
-    assert_eq!(fb.labels.len(), 2);
-    assert_eq!(fb.labels_at.len(), 2);
+    // Every label attached to the removed vertex is gone; the two labels on
+    // live vertices survive.
+    assert_eq!(remove_label(&mut fb, removed_level0), None);
+    assert_eq!(remove_label(&mut fb, removed_level0_duplicate), None);
+    assert_eq!(remove_label(&mut fb, removed_level1), None);
+    assert_eq!(live_non_tree_edges(&fb), [middle_label, moved_label].into());
     assert_eq!(fb.top_tree.label_count(), 4);
-    assert_eq!(fb.find_first_label(left, moved, lvl(1)), Some(moved_label));
-    assert_eq!(fb.find_first_label(left, moved, lvl(0)), Some(middle_label));
+
+    let moved_handle = vertices[4].unwrap();
+    let (left_internal, moved_internal) = internal_endpoints(&fb, left, moved_handle);
+    assert_eq!(
+        fb.find_first_label(left_internal, moved_internal, lvl(1)),
+        Some(moved_label)
+    );
+    assert_eq!(
+        fb.find_first_label(left_internal, moved_internal, lvl(0)),
+        Some(middle_label)
+    );
 
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 
-    fb.uncover(left, moved, lvl(1));
+    fb.uncover(left, moved_handle, lvl(1));
     naive.uncover_path(1, 4, 1);
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 
@@ -709,8 +824,9 @@ fn path_cover_and_uncover() {
     let n = 7;
     let mut fb = FindBridge::new();
     let verts = new_vertices(&mut fb, n);
+    let mut edges = Vec::new();
     for i in 1..n {
-        fb.link(verts[i - 1], verts[i]);
+        edges.push(fb.link(verts[i - 1], verts[i]));
     }
     let mut naive = Naive::new(n);
     for i in 1..n {
@@ -724,6 +840,13 @@ fn path_cover_and_uncover() {
     assert_eq!(fb.cover_level_between(verts[1], verts[6]), -1);
     assert_eq!(fb.cover_level_between(verts[0], verts[5]), -1);
     check_against_naive(&mut fb, &naive, &verts);
+    assert_eq!(fb.edge_count(), n - 1);
+
+    // The links above produced tree edges, in the order the paths expect.
+    for (i, edge) in edges.iter().enumerate() {
+        let (a, b) = edge_endpoints(&fb, *edge);
+        assert_eq!(key(model_index(&verts, a), model_index(&verts, b)), key(i, i + 1));
+    }
 
     fb.cover(verts[0], verts[6], lvl(5));
     naive.cover_path(0, 6, 5);
@@ -732,6 +855,13 @@ fn path_cover_and_uncover() {
     fb.uncover(verts[0], verts[6], lvl(4));
     naive.uncover_path(0, 6, 4);
     check_against_naive(&mut fb, &naive, &verts);
+}
+
+fn model_index(verts: &[VertexId], v: VertexId) -> usize {
+    verts
+        .iter()
+        .position(|x| *x == v)
+        .expect("the edge endpoint is one of the modelled vertices")
 }
 
 #[test]
@@ -781,12 +911,12 @@ fn randomized_cover_uncover() {
         let verts = new_vertices(&mut fb, n);
 
         // Build a growing tree.
-        let mut edges: Vec<(usize, usize)> = Vec::new();
+        let mut edges: Vec<(usize, usize, EdgeId)> = Vec::new();
         for v in 1..n {
             let u = (rng.next() as usize) % v;
-            fb.link(verts[u], verts[v]);
+            let id = fb.link(verts[u], verts[v]);
             naive.link(u, v);
-            edges.push((u, v));
+            edges.push((u, v, id));
         }
 
         for _ in 0..60 {
@@ -806,8 +936,16 @@ fn randomized_cover_uncover() {
                     naive.uncover_path(u, v, level);
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    fb.cut(verts[a], verts[b]);
+                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
+                    // The edge is identified by the vertices it was linked
+                    // between; capture that before cutting, because the
+                    // record is gone afterwards.
+                    assert_eq!(
+                        unordered(edge_endpoints(&fb, id)),
+                        unordered((verts[a], verts[b])),
+                        "the tree edge must be the one linked between these vertices"
+                    );
+                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
                     naive.cut(a, b);
                 }
                 3 => {
@@ -817,9 +955,9 @@ fn randomized_cover_uncover() {
                         let a = (rng.next() as usize) % n;
                         let b = (rng.next() as usize) % n;
                         if a != b && naive.path_edges(a, b).is_none() {
-                            fb.link(verts[a], verts[b]);
+                            let id = fb.link(verts[a], verts[b]);
                             naive.link(a, b);
-                            edges.push((a, b));
+                            edges.push((a, b, id));
                             break;
                         }
                     }
@@ -830,6 +968,12 @@ fn randomized_cover_uncover() {
             check_against_naive(&mut fb, &naive, &verts);
         }
     }
+}
+
+/// Endpoint pairs are unordered: `link(a, b)` and `link(b, a)` record the same
+/// edge.
+fn unordered((a, b): (VertexId, VertexId)) -> (VertexId, VertexId) {
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 fn naive_find_size(naive: &Naive, n: usize, v: usize, w: usize, i: i32) -> u64 {
@@ -849,20 +993,25 @@ fn naive_find_size(naive: &Naive, n: usize, v: usize, w: usize, i: i32) -> u64 {
     count
 }
 
+/// The label `FindFirstLabel` must report, as the oracle sees it.
+///
+/// Labels are keyed by [`EdgeId`] and stored by *model* vertex index, because
+/// the naive oracle is indexed by `0..n` and the implementation's
+/// [`VertexId`] carries no `index()`.
 fn naive_find_first_label(
     naive: &Naive,
-    labels: &BTreeMap<UserLabel, (VertexId, i32)>,
+    labels: &BTreeMap<EdgeId, (usize, i32)>,
     v: usize,
     w: usize,
     i: i32,
-) -> Option<UserLabel> {
+) -> Option<EdgeId> {
     let path = naive.path_vertices(v, w)?;
     let projection = naive.projections(&path);
     for &m in &path {
         for (&id, &(u, level)) in labels {
             if level == i
-                && projection.get(&u.index()) == Some(&m)
-                && naive.cover_between(u.index(), m) >= i
+                && projection.get(&u) == Some(&m)
+                && naive.cover_between(u, m) >= i
             {
                 return Some(id);
             }
@@ -873,7 +1022,7 @@ fn naive_find_first_label(
 
 fn naive_has_incident(
     naive: &Naive,
-    labels: &BTreeMap<UserLabel, (VertexId, i32)>,
+    labels: &BTreeMap<EdgeId, (usize, i32)>,
     v: usize,
     w: usize,
     level: i32,
@@ -886,10 +1035,10 @@ fn naive_has_incident(
         if label_level != level {
             return false;
         }
-        let Some(&m) = projection.get(&u.index()) else {
+        let Some(&m) = projection.get(&u) else {
             return false;
         };
-        naive.cover_between(u.index(), m) >= level
+        naive.cover_between(u, m) >= level
     })
 }
 
@@ -903,8 +1052,14 @@ fn component_size_and_labels() {
     }
 
     // The whole path is one component of size 6.
-    assert_eq!(fb.find_size_internal(verts[0], verts[0], -1), 6);
-    assert_eq!(fb.find_size_internal(verts[3], verts[3], -1), 6);
+    assert_eq!(
+        fb.find_size_internal(internal(&fb, verts[0]), internal(&fb, verts[0]), -1),
+        6
+    );
+    assert_eq!(
+        fb.find_size_internal(internal(&fb, verts[3]), internal(&fb, verts[3]), -1),
+        6
+    );
 
     // Cover 1..4 at level 2.
     fb.cover(verts[1], verts[4], lvl(2));
@@ -915,18 +1070,25 @@ fn component_size_and_labels() {
     // All path vertices count at any level; off-path vertices here do not
     // exist except the path itself, so the counts are just the component size
     // for i <= 2.
-    assert_eq!(fb.find_size_internal(verts[0], verts[5], 2), 6);
+    assert_eq!(
+        fb.find_size_internal(internal(&fb, verts[0]), internal(&fb, verts[5]), 2),
+        6
+    );
 
-    let a = fb.add_label(verts[2], lvl(1));
-    let b = fb.add_label(verts[4], lvl(2));
-    let c = fb.add_label(verts[0], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[5], lvl(1)), Some(c));
-    assert_eq!(fb.find_first_label(verts[0], verts[5], lvl(2)), Some(b));
-    assert_eq!(fb.find_first_label(verts[3], verts[5], lvl(1)), Some(a));
-    assert_eq!(fb.find_first_label(verts[0], verts[1], lvl(2)), Some(b));
+    let a = add_label(&mut fb, verts[2], lvl(1));
+    let b = add_label(&mut fb, verts[4], lvl(2));
+    let c = add_label(&mut fb, verts[0], lvl(1));
+    fn label(fb: &mut FindBridge, u: VertexId, v: VertexId, level: Level) -> Option<EdgeId> {
+        let (a, b) = internal_endpoints(fb, u, v);
+        fb.find_first_label(a, b, level)
+    }
+    assert_eq!(label(&mut fb, verts[0], verts[5], lvl(1)), Some(c));
+    assert_eq!(label(&mut fb, verts[0], verts[5], lvl(2)), Some(b));
+    assert_eq!(label(&mut fb, verts[3], verts[5], lvl(1)), Some(a));
+    assert_eq!(label(&mut fb, verts[0], verts[1], lvl(2)), Some(b));
 
-    assert_eq!(fb.remove_label(b), Some(lvl(2)));
-    assert_eq!(fb.find_first_label(verts[0], verts[5], lvl(2)), None);
+    assert_eq!(remove_label(&mut fb, b), Some(lvl(2)));
+    assert_eq!(label(&mut fb, verts[0], verts[5], lvl(2)), None);
     let _ = a;
 }
 
@@ -937,18 +1099,16 @@ fn find_first_label_multiple_labels_at_same_vertex_and_level() {
     fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
 
-    let smaller = fb.add_label(verts[1], lvl(1));
-    let other = fb.add_label(verts[1], lvl(1));
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(smaller)
-    );
+    let smaller = add_label(&mut fb, verts[1], lvl(1));
+    let other = add_label(&mut fb, verts[1], lvl(1));
+    let (a, c) = internal_endpoints(&fb, verts[0], verts[2]);
+    assert_eq!(fb.find_first_label(a, c, lvl(1)), Some(smaller));
 
-    assert_eq!(fb.remove_label(smaller), Some(lvl(1)));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), Some(other));
+    assert_eq!(remove_label(&mut fb, smaller), Some(lvl(1)));
+    assert_eq!(fb.find_first_label(a, c, lvl(1)), Some(other));
 
-    assert_eq!(fb.remove_label(other), Some(lvl(1)));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
+    assert_eq!(remove_label(&mut fb, other), Some(lvl(1)));
+    assert_eq!(fb.find_first_label(a, c, lvl(1)), None);
 }
 
 #[test]
@@ -958,23 +1118,15 @@ fn find_first_label_removing_one_level_preserves_another() {
     fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
 
-    let level_zero = fb.add_label(verts[1], lvl(0));
-    let level_one = fb.add_label(verts[1], lvl(1));
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(0)),
-        Some(level_zero)
-    );
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(level_one)
-    );
+    let level_zero = add_label(&mut fb, verts[1], lvl(0));
+    let level_one = add_label(&mut fb, verts[1], lvl(1));
+    let (a, c) = internal_endpoints(&fb, verts[0], verts[2]);
+    assert_eq!(fb.find_first_label(a, c, lvl(0)), Some(level_zero));
+    assert_eq!(fb.find_first_label(a, c, lvl(1)), Some(level_one));
 
-    assert_eq!(fb.remove_label(level_zero), Some(lvl(0)));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(0)), None);
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(level_one)
-    );
+    assert_eq!(remove_label(&mut fb, level_zero), Some(lvl(0)));
+    assert_eq!(fb.find_first_label(a, c, lvl(0)), None);
+    assert_eq!(fb.find_first_label(a, c, lvl(1)), Some(level_one));
 }
 
 #[test]
@@ -986,10 +1138,11 @@ fn find_first_label_off_path_branch() {
     }
 
     fb.cover(verts[1], verts[6], lvl(2));
-    let near = fb.add_label(verts[6], lvl(2));
-    fb.add_label(verts[3], lvl(2));
+    let near = add_label(&mut fb, verts[6], lvl(2));
+    add_label(&mut fb, verts[3], lvl(2));
 
-    assert_eq!(fb.find_first_label(verts[0], verts[4], lvl(2)), Some(near));
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[4]);
+    assert_eq!(fb.find_first_label(a, b, lvl(2)), Some(near));
 }
 
 #[test]
@@ -1001,16 +1154,17 @@ fn find_first_label_star_cover() {
     }
 
     fb.cover(verts[0], verts[2], lvl(1));
-    let good = fb.add_label(verts[2], lvl(1));
-    fb.add_label(verts[3], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[1], lvl(1)), Some(good));
+    let good = add_label(&mut fb, verts[2], lvl(1));
+    add_label(&mut fb, verts[3], lvl(1));
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[1]);
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), Some(good));
 
-    fb.remove_label(good);
-    assert_eq!(fb.find_first_label(verts[0], verts[1], lvl(1)), None);
+    remove_label(&mut fb, good);
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), None);
 
     fb.cover(verts[0], verts[4], lvl(1));
-    let good2 = fb.add_label(verts[4], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[1], lvl(1)), Some(good2));
+    let good2 = add_label(&mut fb, verts[4], lvl(1));
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), Some(good2));
 }
 
 #[test]
@@ -1018,11 +1172,13 @@ fn find_first_label_v_equals_w() {
     let mut fb = FindBridge::new();
     let verts = new_vertices(&mut fb, 3);
     fb.link(verts[0], verts[1]);
-    let l = fb.add_label(verts[0], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[0], lvl(1)), Some(l));
+    let l = add_label(&mut fb, verts[0], lvl(1));
+    let (a, _) = internal_endpoints(&fb, verts[0], verts[0]);
+    assert_eq!(fb.find_first_label(a, a, lvl(1)), Some(l));
 
-    let l2 = fb.add_label(verts[2], lvl(1));
-    assert_eq!(fb.find_first_label(verts[2], verts[2], lvl(1)), Some(l2));
+    let l2 = add_label(&mut fb, verts[2], lvl(1));
+    let (c, _) = internal_endpoints(&fb, verts[2], verts[2]);
+    assert_eq!(fb.find_first_label(c, c, lvl(1)), Some(l2));
 }
 
 #[test]
@@ -1031,10 +1187,11 @@ fn find_first_label_disconnected() {
     let verts = new_vertices(&mut fb, 4);
     fb.link(verts[0], verts[1]);
     fb.link(verts[2], verts[3]);
-    fb.add_label(verts[0], lvl(1));
-    fb.add_label(verts[2], lvl(1));
+    add_label(&mut fb, verts[0], lvl(1));
+    add_label(&mut fb, verts[2], lvl(1));
 
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[2]);
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), None);
 }
 
 #[test]
@@ -1044,13 +1201,11 @@ fn find_first_label_prefers_nearest() {
     for vertex in 1..=5 {
         fb.link(verts[vertex - 1], verts[vertex]);
     }
-    let id_at_1 = fb.add_label(verts[1], lvl(0));
-    fb.add_label(verts[4], lvl(0));
+    let id_at_1 = add_label(&mut fb, verts[1], lvl(0));
+    add_label(&mut fb, verts[4], lvl(0));
 
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[5], lvl(0)),
-        Some(id_at_1)
-    );
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[5]);
+    assert_eq!(fb.find_first_label(a, b, lvl(0)), Some(id_at_1));
 }
 
 #[test]
@@ -1060,35 +1215,26 @@ fn find_first_label_after_uncover() {
     for (u, v) in [(0, 1), (1, 2), (1, 3)] {
         fb.link(verts[u], verts[v]);
     }
-    let path_label = fb.add_label(verts[1], lvl(1));
-    let branch_label = fb.add_label(verts[3], lvl(1));
+    let path_label = add_label(&mut fb, verts[1], lvl(1));
+    let branch_label = add_label(&mut fb, verts[3], lvl(1));
 
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[2]);
     fb.cover(verts[0], verts[2], lvl(1));
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(path_label)
-    );
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), Some(path_label));
     fb.uncover(verts[0], verts[2], lvl(1));
     // The label remains valid because its projection is its own vertex, whose
     // CoverLevel is the no-cover sentinel.
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(path_label)
-    );
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), Some(path_label));
 
-    fb.remove_label(path_label);
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
+    remove_label(&mut fb, path_label);
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), None);
     fb.cover(verts[1], verts[3], lvl(1));
-    assert_eq!(
-        fb.find_first_label(verts[0], verts[2], lvl(1)),
-        Some(branch_label)
-    );
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), Some(branch_label));
     fb.uncover(verts[1], verts[3], lvl(1));
-    assert_eq!(fb.find_first_label(verts[0], verts[2], lvl(1)), None);
+    assert_eq!(fb.find_first_label(a, b, lvl(1)), None);
 }
 
 #[test]
-#[ignore] // This test is slow, so we ignore it by default.
 fn randomized_find_size_and_labels() {
     for seed in 0..8 {
         let n = 8;
@@ -1098,15 +1244,15 @@ fn randomized_find_size_and_labels() {
         let mut naive = Naive::new(n);
         let verts = new_vertices(&mut fb, n);
 
-        let mut edges: Vec<(usize, usize)> = Vec::new();
+        let mut edges: Vec<(usize, usize, EdgeId)> = Vec::new();
         for v in 1..n {
             let u = (rng.next() as usize) % v;
-            fb.link(verts[u], verts[v]);
+            let id = fb.link(verts[u], verts[v]);
             naive.link(u, v);
-            edges.push((u, v));
+            edges.push((u, v, id));
         }
 
-        let mut labels: BTreeMap<UserLabel, (VertexId, i32)> = BTreeMap::new();
+        let mut labels: BTreeMap<EdgeId, (usize, i32)> = BTreeMap::new();
 
         for _ in 0..60 {
             match rng.next() % 6 {
@@ -1129,8 +1275,8 @@ fn randomized_find_size_and_labels() {
                     }
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    fb.cut(verts[a], verts[b]);
+                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
+                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
                     naive.cut(a, b);
                 }
                 3 => {
@@ -1138,9 +1284,9 @@ fn randomized_find_size_and_labels() {
                         let a = (rng.next() as usize) % n;
                         let b = (rng.next() as usize) % n;
                         if a != b && naive.path_vertices(a, b).is_none() {
-                            fb.link(verts[a], verts[b]);
+                            let id = fb.link(verts[a], verts[b]);
                             naive.link(a, b);
-                            edges.push((a, b));
+                            edges.push((a, b, id));
                             break;
                         }
                     }
@@ -1148,14 +1294,14 @@ fn randomized_find_size_and_labels() {
                 4 => {
                     let v = (rng.next() as usize) % n;
                     let level = (rng.next() % levels) as i32;
-                    let id = fb.add_label(verts[v], lvl(level));
-                    labels.insert(id, (verts[v], level));
+                    let id = add_label(&mut fb, verts[v], lvl(level));
+                    labels.insert(id, (v, level));
                 }
                 _ => {
                     if labels.len() > 1 {
                         let ids: Vec<_> = labels.keys().copied().collect();
                         let id = ids[(rng.next() as usize) % ids.len()];
-                        fb.remove_label(id);
+                        remove_label(&mut fb, id);
                         labels.remove(&id);
                     }
                 }
@@ -1166,12 +1312,13 @@ fn randomized_find_size_and_labels() {
                 let v = (rng.next() as usize) % n;
                 let w = (rng.next() as usize) % n;
                 let i = (rng.next() % (levels as u64 + 1)) as i32 - 1;
+                let (a, b) = internal_endpoints(&fb, verts[v], verts[w]);
                 assert_eq!(
-                    fb.find_size_internal(verts[v], verts[w], i),
+                    fb.find_size_internal(a, b, i),
                     naive_find_size(&naive, n, v, w, i),
                     "find_size({v}, {w}, {i}) mismatch (seed {seed})"
                 );
-                let got = fb.find_first_label(verts[v], verts[w], lvl(i));
+                let got = fb.find_first_label(a, b, lvl(i));
                 match naive_find_first_label(&naive, &labels, v, w, i) {
                     None => assert!(
                         got.is_none(),
@@ -1184,10 +1331,10 @@ fn randomized_find_size_and_labels() {
                         let path = naive.path_vertices(v, w).unwrap();
                         let projection = naive.projections(&path);
                         let m = *projection
-                            .get(&u.index())
+                            .get(&u)
                             .expect("label must be in the component");
                         assert!(
-                            naive.cover_between(u.index(), m) >= i,
+                            naive.cover_between(u, m) >= i,
                             "invalid label ({v},{w},{i}, seed {seed})"
                         );
                         let dist = path.iter().position(|&x| x == m).unwrap();
@@ -1197,8 +1344,8 @@ fn randomized_find_size_and_labels() {
                                 if l2 != i {
                                     return None;
                                 }
-                                let m2 = *projection.get(&u2.index())?;
-                                if naive.cover_between(u2.index(), m2) >= i {
+                                let m2 = *projection.get(&u2)?;
+                                if naive.cover_between(u2, m2) >= i {
                                     Some(path.iter().position(|&x| x == m2).unwrap())
                                 } else {
                                     None
@@ -1227,15 +1374,15 @@ fn incident_mask_matches_naive() {
         let mut naive = Naive::new(n);
         let verts = new_vertices(&mut fb, n);
 
-        let mut edges: Vec<(usize, usize)> = Vec::new();
+        let mut edges: Vec<(usize, usize, EdgeId)> = Vec::new();
         for v in 1..n {
             let u = (rng.next() as usize) % v;
-            fb.link(verts[u], verts[v]);
+            let id = fb.link(verts[u], verts[v]);
             naive.link(u, v);
-            edges.push((u, v));
+            edges.push((u, v, id));
         }
 
-        let mut labels: BTreeMap<UserLabel, (VertexId, i32)> = BTreeMap::new();
+        let mut labels: BTreeMap<EdgeId, (usize, i32)> = BTreeMap::new();
         for _ in 0..30 {
             match rng.next() % 6 {
                 0 => {
@@ -1257,8 +1404,8 @@ fn incident_mask_matches_naive() {
                     }
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    fb.cut(verts[a], verts[b]);
+                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
+                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
                     naive.cut(a, b);
                 }
                 3 => {
@@ -1266,9 +1413,9 @@ fn incident_mask_matches_naive() {
                         let a = (rng.next() as usize) % n;
                         let b = (rng.next() as usize) % n;
                         if a != b && naive.path_vertices(a, b).is_none() {
-                            fb.link(verts[a], verts[b]);
+                            let id = fb.link(verts[a], verts[b]);
                             naive.link(a, b);
-                            edges.push((a, b));
+                            edges.push((a, b, id));
                             break;
                         }
                     }
@@ -1276,14 +1423,14 @@ fn incident_mask_matches_naive() {
                 4 => {
                     let v = (rng.next() as usize) % n;
                     let level = (rng.next() % (levels as u64 + 1)) as i32 - 1;
-                    let id = fb.add_label(verts[v], lvl(level));
-                    labels.insert(id, (verts[v], level));
+                    let id = add_label(&mut fb, verts[v], lvl(level));
+                    labels.insert(id, (v, level));
                 }
                 _ => {
                     if !labels.is_empty() {
                         let ids: Vec<_> = labels.keys().copied().collect();
                         let id = ids[(rng.next() as usize) % ids.len()];
-                        fb.remove_label(id);
+                        remove_label(&mut fb, id);
                         labels.remove(&id);
                     }
                 }
@@ -1294,15 +1441,13 @@ fn incident_mask_matches_naive() {
                 let w = (rng.next() as usize) % n;
                 let level = (rng.next() % (levels as u64 + 2)) as i32 - 1;
                 let connected = naive.path_vertices(v, w).is_some();
-                assert_eq!(
-                    fb.connected(verts[v], verts[w]),
-                    connected,
-                    "connected({v}, {w}) mismatch (seed {seed})"
-                );
+                let (a, b) = internal_endpoints(&fb, verts[v], verts[w]);
+                assert_eq!(fb.connected(verts[v], verts[w]), connected,
+                    "connected({v}, {w}) mismatch (seed {seed})");
                 if connected {
                     let expected = naive_has_incident(&naive, &labels, v, w, level);
-                    let mask = fb.debug_root_incident(verts[v], verts[w]);
-                    let actual = mask & super::level_bit(lvl(level)) != 0;
+                    let mask = fb.debug_root_incident(a, b);
+                    let actual = mask & level_bit(lvl(level)) != 0;
                     assert_eq!(
                         actual, expected,
                         "incident({v}, {w}, {level}) mismatch (seed {seed})"
@@ -1311,11 +1456,11 @@ fn incident_mask_matches_naive() {
                     // Exercise the scalar query helper against the same root
                     // summary whose mask was returned by the debug method.
                     let summary_has = {
-                        let summary = fb.top_tree.expose_path(verts[v], verts[w]);
-                        summary.map_or(false, |s| super::incident_has(&s, lvl(level)))
+                        let summary = fb.top_tree.expose_path(a, b);
+                        summary.map_or(false, |s| incident_has(&s, lvl(level)))
                     };
-                    fb.top_tree.deexpose(verts[w]);
-                    fb.top_tree.deexpose(verts[v]);
+                    fb.top_tree.deexpose(b);
+                    fb.top_tree.deexpose(a);
                     assert_eq!(summary_has, actual, "incident_has mismatch");
                 }
             }
@@ -1331,7 +1476,14 @@ fn find_size_above_level_cap_counts_path_vertices() {
         fb.link(verts[vertex - 1], verts[vertex]);
     }
 
-    assert_eq!(fb.find_size_internal(verts[0], verts[3], LEVEL_CAP + 1), 4);
+    assert_eq!(
+        fb.find_size_internal(
+            internal(&fb, verts[0]),
+            internal(&fb, verts[3]),
+            LEVEL_CAP + 1
+        ),
+        4
+    );
 }
 
 #[test]
@@ -1343,14 +1495,9 @@ fn find_size_above_level_cap_on_point_cluster() {
     }
 
     for vertex in 0..6 {
-        assert_eq!(
-            fb.find_size_internal(verts[vertex], verts[vertex], LEVEL_CAP + 1),
-            1
-        );
-        assert_eq!(
-            fb.find_size_internal(verts[vertex], verts[vertex], LEVEL_CAP + 100),
-            1
-        );
+        let v = internal(&fb, verts[vertex]);
+        assert_eq!(fb.find_size_internal(v, v, LEVEL_CAP + 1), 1);
+        assert_eq!(fb.find_size_internal(v, v, LEVEL_CAP + 100), 1);
     }
 }
 
@@ -1365,12 +1512,20 @@ fn find_size_above_level_cap_is_path_length() {
     for (u, v) in [(1, 4), (0, 5), (2, 3)] {
         let expected = (v - u + 1) as u64;
         assert_eq!(
-            fb.find_size_internal(verts[u], verts[v], LEVEL_CAP + 1),
+            fb.find_size_internal(
+                internal(&fb, verts[u]),
+                internal(&fb, verts[v]),
+                LEVEL_CAP + 1
+            ),
             expected,
             "forward pair {u}->{v}"
         );
         assert_eq!(
-            fb.find_size_internal(verts[v], verts[u], LEVEL_CAP + 1),
+            fb.find_size_internal(
+                internal(&fb, verts[v]),
+                internal(&fb, verts[u]),
+                LEVEL_CAP + 1
+            ),
             expected,
             "reverse pair {v}->{u}"
         );
@@ -1417,8 +1572,10 @@ fn find_size_is_symmetric() {
             for _ in 0..8 {
                 let u = (rng.next() as usize) % n;
                 let v = (rng.next() as usize) % n;
-                let forward = fb.find_size_internal(verts[u], verts[v], level);
-                let reverse = fb.find_size_internal(verts[v], verts[u], level);
+                let (a, b) = internal_endpoints(&fb, verts[u], verts[v]);
+                let (c, d) = internal_endpoints(&fb, verts[v], verts[u]);
+                let forward = fb.find_size_internal(a, b, level);
+                let reverse = fb.find_size_internal(c, d, level);
                 assert_eq!(
                     forward, reverse,
                     "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
@@ -1432,8 +1589,10 @@ fn find_size_is_symmetric() {
             let u = (rng.next() as usize) % n;
             let v = (rng.next() as usize) % n;
             let level = (rng.next() % (LEVEL_CAP as u64 + 2)) as i32 - 1;
-            let forward = fb.find_size_internal(verts[u], verts[v], level);
-            let reverse = fb.find_size_internal(verts[v], verts[u], level);
+            let (a, b) = internal_endpoints(&fb, verts[u], verts[v]);
+            let (c, d) = internal_endpoints(&fb, verts[v], verts[u]);
+            let forward = fb.find_size_internal(a, b, level);
+            let reverse = fb.find_size_internal(c, d, level);
             assert_eq!(
                 forward, reverse,
                 "find_size({u}, {v}, {level}) != find_size({v}, {u}, {level}) (seed {seed})"
@@ -1455,11 +1614,13 @@ fn find_size_at_minus_one_is_component_size() {
 
     for vertex in 0..n {
         let expected = naive.component(vertex).len() as u64;
+        let v = internal(&fb, verts[vertex]);
         assert_eq!(
-            fb.find_size_internal(verts[vertex], verts[vertex], -1),
+            fb.find_size_internal(v, v, -1),
             expected,
             "component size mismatch at vertex {vertex}"
         );
+        assert_eq!(fb.component_size(verts[vertex]), expected);
     }
 }
 
@@ -1469,10 +1630,14 @@ fn find_size_above_level_cap_on_single_edge() {
     let verts = new_vertices(&mut fb, 2);
     fb.link(verts[0], verts[1]);
 
-    assert_eq!(fb.find_size_internal(verts[0], verts[0], LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size_internal(verts[1], verts[1], LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size_internal(verts[0], verts[1], LEVEL_CAP + 1), 2);
-    assert_eq!(fb.find_size_internal(verts[1], verts[0], LEVEL_CAP + 1), 2);
+    let (a, _) = internal_endpoints(&fb, verts[0], verts[0]);
+    assert_eq!(fb.find_size_internal(a, a, LEVEL_CAP + 1), 1);
+    let (c, _) = internal_endpoints(&fb, verts[1], verts[1]);
+    assert_eq!(fb.find_size_internal(c, c, LEVEL_CAP + 1), 1);
+    let (d, e) = internal_endpoints(&fb, verts[0], verts[1]);
+    assert_eq!(fb.find_size_internal(d, e, LEVEL_CAP + 1), 2);
+    let (f, g) = internal_endpoints(&fb, verts[1], verts[0]);
+    assert_eq!(fb.find_size_internal(f, g, LEVEL_CAP + 1), 2);
 }
 
 #[test]
@@ -1480,8 +1645,9 @@ fn find_size_above_level_cap_on_isolated_vertex() {
     let mut fb = FindBridge::new();
     let vertex = fb.add_vertex();
 
-    assert_eq!(fb.find_size_internal(vertex, vertex, LEVEL_CAP + 1), 1);
-    assert_eq!(fb.find_size_internal(vertex, vertex, LEVEL_CAP + 100), 1);
+    let v = internal(&fb, vertex);
+    assert_eq!(fb.find_size_internal(v, v, LEVEL_CAP + 1), 1);
+    assert_eq!(fb.find_size_internal(v, v, LEVEL_CAP + 100), 1);
 }
 
 #[test]
@@ -1492,12 +1658,281 @@ fn find_size_above_level_cap_on_star() {
         fb.link(verts[0], verts[leaf]);
     }
 
-    assert_eq!(fb.find_size_internal(verts[0], verts[0], LEVEL_CAP + 1), 1);
-    for leaf in 1..=5 {
+    let (c, _) = internal_endpoints(&fb, verts[0], verts[0]);
+    assert_eq!(fb.find_size_internal(c, c, LEVEL_CAP + 1), 1);
+    for leaf in 1..5 {
+        let (a, b) = internal_endpoints(&fb, verts[0], verts[leaf]);
+        assert_eq!(fb.find_size_internal(a, b, LEVEL_CAP + 1), 2);
+    }
+    let (d, e) = internal_endpoints(&fb, verts[1], verts[2]);
+    assert_eq!(fb.find_size_internal(d, e, LEVEL_CAP + 1), 3);
+}
+
+#[test]
+fn link_on_disconnected_pair_is_a_tree_edge() {
+    let mut fb = FindBridge::new();
+    let a = fb.add_vertex();
+    let b = fb.add_vertex();
+    let c = fb.add_vertex();
+
+    assert_eq!(fb.edge_count(), 0);
+    let ab = fb.link(a, b);
+    assert_eq!(fb.edge_count(), 1);
+    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
+
+    let cb = fb.link(c, b);
+    assert_eq!(fb.edge_count(), 2);
+    assert!(fb.connected(a, c));
+    // The endpoints are the two vertices that were linked.
+    assert_eq!(unordered(edge_endpoints(&fb, ab)), unordered((a, b)));
+    assert_eq!(unordered(edge_endpoints(&fb, cb)), unordered((c, b)));
+    assert_eq!(live_non_tree_edges(&fb), BTreeSet::new());
+}
+
+#[test]
+fn link_on_connected_pair_is_a_non_tree_edge() {
+    let mut fb = FindBridge::new();
+    let a = fb.add_vertex();
+    let b = fb.add_vertex();
+    let ab = fb.link(a, b);
+    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
+
+    let ba = fb.link(b, a);
+    assert!(matches!(fb.edges[ba], Edge::NonTree(_)));
+    // The forest is untouched: no new tree edge, and the recorded graph edge
+    // sits at level 0 at both endpoints.
+    assert_eq!(fb.edge_count(), 1);
+    assert!(fb.connected(a, b));
+    assert_eq!(live_non_tree_edges(&fb), [ba].into());
+    let Edge::NonTree(ref record) = fb.edges[ba] else {
+        panic!("link on a connected pair must record a non-tree edge");
+    };
+    assert_eq!(record.level, lvl(0));
+    assert_eq!(unordered((VertexId(record.u), VertexId(record.v))), unordered((a, b)));
+
+    // Its level is what `find_first_label` reports at level 0.
+    let (x, y) = internal_endpoints(&fb, a, b);
+    assert_eq!(fb.find_first_label(x, y, lvl(0)), Some(ba));
+    assert_eq!(fb.find_first_label(x, y, lvl(1)), None);
+
+    // A tree edge and a non-tree edge may have the same endpoints.
+    assert_eq!(unordered(edge_endpoints(&fb, ba)), unordered((a, b)));
+}
+
+#[test]
+fn cut_edge_on_tree_edge() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    assert_eq!(fb.edge_count(), 2);
+    assert!(fb.connected(verts[0], verts[2]));
+
+    assert!(fb.cut_edge(ab));
+    assert_eq!(fb.edge_count(), 1);
+    assert!(!fb.connected(verts[0], verts[2]));
+    assert!(fb.connected(verts[1], verts[2]));
+    assert!(fb.edges.get(ab).is_none());
+
+    // Cutting it again reports that nothing was there.
+    assert!(!fb.cut_edge(ab));
+    assert_eq!(fb.edge_count(), 1);
+}
+
+#[test]
+fn cut_edge_on_non_tree_edge() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    let cycle = fb.link(verts[0], verts[2]);
+    assert!(matches!(fb.edges[cycle], Edge::NonTree(_)));
+    assert_eq!(live_non_tree_edges(&fb), [cycle].into());
+
+    let (a, b) = internal_endpoints(&fb, verts[0], verts[2]);
+    assert_eq!(fb.find_first_label(a, b, lvl(0)), Some(cycle));
+
+    assert!(fb.cut_edge(cycle));
+    assert!(fb.edges.get(cycle).is_none());
+    assert_eq!(live_non_tree_edges(&fb), BTreeSet::new());
+    assert_eq!(fb.edge_count(), 2);
+    // The label is gone from both endpoints.
+    assert_eq!(fb.find_first_label(a, b, lvl(0)), None);
+
+    // The dead id reports that nothing was there.
+    assert!(!fb.cut_edge(cycle));
+}
+
+#[test]
+fn connected_and_edge_count_across_link_and_cut() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 4);
+    assert_eq!(fb.edge_count(), 0);
+    assert!(!fb.connected(verts[0], verts[1]));
+
+    let mut live: Vec<EdgeId> = Vec::new();
+    for (u, v) in [(0, 1), (1, 2), (2, 3)] {
+        assert!(!fb.connected(verts[u], verts[v]));
+        live.push(fb.link(verts[u], verts[v]));
+        assert_eq!(fb.edge_count(), live.len());
+        assert!(fb.connected(verts[u], verts[v]));
+    }
+    // The three links form the path 0-1-2-3.
+    assert!(fb.connected(verts[0], verts[3]));
+
+    for (index, edge) in live.iter().enumerate() {
+        assert!(fb.cut_edge(*edge));
+        assert_eq!(fb.edge_count(), live.len() - index - 1);
+        assert!(!fb.connected(verts[0], verts[3]));
+    }
+    assert_eq!(fb.edge_count(), 0);
+    // The vertices survive; only the edges are gone.
+    for v in &verts {
+        assert_eq!(fb.component_size(*v), 1);
+        assert_eq!(fb.cover_level(internal(&fb, *v)), NO_COVER);
+    }
+}
+
+#[test]
+fn two_edge_component_size_matches_component_size_on_a_triangle() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    let ca = fb.link(verts[2], verts[0]);
+    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+
+    for v in &verts {
+        assert_eq!(fb.component_size(*v), 3);
+        assert_eq!(fb.two_edge_component_size(*v), 1);
+        assert_eq!(fb.find_bridge(*v), Some(ab));
+    }
+
+    fb.cover(verts[2], verts[0], lvl(0));
+    for v in &verts {
+        assert_eq!(fb.component_size(*v), 3);
+        assert_eq!(fb.two_edge_component_size(*v), 3);
+        assert!(fb.find_bridge(*v).is_none());
+    }
+
+    fb.uncover(verts[2], verts[0], lvl(0));
+    for v in &verts {
+        assert_eq!(fb.component_size(*v), 3);
+        assert_eq!(fb.two_edge_component_size(*v), 1);
+        assert_eq!(fb.find_bridge(*v), Some(ab));
+    }
+}
+
+#[test]
+fn two_edge_component_size_after_covering_one_path_edge() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+
+    for v in &verts {
+        assert_eq!(fb.component_size(*v), 3);
+        assert_eq!(fb.two_edge_component_size(*v), 1);
+    }
+
+    // Only the `a`-`b` edge is covered. At threshold 0 a vertex counts iff
+    // `CoverLevel(u, v) >= 0`, i.e. iff `u` reaches `v` without using the
+    // still-uncovered `b`-`c` edge: that leaves the pair {a, b} for a and b,
+    // and only {c} for c.
+    fb.cover(verts[0], verts[1], lvl(0));
+    for (i, v) in verts.iter().enumerate() {
+        assert_eq!(fb.component_size(*v), 3);
+        let expected = if i == 2 { 1 } else { 2 };
         assert_eq!(
-            fb.find_size_internal(verts[0], verts[leaf], LEVEL_CAP + 1),
-            2
+            fb.two_edge_component_size(*v),
+            expected,
+            "two-edge component of model vertex {i}"
         );
     }
-    assert_eq!(fb.find_size_internal(verts[1], verts[2], LEVEL_CAP + 1), 3);
+
+    fb.uncover(verts[0], verts[1], lvl(0));
+    for v in &verts {
+        assert_eq!(fb.two_edge_component_size(*v), 1);
+    }
+}
+
+#[test]
+fn remove_edge_on_bridge_tree_edge_splits_the_component() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    let bc = fb.link(verts[1], verts[2]);
+
+    // `ab` is a bridge, so removing it must not reach the replacement path.
+    fb.remove_edge(ab);
+    assert!(fb.edges.get(ab).is_none());
+    assert_eq!(fb.edge_count(), 1);
+    assert!(!fb.connected(verts[0], verts[2]));
+    assert_eq!(fb.component_size(verts[0]), 1);
+    assert_eq!(fb.component_size(verts[2]), 2);
+    assert!(fb.edges.get(bc).is_some());
+    assert_eq!(fb.cover_level_between(verts[1], verts[2]), -1);
+}
+
+#[test]
+fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    let bc = fb.link(verts[1], verts[2]);
+    let ca = fb.link(verts[2], verts[0]);
+    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+
+    fb.cover(verts[2], verts[0], lvl(0));
+    assert!(fb.find_bridge(verts[0]).is_none());
+    assert_eq!(fb.two_edge_component_size(verts[0]), 3);
+
+    fb.remove_edge(ca);
+    assert!(fb.edges.get(ca).is_none());
+    assert_eq!(fb.edge_count(), 2);
+    assert_eq!(fb.component_size(verts[0]), 3);
+    // The cycle is gone, so every path edge is a bridge once more.
+    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
+    assert!(matches!(fb.edges[bc], Edge::Tree(_)));
+    assert_eq!(fb.cover_level_between(verts[0], verts[2]), -1);
+    assert_eq!(fb.cover_level(internal(&fb, verts[0])), -1);
+    assert_eq!(fb.two_edge_component_size(verts[0]), 1);
+    assert_eq!(fb.find_bridge(verts[0]), Some(ab));
+}
+
+#[test]
+fn remove_edge_on_covered_tree_edge_keeps_the_component_connected() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 3);
+    let ab = fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    let ca = fb.link(verts[2], verts[0]);
+    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+
+    fb.cover(verts[2], verts[0], lvl(0));
+    assert_eq!(fb.cover_level_between(verts[0], verts[1]), 0);
+    assert!(fb.find_bridge(verts[0]).is_none());
+
+    // `ab` is covered, so deleting the graph edge must fall back to the
+    // Appendix-A reduction: a replacement edge is promoted to a tree edge and
+    // the deleted edge covers the path it used to close. The forest therefore
+    // stays connected and the graph-level structure is preserved.
+    fb.remove_edge(ab);
+
+    assert!(fb.connected(verts[0], verts[1]));
+    assert_eq!(fb.component_size(verts[0]), 3);
+    assert_eq!(fb.component_size(verts[1]), 3);
+    assert_eq!(fb.component_size(verts[2]), 3);
+}
+#[test]
+fn zz_debug_probe() {
+    let mut fb = FindBridge::new();
+    let v = new_vertices(&mut fb, 3);
+    let ab = fb.link(v[0], v[1]);
+    let bc = fb.link(v[1], v[2]);
+    fb.remove_edge(ab);
+    eprintln!("about to cut_edge(ab) after remove_edge(ab)");
+    let r = fb.cut_edge(ab);
+    eprintln!("cut_edge returned {r}");
+    let _ = bc;
 }

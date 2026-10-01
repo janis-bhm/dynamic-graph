@@ -1,21 +1,29 @@
-//! Bridge-finding algorithm using top trees, based on "Dynamic Bridge-Finding in O(log^2n) Amortized Time" by Holm, Rotenberg and Thorup (2017).
+//! Bridge-finding algorithm using top trees, based on "Dynamic Bridge-Finding
+//! in O(log^2n) Amortized Time" by Holm, Rotenberg and Thorup (2017).
 //!
-//! The bridge queries themselves are answered by the CoverLevel structure of
-//! Section 4, implemented as a [`top_tree::Summary`] ([`CoverLevel`]) with a
-//! lazy [`CoverTag`]. The [`FindBridge`] wrapper exposes the tree operations
-//! (`link`, `cut`, `connected`, `cover`, `uncover`, `cover_level`,
-//! `min_covered_edge`, and isolated-in-the-forest vertex removal) and the
-//! bridge queries (`find_bridge`, ...).
+//! The bridge queries themselves are answered by the [`CoverLevel`] structure of
+//! Section 4, implemented as a [`top_tree::Summary`] with a lazy [`CoverTag`].
+//! [`FindBridge`] owns a dynamic forest whose edges are [`EdgeId`] handles and
+//! exposes
 //!
-//! It also exposes the two auxiliary query structures of the paper:
+//! * the tree operations of Section 2: [`FindBridge::link`],
+//!   [`FindBridge::cut_edge`], [`FindBridge::connected`], [`FindBridge::cover`],
+//!   [`FindBridge::uncover`], [`FindBridge::cover_level_between`] and
+//!   [`FindBridge::min_covered_edge_between`], plus
+//!   [`FindBridge::remove_vertex`] for vertices that are already isolated in the
+//!   forest (it panics while a vertex still has incident edges);
+//! * the bridge queries, [`FindBridge::find_bridge`] and
+//!   [`FindBridge::find_bridge_between`], each answering with an [`EdgeId`] or
+//!   `None`;
+//! * `FindSize` from Section 5 as [`FindBridge::component_size`] and
+//!   [`FindBridge::two_edge_component_size`];
+//! * and `FindFirstLabel` from Section 6 as internal label bookkeeping:
+//!   [`FindBridge::link`] on an already-connected pair records a non-tree edge
+//!   instead of a tree edge, [`FindBridge::cut_edge`] drops such a record, and
+//!   [`FindBridge::remove_edge`] drops it and then uncovers the path it covered.
 //!
-//! * [`FindBridge::find_size`] implements `FindSize` from Section 5.
-//! * [`FindBridge::add_label`], [`FindBridge::remove_label`] and
-//!   [`FindBridge::find_first_label`] implement the FindFirstLabel structure
-//!   of Section 6.
-//! * [`DynamicGraph`] implements Appendix A's graph-level reduction on top of
-//!   these tree operations. Its `remove_vertex` deletes all incident graph
-//!   edges before removing the vertex; removed public handles are not reused.
+//! There is no separate graph-level type: callers drive tree edges and non-tree
+//! edges through [`FindBridge`] itself.
 //!
 //! # Example
 //!
@@ -26,43 +34,52 @@
 //! let a = graph.add_vertex();
 //! let b = graph.add_vertex();
 //! let c = graph.add_vertex();
-//! graph.link(a, b);
-//! graph.link(b, c);
+//! let ab = graph.link(a, b);
+//! let bc = graph.link(b, c);
 //! let level = Level::new(0).unwrap();
 //!
 //! // Every tree edge starts out as a bridge.
-//! assert_eq!(graph.find_bridge(a), Some((a, b)));
+//! assert_eq!(graph.find_bridge(a), Some(ab));
+//! assert_eq!(graph.find_bridge_between(b, c), Some(bc));
 //!
-//! // Cover the whole path with a (non-tree) edge; nothing is a bridge now.
+//! // Cover the whole path; no edge on it is a bridge any more.
 //! graph.cover(a, c, level);
 //! assert_eq!(graph.find_bridge(a), None);
+//! assert_eq!(graph.find_bridge_between(a, c), None);
 //!
-//! // Remove the cover again.
+//! // Uncover again and each path edge is a bridge once more.
 //! graph.uncover(a, c, level);
-//! assert!(graph.find_bridge_between(a, c).is_some());
+//! let bridge = graph.find_bridge_between(a, c).unwrap();
+//! assert!(bridge == ab || bridge == bc);
 //! ```
 //!
-//! The higher-level [`DynamicGraph`] API manages tree and non-tree edges for
-//! you:
+//! Linking an already-connected pair records a non-tree edge rather than a tree
+//! edge; the caller raises the cover level on the tree path to make the bridge
+//! queries see the cycle:
 //!
 //! ```
-//! use find_bridge::DynamicGraph;
+//! use find_bridge::{FindBridge, Level};
 //!
-//! let mut graph = DynamicGraph::new();
+//! let mut graph = FindBridge::new();
 //! let a = graph.add_vertex();
 //! let b = graph.add_vertex();
 //! let c = graph.add_vertex();
-//! graph.insert_edge(a, b).unwrap();
-//! graph.insert_edge(b, c).unwrap();
-//! assert!(graph.find_bridge_between(a, c).is_some());
+//! let ab = graph.link(a, b);
+//! graph.link(b, c);
+//! assert_eq!(graph.find_bridge_between(a, c), Some(ab));
 //!
-//! // The third edge closes a cycle and covers the tree path.
-//! let cycle_edge = graph.insert_edge(c, a).unwrap();
+//! let level = Level::new(0).unwrap();
+//! let cycle_edge = graph.link(c, a);
+//! graph.cover(c, a, level);
 //! assert_eq!(graph.find_bridge(a), None);
-//! assert!(graph.two_edge_connected(a, c));
+//! assert_eq!(graph.component_size(a), 3);
+//! assert_eq!(graph.two_edge_component_size(a), 3);
 //!
-//! graph.delete_edge(cycle_edge);
-//! assert!(graph.find_bridge_between(a, c).is_some());
+//! graph.uncover(c, a, level);
+//! assert_eq!(graph.find_bridge(a), Some(ab));
+//! assert_eq!(graph.two_edge_component_size(a), 1);
+//!
+//! assert!(graph.cut_edge(cycle_edge));
 //! ```
 
 mod cover_level;

@@ -2,17 +2,38 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::*;
 
-/// The top tree no longer carries user supplied edge weights: the payload of a
-/// forest edge is the index of its top tree leaf. To keep the summaries below
-/// exercising non-trivial per-edge values, we derive a deterministic "weight"
-/// from an edge's endpoints. Along the path `0-1-2-...` this yields `1, 2, ...`,
-/// matching the weights the old weight-carrying tests used.
-fn edge_weight(u: tree::VertexId, v: tree::VertexId) -> u64 {
-    (u.index().min(v.index()) + 1) as u64
+/// The top tree leaf that represents the forest edge `a`-`b`.
+///
+/// The forest stores that `ClusterId` as the edge payload, so `link` can hand
+/// the leaf back to an application that wants to remember it.
+fn edge_leaf<N, E, S: Summary>(
+    tt: &TopTree<S, N, E>,
+    a: tree::VertexId,
+    b: tree::VertexId,
+) -> ClusterId {
+    let edge = tt.tree.edge_index_of(a, b).expect("edge must exist");
+    *tt.tree.edge_weight(edge).expect("edge must exist")
 }
 
+// The summaries below take their per-leaf value from the leaf's own
+// `ClusterId::index()`, the leaf's slot in the cluster arena. Two reasons:
+//
+// * [`Summary::tree_edge`] is handed only the leaf's [`ClusterId`] — in
+//   particular not the edge weight the application passed to [`TopTree::link`],
+//   which the top tree keeps in the leaf cluster's own `weight` field and never
+//   shows to a summary. A slot index is unique among live leaves, so it still
+//   pins down *which* edges a summary covers. The application-supplied weight is
+//   checked on its own terms instead: by [`check_invariants`] (every edge leaf
+//   keeps the weight `link` was given) and by [`Harness::cut`] (cutting returns
+//   it).
+//
+// * The tests compute their expected aggregates from the leaves they recorded at
+//   `link` time, reading the same slot index off the `ClusterId` directly rather
+//   than through a shared helper. So a summary that misreports which edges it
+//   covers, or their values, cannot agree with the expectation by construction.
+
 /// A monoid summary over the whole cluster: number of tree edges and xor of
-/// their weights.
+/// the values of their leaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Agg {
     edges: u32,
@@ -25,7 +46,7 @@ impl Summary for Agg {
     fn tree_edge(e: ClusterId) -> Self {
         Agg {
             edges: 1,
-            xor: edge_weight(u, v),
+            xor: e.index() as u64,
         }
     }
 
@@ -96,7 +117,7 @@ impl Summary for LabelValue {
     }
 }
 
-/// The sum of the edge weights on the cluster path, with a lazy "add `x` to
+/// The sum of the per-leaf values on the cluster path, with a lazy "add `x` to
 /// every edge on the path" tag. This is the mechanism used by cover-level
 /// style algorithms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,9 +129,9 @@ struct PathSum {
 impl Summary for PathSum {
     type Tag = i64;
 
-    fn tree_edge(u: ClusterId) -> Self {
+    fn tree_edge(e: ClusterId) -> Self {
         PathSum {
-            sum: edge_weight(u, v) as i64,
+            sum: e.index() as i64,
             len: 1,
         }
     }
@@ -146,7 +167,7 @@ impl Summary for PathSum {
     }
 }
 
-/// The maximum edge weight on the cluster path (`0` for point clusters).
+/// The maximum per-leaf value on the cluster path (`0` for point clusters).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PathMax {
     max: u64,
@@ -157,7 +178,7 @@ impl Summary for PathMax {
 
     fn tree_edge(e: ClusterId) -> Self {
         PathMax {
-            max: edge_weight(u, v) * 10,
+            max: e.index() as u64,
         }
     }
 
@@ -181,6 +202,10 @@ impl Summary for PathMax {
     }
 }
 
+/// The leaf identities on the cluster path, in path order. This is the
+/// order-sensitive summary: reversing a cluster reverses the edge sequence, so
+/// an exposed path can be checked both for *which* edges it reports and for the
+/// direction it reports them in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirectedPath {
     edges: Vec<ClusterId>,
@@ -206,6 +231,10 @@ impl Summary for DirectedPath {
             edges.extend_from_slice(&right.edges);
         }
         DirectedPath { edges }
+    }
+
+    fn flip(&mut self) {
+        self.edges.reverse();
     }
 }
 
@@ -289,6 +318,11 @@ fn cluster_liveness_bitmap_matches_allocator() {
         .expect("attached cluster is a label leaf");
     tt.link(a, b, ());
     assert!(tt.cut(a, b).is_some());
+    // Keep a live cluster above `initial_label` so that detaching it leaves a
+    // free slot that is *not* the last one. `SlotVec::remove` pops the last
+    // slot instead of free-listing it, so freeing the topmost cluster would
+    // leave the arena empty and there would be nothing left to reuse.
+    tt.attach(c, ());
     tt.detach(initial_label);
 
     let old_len = tt.clusters.slots.len();
@@ -296,6 +330,11 @@ fn cluster_liveness_bitmap_matches_allocator() {
     assert!(
         cluster_to_remove.index() < old_len,
         "the first attach must reuse a free cluster slot"
+    );
+    assert_eq!(
+        tt.clusters.slots.len(),
+        old_len,
+        "reusing a free slot must not grow the arena"
     );
     tt.attach(b, ());
     tt.attach(c, ());
@@ -332,14 +371,14 @@ fn cluster_liveness_bitmap_matches_allocator() {
 fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
     let mut tt = TopTree::<PathLen>::new();
     let vertices: Vec<_> = (0..6).map(|_| tt.add_vertex()).collect();
-    let initial_labels: Vec<_> = vertices
-        .iter()
-        .map(|&vertex| {
-            let cluster = tt.attach(vertex, ());
-            tt.node_label_key(cluster)
-                .expect("attached cluster is a label leaf")
-        })
-        .collect();
+    // One label leaf per vertex, i.e. cluster slots `0..6`.
+    for &vertex in vertices.iter() {
+        let cluster = tt.attach(vertex, ());
+        assert!(
+            tt.node_label_key(cluster).is_some(),
+            "attached cluster is a label leaf"
+        );
+    }
 
     let assert_free_list_matches_live = |tt: &TopTree<PathLen>| {
         let nodes_len = tt.clusters.slots.len();
@@ -389,23 +428,46 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
         );
     };
 
-    for label in initial_labels.iter().rev().take(4) {
-        tt.detach(*label);
+    // `Tree::remove_label` moves the last label into the freed slot and stamps it
+    // with a fresh generation, so a label handle collected earlier can go stale.
+    // Look each label up by its vertex instead.
+    //
+    // Detaching bottom-up matters as well: `SlotVec::remove` pops the last slot
+    // rather than free-listing it, so freeing the topmost clusters in turn would
+    // empty the arena and leave the free list empty for the checks below to
+    // agree with the liveness bitmap only vacuously.
+    let detach_label_at = |tt: &mut TopTree<PathLen>, vertex: tree::VertexId| {
+        let cluster = tt.first_label(vertex).expect("vertex must have a label");
+        let label = tt
+            .node_label_key(cluster)
+            .expect("incident leaf must be a label leaf");
+        tt.detach(label);
+    };
+
+    for &vertex in vertices.iter().take(4) {
+        detach_label_at(&mut tt, vertex);
     }
-    let replacement_labels: Vec<_> = vertices
-        .iter()
-        .take(4)
-        .map(|&vertex| {
-            let cluster = tt.attach(vertex, ());
-            tt.node_label_key(cluster)
-                .expect("attached cluster is a label leaf")
-        })
-        .collect();
+    assert!(
+        tt.clusters.first_free.is_some(),
+        "detaching a non-last slot must leave the arena's free list non-empty"
+    );
+
+    for &vertex in vertices.iter().take(4) {
+        let cluster = tt.attach(vertex, ());
+        assert!(
+            tt.node_label_key(cluster).is_some(),
+            "attached cluster is a label leaf"
+        );
+    }
     assert_free_list_matches_live(&tt);
 
-    for label in replacement_labels.iter().rev().take(3) {
-        tt.detach(*label);
+    for &vertex in vertices.iter().take(3) {
+        detach_label_at(&mut tt, vertex);
     }
+    assert!(
+        tt.clusters.first_free.is_some(),
+        "detaching a non-last slot must leave the arena's free list non-empty"
+    );
     assert_free_list_matches_live(&tt);
 }
 
@@ -422,6 +484,8 @@ fn removing_isolated_vertex_remaps_surviving_clusters() {
     }
     tt.link(left, middle, ());
     tt.link(middle, moved, ());
+    let left_middle = edge_leaf(&tt, left, middle);
+    let middle_moved = edge_leaf(&tt, middle, moved);
 
     let swap = tt.remove_vertex(removed).expect("live vertex is removed");
     moved.swap(swap);
@@ -431,8 +495,10 @@ fn removing_isolated_vertex_remaps_surviving_clusters() {
     assert_eq!(tt.edge_count(), 2);
     assert_eq!(tt.label_count(), 3);
 
+    // The summary reports leaf identities, so the exposed path must consist of
+    // exactly the two surviving edges, in the order `left`..`moved`.
     let summary = tt.expose_path(left, moved).expect("path remains connected");
-    assert_eq!(summary.edges, vec![(left, middle), (middle, moved)]);
+    assert_eq!(summary.edges, vec![left_middle, middle_moved]);
     tt.deexpose(moved);
     tt.deexpose(left);
 
@@ -463,15 +529,35 @@ fn removing_last_vertex_clears_exposure_and_reports_success() {
     );
 }
 
+/// The edge weight the harness supplies for the edge between path positions `k`
+/// and `k + 1`. Keeping the historical `k + 1` rule means the application
+/// supplied weights along `0-1-2-...` are still `1, 2, 3, ...`.
+fn harness_weight(u: usize, v: usize) -> u64 {
+    (u.min(v) + 1) as u64
+}
+
+/// Unordered key for the harness edge `u`-`v`.
+fn edge_key(u: usize, v: usize) -> (usize, usize) {
+    (u.min(v), u.max(v))
+}
+
+/// A mirror of a small forest, used to drive the top tree and to check the
+/// summaries it reports against an independently computed ground truth.
+///
+/// Every tree edge carries the `u64` weight [`harness_weight`]; the summaries
+/// never see that weight (see the note above `Agg`) but `check_invariants` and
+/// [`Harness::cut`] check that the top tree keeps it intact.
 struct Harness<S: Summary> {
-    tt: TopTree<S>,
+    tt: TopTree<S, (), u64>,
     vertices: Vec<tree::VertexId>,
     adj: HashMap<usize, HashSet<usize>>,
+    /// The leaf cluster of every live edge, keyed by [`edge_key`].
+    edge_leaves: HashMap<(usize, usize), ClusterId>,
 }
 
 impl<S: Summary + Clone> Harness<S> {
     fn new(n: usize) -> Self {
-        let mut tt = TopTree::new();
+        let mut tt: TopTree<S, (), u64> = TopTree::new();
         let mut vertices = Vec::new();
         let mut adj = HashMap::new();
         for i in 0..n {
@@ -479,21 +565,61 @@ impl<S: Summary + Clone> Harness<S> {
             vertices.push(id);
             adj.insert(i, Default::default());
         }
-        Self { tt, vertices, adj }
+        Self {
+            tt,
+            vertices,
+            adj,
+            edge_leaves: HashMap::new(),
+        }
     }
 
     fn v(&self, i: usize) -> tree::VertexId {
         self.vertices[i]
     }
 
+    /// The leaf cluster representing the live edge `u`-`v`.
+    fn leaf(&self, u: usize, v: usize) -> ClusterId {
+        self.edge_leaves[&edge_key(u, v)]
+    }
+
+    /// The leaves of the edges on the `u`-`v` path, in path order.
+    fn path_leaves(&self, u: usize, v: usize) -> Vec<ClusterId> {
+        path_edges(self, u, v)
+            .expect("path must exist")
+            .into_iter()
+            .map(|(a, b)| self.leaf(a, b))
+            .collect()
+    }
+
+    /// The per-leaf values along the `u`-`v` path, in path order, as the weight
+    /// sensitive summaries compute them.
+    fn path_leaf_values(&self, u: usize, v: usize) -> Vec<u64> {
+        self.path_leaves(u, v)
+            .into_iter()
+            .map(|leaf| leaf.index() as u64)
+            .collect()
+    }
+
     fn link(&mut self, u: usize, v: usize) {
-        self.tt.link(self.v(u), self.v(v), ());
+        self.tt.link(self.v(u), self.v(v), harness_weight(u, v));
+        let leaf = edge_leaf(&self.tt, self.v(u), self.v(v));
+        let previous = self.edge_leaves.insert(edge_key(u, v), leaf);
+        assert!(previous.is_none(), "edge {u}-{v} must not already exist");
         self.adj.get_mut(&u).unwrap().insert(v);
         self.adj.get_mut(&v).unwrap().insert(u);
     }
 
     fn cut(&mut self, u: usize, v: usize) {
-        self.tt.cut(self.v(u), self.v(v)).expect("edge must exist");
+        let weight = self.tt.cut(self.v(u), self.v(v)).expect("edge must exist");
+        assert_eq!(
+            weight,
+            harness_weight(u, v),
+            "cut must return the weight passed to link"
+        );
+        assert!(
+            self.edge_leaves.remove(&edge_key(u, v)).is_some(),
+            "edge {u}-{v} must have been linked"
+        );
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
@@ -567,7 +693,7 @@ impl<S: Summary + Clone> Harness<S> {
     }
 }
 
-fn live_roots<S: Summary>(tt: &TopTree<S>) -> Vec<ClusterId> {
+fn live_roots<S: Summary, N, E>(tt: &TopTree<S, N, E>) -> Vec<ClusterId> {
     let clusters = (0..tt.tree.nodes.len())
         .map(|i| tt.tree.vertex_id_from_index(i))
         .filter_map(|l| tt.find_root(l))
@@ -575,8 +701,8 @@ fn live_roots<S: Summary>(tt: &TopTree<S>) -> Vec<ClusterId> {
     clusters.into_iter().collect()
 }
 
-fn collect_leaves<S: Summary>(
-    tt: &TopTree<S>,
+fn collect_leaves<S: Summary, N, E>(
+    tt: &TopTree<S, N, E>,
     node: ClusterId,
     leaves: &mut Vec<ClusterId>,
     nodes: &mut usize,
@@ -639,8 +765,8 @@ impl Boundaries {
 }
 
 /// Counts the leaves below `node` incident to `vertex`.
-fn count_incident_leaves<S: Summary>(
-    tt: &TopTree<S>,
+fn count_incident_leaves<S: Summary, N, E>(
+    tt: &TopTree<S, N, E>,
     node: ClusterId,
     vertex: tree::VertexId,
 ) -> usize {
@@ -673,12 +799,12 @@ fn count_incident_leaves<S: Summary>(
 /// The invariant checked for every internal node is: the rightmost boundary of
 /// the materialized left child and the leftmost boundary of the materialized
 /// right child must both exist and equal the central vertex.
-fn check_node_boundaries<S: Summary>(tt: &TopTree<S>, node: ClusterId) -> Boundaries {
+fn check_node_boundaries<S: Summary, N, E>(tt: &TopTree<S, N, E>, node: ClusterId) -> Boundaries {
     check_node_boundaries_in(tt, node, false)
 }
 
-fn check_node_boundaries_in<S: Summary>(
-    tt: &TopTree<S>,
+fn check_node_boundaries_in<S: Summary, N, E>(
+    tt: &TopTree<S, N, E>,
     node: ClusterId,
     parity: bool,
 ) -> Boundaries {
@@ -758,7 +884,7 @@ fn check_node_boundaries_in<S: Summary>(
         expected.count() as u8,
         stored.count(),
         "boundary count mismatch at node {node:?} ({:?})",
-        cluster.data
+        tt.node_kind(node)
     );
 
     let expected_set: BTreeSet<tree::VertexId> = expected.set();
@@ -768,9 +894,10 @@ fn check_node_boundaries_in<S: Summary>(
         BoundaryVertices::Two { left, right } => BTreeSet::from([left, right]),
     };
     assert_eq!(
-        expected_set, stored_set,
+        expected_set,
+        stored_set,
         "boundary vertices mismatch at node {node} ({:?})",
-        cluster.data
+        tt.node_kind(node)
     );
 
     let mapped = match [expected.left, expected.mid, expected.right]
@@ -788,9 +915,10 @@ fn check_node_boundaries_in<S: Summary>(
         other => panic!("more than two boundary vertices {other:?} at node {node:?}"),
     };
     assert_eq!(
-        stored, mapped,
+        stored,
+        mapped,
         "boundary orientation mismatch at node {node} ({:?})",
-        cluster.data
+        tt.node_kind(node)
     );
 
     if matches!(cluster.data, ClusterData::Internal) {
@@ -845,10 +973,32 @@ fn check_invariants<S: Summary + Clone>(h: &Harness<S>) {
 
         for leaf in leaves {
             match tt.cl(leaf).data {
-                ClusterData::Edge { tree_id: edge, .. } => {
+                ClusterData::Edge {
+                    tree_id: edge,
+                    weight,
+                } => {
                     assert!(
                         covered_edges.insert(edge.index()),
                         "edge leaf appears twice"
+                    );
+                    // The forest edge must point back at the top tree leaf that
+                    // represents it, and the leaf must still carry the weight
+                    // the application supplied at `link` time.
+                    let (u, v) = tt.tree.edge_endpoints(edge).expect("edge must exist");
+                    let key = (u.index().min(v.index()), u.index().max(v.index()));
+                    let expected =
+                        h.edge_leaves.get(&key).copied().unwrap_or_else(|| {
+                            panic!("edge leaf {leaf} is not a linked harness edge")
+                        });
+                    assert_eq!(
+                        tt.tree.edge_weight(edge).copied(),
+                        Some(expected),
+                        "forest edge {edge:?} must name its top tree leaf"
+                    );
+                    assert_eq!(
+                        weight,
+                        harness_weight(key.0, key.1),
+                        "edge leaf must keep the weight passed to link"
                     );
                 }
                 ClusterData::Node { tree_id: label, .. } => {
@@ -993,25 +1143,213 @@ fn update_label_summary_recomputes_ancestors_without_relinking() {
     check_invariants(&h);
 }
 
+/// The node-inspection surface a guided descent relies on, the per-vertex label
+/// lookup, and the by-cluster variant of a label summary update. Both label and
+/// edge leaves carry application weights here, so `leaf_weight` and
+/// `leaf_weight_mut` are exercised on both `ClusterWeight` variants.
+#[test]
+fn node_inspection_and_label_lookup() {
+    let mut tt: TopTree<LabelValue, u64, u64> = TopTree::new();
+    let v: Vec<_> = (0..4).map(|_| tt.add_vertex()).collect();
+
+    tt.link(v[0], v[1], 10);
+    tt.link(v[0], v[2], 20);
+    let label0 = tt.attach(v[0], 100);
+    let label2 = tt.attach(v[2], 200);
+
+    let leaf_01 = edge_leaf(&tt, v[0], v[1]);
+    let leaf_02 = edge_leaf(&tt, v[0], v[2]);
+    assert_ne!(leaf_01, leaf_02, "each edge is represented by its own leaf");
+
+    // Connectivity, by vertex and by cluster.
+    assert!(tt.connected(v[0], v[1]));
+    assert!(tt.connected(v[1], v[2]));
+    assert!(!tt.connected(v[0], v[3]));
+    assert!(tt.connected_clusters(leaf_01, leaf_02));
+    assert!(tt.connected_clusters(leaf_01, label2));
+    let label3 = tt.attach(v[3], 1);
+    assert!(!tt.connected_clusters(leaf_01, label3));
+
+    // Leaf identification.
+    assert_eq!(tt.node_kind(leaf_01), NodeKind::Edge);
+    assert_eq!(tt.node_kind(label0), NodeKind::Label);
+    assert_eq!(tt.edge_endpoints(leaf_01), Some((v[0], v[1])));
+    assert_eq!(
+        tt.edge_endpoints(leaf_02),
+        Some((v[0], v[2])),
+        "endpoints follow the forest, not the cluster orientation"
+    );
+    assert_eq!(
+        tt.edge_endpoints(label0),
+        None,
+        "a label leaf is not a tree edge"
+    );
+    assert_eq!(
+        tt.label_vertex(tt.node_label_key(label2).expect("label leaf")),
+        Some(v[2])
+    );
+    assert_eq!(
+        tt.node_label_key(leaf_01),
+        None,
+        "an edge leaf is not a label"
+    );
+
+    // Application weights on both leaf kinds, readable and writable.
+    assert_eq!(tt.leaf_weight(leaf_02).into_edge(), Some(&20));
+    assert_eq!(tt.leaf_weight(label0).into_label(), Some(&100));
+    let ClusterWeight::Edge(weight) = tt.leaf_weight_mut(leaf_01) else {
+        panic!("an edge leaf must report an edge weight");
+    };
+    *weight = 11;
+    assert_eq!(tt.leaf_weight(leaf_01).into_edge(), Some(&11));
+    let ClusterWeight::Label(weight) = tt.leaf_weight_mut(label0) else {
+        panic!("a label leaf must report a label weight");
+    };
+    *weight = 101;
+    assert_eq!(tt.leaf_weight(label0).into_label(), Some(&101));
+    assert_eq!(
+        tt.leaf_weight(leaf_01).into_label(),
+        None,
+        "an edge leaf carries no label weight"
+    );
+
+    // Label lookup by vertex.
+    assert_eq!(tt.first_label(v[0]), Some(label0));
+    assert_eq!(tt.first_label(v[2]), Some(label2));
+    assert_eq!(tt.first_label(v[1]), None, "a bare vertex has no label");
+    assert_eq!(
+        tt.label_clusters(v[0]).collect::<BTreeSet<_>>(),
+        BTreeSet::from([label0])
+    );
+    assert_eq!(tt.label_clusters(v[1]).count(), 0);
+
+    // Inspection of the exposed path, using only logical (flip-aware) accessors.
+    let root = tt
+        .expose_path_node(v[1], v[2])
+        .expect("path 1..2 is exposable");
+    assert!(tt.node_is_path(root));
+    assert_eq!(
+        tt.node_boundary(root),
+        Boundary::Two {
+            left: v[1],
+            right: v[2]
+        }
+    );
+    assert_eq!(
+        *tt.node_summary(root),
+        LabelValue { value: 2 },
+        "LabelValue counts every leaf, so only the two labels contribute"
+    );
+
+    // The exposed root rakes the label at `v[2]` off the path: labels are never
+    // path children, so it becomes a point cluster joined at the right
+    // boundary, and the path cluster on the left is what spans `v[1]`..`v[2]`.
+    let (left, right) = tt
+        .node_children(root)
+        .expect("an exposed path root is internal");
+    assert_eq!(tt.node_kind(right), NodeKind::Label);
+    assert_eq!(tt.node_boundary(right), Boundary::One(v[2]));
+    assert_eq!(
+        tt.label_vertex(tt.node_label_key(right).expect("label leaf")),
+        Some(v[2])
+    );
+    assert_eq!(tt.node_central(right), None, "a leaf has no central vertex");
+
+    assert_eq!(tt.node_kind(left), NodeKind::Internal);
+    assert!(tt.node_is_path(left));
+    assert_eq!(
+        tt.node_boundary(left),
+        Boundary::Two {
+            left: v[1],
+            right: v[2]
+        }
+    );
+    assert_eq!(
+        tt.node_central(left),
+        Some(v[0]),
+        "the two edges of the path meet at v[0]"
+    );
+
+    let mut leaves = Vec::new();
+    let mut nodes = 0;
+    collect_leaves(&tt, root, &mut leaves, &mut nodes);
+    assert_eq!(nodes, leaves.len() * 2 - 1);
+    assert_eq!(
+        leaves.iter().copied().collect::<BTreeSet<_>>(),
+        BTreeSet::from([leaf_01, leaf_02, label0, label2]),
+        "the exposed path root covers both edges and both labels"
+    );
+
+    // A label summary update by cluster leaves the structure untouched and every
+    // ancestor, including the exposed path root, sees the new value.
+    let structure_before: Vec<_> = tt
+        .clusters
+        .iter()
+        .map(|(id, cluster)| (id, cluster.parent, cluster.children))
+        .collect();
+    tt.update_label_summary_by_cluster(label0, |summary| summary.value = 5);
+    assert_eq!(
+        tt.clusters
+            .iter()
+            .map(|(id, cluster)| (id, cluster.parent, cluster.children))
+            .collect::<Vec<_>>(),
+        structure_before
+    );
+    assert_eq!(
+        *tt.node_summary(root),
+        LabelValue { value: 6 },
+        "the updated label contributes 5 and the other label 1"
+    );
+    assert_eq!(tt.component_summary(v[1]), Some(LabelValue { value: 6 }));
+    assert_eq!(
+        tt.expose_path(v[2], v[1]),
+        Some(LabelValue { value: 6 }),
+        "the reversed orientation covers the same leaves"
+    );
+    tt.deexpose(v[1]);
+    tt.deexpose(v[2]);
+
+    // The other entry point identifies the leaf by the forest's `LabelId`.
+    let key0 = tt.node_label_key(label0).expect("label leaf");
+    tt.update_label_summary(key0, |summary| summary.value = 9);
+    assert_eq!(
+        tt.component_summary(v[3]),
+        Some(LabelValue { value: 1 }),
+        "the isolated vertex only has its own label"
+    );
+    assert_eq!(tt.component_summary(v[1]), Some(LabelValue { value: 10 }));
+}
+
 #[test]
 fn orientation_sensitive_summary_flips_with_cluster() {
     let mut tt: TopTree<DirectedPath> = TopTree::new();
     let u = tt.add_vertex();
     let v = tt.add_vertex();
+    let w = tt.add_vertex();
     tt.link(u, v, ());
+    tt.link(v, w, ());
 
-    // The payload of the forest edge is the index of its top tree leaf.
-    let edge = tt.tree.edge_index_of(u, v).expect("edge must exist");
-    let leaf = *tt.tree.edge_weight(edge).expect("edge must exist");
-    tt.toggle_flipped(leaf);
-    assert_eq!(tt.cl(leaf).sum.edges, vec![(v, u)]);
+    // The payload of a forest edge is the `ClusterId` of its top tree leaf.
+    let uv = edge_leaf(&tt, u, v);
+    let vw = edge_leaf(&tt, v, w);
+
+    // A two-edge path, so that reversing the cluster is visible in the
+    // sequence of reported edges: a one-edge leaf holds a single element and
+    // cannot visibly reverse.
+    let path = tt
+        .expose_path_node(u, w)
+        .expect("the exposed path has a cluster");
+    assert_eq!(tt.cl(path).sum.edges, vec![uv, vw]);
+
+    tt.toggle_flipped(path);
+    assert_eq!(tt.cl(path).sum.edges, vec![vw, uv]);
 
     // Materializing the lazy flip must not reverse the already-flipped sum again.
-    tt.push_flip(leaf);
-    assert_eq!(tt.cl(leaf).sum.edges, vec![(v, u)]);
+    tt.push_flip(path);
+    assert_eq!(tt.cl(path).sum.edges, vec![vw, uv]);
 
-    tt.toggle_flipped(leaf);
-    assert_eq!(tt.cl(leaf).sum.edges, vec![(u, v)]);
+    tt.toggle_flipped(path);
+    assert_eq!(tt.cl(path).sum.edges, vec![uv, vw]);
 }
 
 #[test]
@@ -1040,7 +1378,7 @@ fn component_aggregate_is_whole_component() {
         h.link(i - 1, i);
     }
 
-    let expected_xor = (1..6u64).fold(0, |a, b| a ^ b);
+    let expected_xor = (1..6).fold(0, |acc, i| acc ^ h.leaf(i - 1, i).index() as u64);
     let summary = h.expose_path(0, 5).unwrap();
     assert_eq!(summary.edges, 5);
     assert_eq!(summary.xor, expected_xor);
@@ -1072,7 +1410,11 @@ fn path_max_summary() {
     }
     for i in 1..6 {
         for j in i + 1..6 {
-            let max = (i..j).map(|k| (k as u64 + 1) * 10).max().unwrap();
+            let max = h
+                .path_leaf_values(i, j)
+                .into_iter()
+                .max()
+                .expect("the path must contain at least one edge");
             assert_eq!(h.expose_path(i, j), Some(PathMax { max }));
             h.deexpose(j);
             h.deexpose(i);
@@ -1084,21 +1426,34 @@ fn path_max_summary() {
 fn lazy_path_tag_propagates() {
     let mut tt: TopTree<PathSum> = TopTree::new();
     let vertices: Vec<_> = (0..5).map(|_| tt.add_vertex()).collect();
+    // `leaves[k]` is the leaf of edge `k` (between positions `k` and `k + 1`).
+    let mut leaves = Vec::new();
     for i in 1..5 {
         tt.link(vertices[i - 1], vertices[i], ());
+        leaves.push(edge_leaf(&tt, vertices[i - 1], vertices[i]));
     }
+    let weight = |edge: usize| leaves[edge].index() as i64;
 
-    // Path 1..3 has edges 2 and 3.
+    // Path 1..3 has edges 1 and 2.
     assert_eq!(
         tt.expose_path(vertices[1], vertices[3]),
-        Some(PathSum { sum: 5, len: 2 })
+        Some(PathSum {
+            sum: weight(1) + weight(2),
+            len: 2
+        })
     );
     tt.deexpose(vertices[3]);
     tt.deexpose(vertices[1]);
 
     // Add 10 to every edge of path 1..3.
     let tagged = tt.expose_path_tagged(vertices[1], vertices[3], 10);
-    assert_eq!(tagged, Some(PathSum { sum: 25, len: 2 }));
+    assert_eq!(
+        tagged,
+        Some(PathSum {
+            sum: weight(1) + weight(2) + 20,
+            len: 2
+        })
+    );
     tt.deexpose(vertices[3]);
     tt.deexpose(vertices[1]);
 
@@ -1106,16 +1461,60 @@ fn lazy_path_tag_propagates() {
     assert_eq!(
         tt.expose_path(vertices[0], vertices[4]),
         Some(PathSum {
-            sum: 1 + 12 + 13 + 4,
+            sum: weight(0) + weight(1) + 10 + weight(2) + 10 + weight(3),
             len: 4
         })
     );
+
+    // A guided descent reaches the same conclusion per leaf: pushing the
+    // pending tags down must leave the two tagged edges at their own weight
+    // plus 10 and the untagged ones alone.
+    let root = tt
+        .expose_path_node(vertices[0], vertices[4])
+        .expect("path 0..4 must be exposed");
+    let mut stack = vec![root];
+    let mut leaf_sums = Vec::new();
+    while let Some(node) = stack.pop() {
+        tt.push_node_tag(node);
+        match tt.node_children(node) {
+            Some((left, right)) => {
+                stack.push(right);
+                stack.push(left);
+            }
+            None => leaf_sums.push(*tt.node_summary(node)),
+        }
+    }
+    leaf_sums.sort_by_key(|sum| sum.sum);
+    let mut expected_leaf_sums = vec![
+        PathSum {
+            sum: weight(0),
+            len: 1,
+        },
+        PathSum {
+            sum: weight(1) + 10,
+            len: 1,
+        },
+        PathSum {
+            sum: weight(2) + 10,
+            len: 1,
+        },
+        PathSum {
+            sum: weight(3),
+            len: 1,
+        },
+    ];
+    expected_leaf_sums.sort_by_key(|sum| sum.sum);
+    assert_eq!(leaf_sums, expected_leaf_sums);
+
     tt.deexpose(vertices[4]);
     tt.deexpose(vertices[0]);
 
     assert_eq!(
         tt.expose_path(vertices[1], vertices[2]),
-        Some(PathSum { sum: 12, len: 1 })
+        Some(PathSum {
+            sum: weight(1) + 10,
+            len: 1
+        })
     );
     tt.deexpose(vertices[2]);
     tt.deexpose(vertices[1]);

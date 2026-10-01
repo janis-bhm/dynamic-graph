@@ -1675,5 +1675,5 @@ impl FindBridge {
     }
 }
 
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;

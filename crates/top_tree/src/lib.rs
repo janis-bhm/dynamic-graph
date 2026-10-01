@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```
-//! use top_tree::{MergeContext, Summary, TopTree, VertexId};
+//! use top_tree::{ClusterId, MergeContext, Summary, TopTree};
 //!
 //! /// The number of edges on the cluster path.
 //! #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,11 +50,11 @@
 //! impl Summary for PathLen {
 //!     type Tag = ();
 //!
-//!     fn tree_edge(_u: VertexId, _v: VertexId) -> Self {
+//!     fn tree_edge(_e: ClusterId) -> Self {
 //!         PathLen { len: 1 }
 //!     }
 //!
-//!     fn label(_v: VertexId) -> Self {
+//!     fn label(_l: ClusterId) -> Self {
 //!         PathLen { len: 0 }
 //!     }
 //!
@@ -75,8 +75,8 @@
 //! let b = top_tree.add_vertex();
 //! let c = top_tree.add_vertex();
 //!
-//! top_tree.link(a, b);
-//! top_tree.link(b, c);
+//! top_tree.link(a, b, ());
+//! top_tree.link(b, c, ());
 //!
 //! assert_eq!(top_tree.expose_path(a, c), Some(PathLen { len: 2 }));
 //! ```
