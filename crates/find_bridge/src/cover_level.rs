@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use augmented_tree::{Aggregate, BTree};
-use top_tree::{MergeContext, Summary};
+use top_tree::{MergeContext, NonMaxUsize, Summary, slot::SlotVec};
 
 /// Sentinel used for "there is no such edge" and for the cover level of a
 /// point cluster. It is strictly larger than every real cover level.
@@ -60,6 +60,10 @@ impl Level {
         } else {
             None
         }
+    }
+
+    pub const fn increment(self) -> Option<Self> {
+        Self::new(self.0 + 1)
     }
 }
 
@@ -568,7 +572,7 @@ fn off_path_find_size(
 
 /// A stable handle to a user label added with [`FindBridge::add_label`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UserLabel(pub usize);
+pub struct UserLabel(pub NonMaxUsize);
 
 /// An undirected edge, stored as the pair of endpoints passed to
 /// [`FindBridge::link`].
@@ -868,6 +872,37 @@ impl Summary for CoverLevel {
     }
 }
 
+struct NonTreeEdge {
+    u: top_tree::ClusterId,
+    v: top_tree::ClusterId,
+    level: Level,
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct NonTreeEdgeId(NonMaxUsize);
+
+enum EdgeId {
+    Tree(top_tree::ClusterId),
+    NonTree(NonTreeEdgeId),
+}
+
+impl top_tree::slot::Indexing for NonTreeEdgeId {
+    type Optional = Option<Self>;
+
+    fn get(&self) -> usize {
+        self.0.get()
+    }
+
+    fn new(value: usize) -> Self {
+        Self(NonMaxUsize::new(value).expect("NonTreeEdgeId must be non-zero"))
+    }
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct VertexId(top_tree::ClusterId);
+
 /// A dynamic forest supporting the CoverLevel operations and bridge queries of
 /// Section 4.
 ///
@@ -875,13 +910,8 @@ impl Summary for CoverLevel {
 /// cover level `-1` (they are bridges). [`FindBridge::cover`] and
 /// [`FindBridge::uncover`] update the cover levels of a whole path lazily.
 pub struct FindBridge {
-    top_tree: top_tree::TopTree<CoverLevel>,
-    /// The user labels of the FindFirstLabel structure, keyed by handle.
-    labels: BTreeMap<UserLabel, (top_tree::ClusterId, Level)>,
-    /// Live label ids grouped by their (vertex, level), ordered by id.
-    labels_at: BTreeMap<(top_tree::ClusterId, Level), BTreeSet<UserLabel>>,
-    /// The next label handle to allocate.
-    next_label: usize,
+    top_tree: top_tree::TopTree<CoverLevel, BTreeMap<Level, BTreeSet<NonTreeEdgeId>>>,
+    non_tree_edges: SlotVec<NonTreeEdge, NonTreeEdgeId>,
 }
 
 impl Default for FindBridge {
@@ -895,9 +925,7 @@ impl FindBridge {
     pub fn new() -> Self {
         FindBridge {
             top_tree: top_tree::TopTree::new(),
-            labels: BTreeMap::new(),
-            labels_at: BTreeMap::new(),
-            next_label: 0,
+            non_tree_edges: SlotVec::new(),
         }
     }
 
@@ -907,7 +935,7 @@ impl FindBridge {
 
         // One label per vertex makes every vertex contribute exactly once to
         // FindSize and supplies the point cluster for that vertex.
-        self.top_tree.attach(index);
+        self.top_tree.attach(index, BTreeMap::new());
         index
     }
 
@@ -949,14 +977,12 @@ impl FindBridge {
             "FindBridge::remove_vertex requires no incident forest edges"
         );
 
-        let user_labels = self
-            .labels_at
-            .extract_if((cluster, Level::MIN)..=(cluster, Level::MAX), |_, _| true)
-            .flat_map(|((_, _), labels)| labels)
-            .collect::<Vec<_>>();
+        let top_tree::ClusterWeight::Label(edges) = self.top_tree.leaf_weight(cluster) else {
+            panic!("FindBridge::remove_vertex requires a label leaf cluster")
+        };
 
-        for label in user_labels {
-            self.labels.remove(&label);
+        for &edge in edges.values().flatten() {
+            self.non_tree_edges.remove(edge);
         }
 
         let _ = self
@@ -974,7 +1000,32 @@ impl FindBridge {
 
     /// Links two vertices that are in different trees with a new tree edge.
     pub fn link(&mut self, u: top_tree::VertexId, v: top_tree::VertexId) {
-        self.top_tree.link(u, v);
+        if !self.top_tree.connected(u, v) {
+            self.top_tree.link(u, v, ());
+        } else {
+            let (u, v) = {
+                (
+                    self.vertex_cluster(u).expect("the u cluster must exist"),
+                    self.vertex_cluster(v).expect("the v cluster must exist"),
+                )
+            };
+
+            let edge = self.non_tree_edges.push(NonTreeEdge {
+                u,
+                v,
+                level: Level(0),
+            });
+
+            for cluster in [u, v] {
+                self.top_tree
+                    .leaf_weight_mut(cluster)
+                    .into_label()
+                    .expect("the non-tree edge's endpoint {cluster} must be a label")
+                    .entry(Level(0))
+                    .or_default()
+                    .insert(edge);
+            }
+        }
     }
 
     /// Cuts the tree edge between `u` and `v`, returning whether it existed.
@@ -1005,6 +1056,200 @@ impl FindBridge {
     /// cover level is at most `level` gets cover level `-1`.
     pub fn uncover(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::uncover(level));
+    }
+
+    pub fn remove_edge(&mut self, edge: EdgeId) {
+        let ((u, v), level) = match edge {
+            EdgeId::Tree(cluster_id) => {
+                let (u, v) = self
+                    .top_tree
+                    .edge_endpoints(cluster_id)
+                    .expect("the tree edge must exist");
+
+                if self.cover_level_between(u, v) == -1 {
+                    self.cut(u, v);
+                    return;
+                }
+
+                self.swap_edge_for_delete(cluster_id)
+            }
+            EdgeId::NonTree(non_tree_edge_id) => {
+                let &NonTreeEdge { u, v, level } = self
+                    .non_tree_edges
+                    .get(non_tree_edge_id)
+                    .expect("the non-tree edge must exist");
+
+                self.top_tree
+                    .leaf_weight_mut(u)
+                    .into_label()
+                    .expect("the non-tree edge's u cluster must be a label")
+                    .get_mut(&level)
+                    .expect("the non-tree edge's level must exist")
+                    .remove(&non_tree_edge_id);
+
+                self.top_tree
+                    .leaf_weight_mut(v)
+                    .into_label()
+                    .expect("the non-tree edge's v cluster must be a label")
+                    .get_mut(&level)
+                    .expect("the non-tree edge's level must exist")
+                    .remove(&non_tree_edge_id);
+
+                let (u, v) = {
+                    (
+                        self.top_tree
+                            .cluster_vertex(u)
+                            .expect("the non-tree edge's u cluster must exist"),
+                        self.top_tree
+                            .cluster_vertex(v)
+                            .expect("the non-tree edge's v cluster must exist"),
+                    )
+                };
+
+                ((u, v), level)
+            }
+        };
+
+        self.uncover(u, v, level);
+        for level in (0..=level.0).rev() {
+            self.recover(u, v, Level(level));
+        }
+    }
+
+    fn swap_edge_for_delete(
+        &mut self,
+        edge: top_tree::ClusterId,
+    ) -> ((top_tree::VertexId, top_tree::VertexId), Level) {
+        let (v, w) = self
+            .top_tree
+            .edge_endpoints(edge)
+            .expect("the tree edge must exist");
+        let alpha = self.cover_level_between(v, w);
+
+        _ = self.cut(v, w);
+        let replacement = self
+            .find_repalcement(v, w, Level(alpha))
+            .expect("edge was covered, and is now cut");
+
+        let NonTreeEdge {
+            u: cr,
+            v: cq,
+            level,
+        } = self
+            .non_tree_edges
+            .remove(replacement)
+            .expect("replacement edge must exist");
+
+        self.top_tree
+            .leaf_weight_mut(cr)
+            .into_label()
+            .expect("replacement edge's u cluster must be a label")
+            .get_mut(&level)
+            .expect("replacement edge's level must exist")
+            .remove(&replacement);
+        self.top_tree
+            .leaf_weight_mut(cq)
+            .into_label()
+            .expect("replacement edge's v cluster must be a label")
+            .get_mut(&level)
+            .expect("replacement edge's level must exist")
+            .remove(&replacement);
+
+        let (r, q) = (
+            self.cluster_vertex(cr)
+                .expect("replacement edge's u cluster must exist"),
+            self.cluster_vertex(cq)
+                .expect("replacement edge's v cluster must exist"),
+        );
+
+        self.link(r, q);
+
+        let (cv, cw) = (
+            self.vertex_cluster(r).expect("r must be live"),
+            self.vertex_cluster(q).expect("q must be live"),
+        );
+
+        _ = self.non_tree_edges.push(NonTreeEdge {
+            u: cv,
+            v: cw,
+            level: Level(alpha),
+        });
+
+        // self.top_tree
+        //     .leaf_weight_mut(cv)
+        //     .into_label()
+        //     .expect("r's cluster must be a label")
+        //     .entry(Level(alpha))
+        //     .or_default()
+        //     .insert(edge);
+        // self.top_tree
+        //     .leaf_weight_mut(cw)
+        //     .into_label()
+        //     .expect("q's cluster must be a label")
+        //     .entry(Level(alpha))
+        //     .or_default()
+        //     .insert(edge);
+
+        // self.cover(v, w, Level(alpha));
+
+        ((v, w), Level(alpha))
+    }
+
+    fn recover(&mut self, v: top_tree::VertexId, w: top_tree::VertexId, level: Level) {
+        let size = self.find_size(v, w, level.0) / 2;
+
+        _ = self.recover_phase(v, w, level, size);
+        _ = self.recover_phase(w, v, level, size);
+    }
+
+    fn find_repalcement(
+        &mut self,
+        v: top_tree::VertexId,
+        w: top_tree::VertexId,
+        level: Level,
+    ) -> Option<NonTreeEdgeId> {
+        let size_v = self.find_size(v, w, level.0);
+        let size_w = self.find_size(w, v, level.0);
+        if size_v <= size_w {
+            self.recover_phase(v, w, level, size_v)
+        } else {
+            self.recover_phase(w, v, level, size_w)
+        }
+    }
+
+    fn recover_phase(
+        &mut self,
+        v: top_tree::VertexId,
+        w: top_tree::VertexId,
+        level: Level,
+        size: u64,
+    ) -> Option<NonTreeEdgeId> {
+        loop {
+            let edge = self.find_first_label(v, w, level)?;
+            let &NonTreeEdge { u: cr, v: cq, .. } = self.non_tree_edges.get(edge)?;
+            let (r, q) = (self.cluster_vertex(cr)?, self.cluster_vertex(cq)?);
+
+            if !self.connected(r, q) {
+                return Some(edge);
+            }
+
+            if let Some(next_level) = level.increment()
+                && self.find_size(q, r, next_level.0) <= size
+            {
+                let nontree_edges_r = self.top_tree.leaf_weight_mut(cr).into_label().unwrap();
+                nontree_edges_r.get_mut(&level).unwrap().remove(&edge);
+                nontree_edges_r.entry(next_level).or_default().insert(edge);
+
+                let nontree_edges_q = self.top_tree.leaf_weight_mut(cq).into_label().unwrap();
+                nontree_edges_q.get_mut(&level).unwrap().remove(&edge);
+                nontree_edges_q.entry(next_level).or_default().insert(edge);
+
+                self.non_tree_edges.get_mut(edge).unwrap().level = next_level;
+            } else {
+                self.cover(q, r, level);
+                return None;
+            }
+        }
     }
 
     fn with_path_tag(&mut self, u: top_tree::VertexId, v: top_tree::VertexId, tag: CoverTag) {
@@ -1107,64 +1352,50 @@ impl FindBridge {
         }
     }
 
-    /// `AddLabel(v, i)`: attaches a user label at `v` with level `i`.
-    pub fn add_label(&mut self, v: top_tree::VertexId, level: Level) -> UserLabel {
-        let id = UserLabel(self.next_label);
-        self.next_label += 1;
-
-        let cluster = self
+    pub fn add_non_tree_edge(
+        &mut self,
+        u: top_tree::VertexId,
+        v: top_tree::VertexId,
+        level: Level,
+    ) -> NonTreeEdgeId {
+        let u_cluster = self
+            .top_tree
+            .first_label(u)
+            .expect("every live vertex has a structural label leaf");
+        let v_cluster = self
             .top_tree
             .first_label(v)
             .expect("every live vertex has a structural label leaf");
-        self.labels.insert(id, (cluster, level));
+        let id = self.non_tree_edges.push(NonTreeEdge {
+            u: u_cluster,
+            v: v_cluster,
+            level,
+        });
 
-        let first_at_level = {
-            // labels are stored in a set addressed by (vertex, level).
-            let labels = self.labels_at.entry((cluster, level)).or_default();
-            let first_at_level = labels.is_empty();
-            labels.insert(id);
-            first_at_level
-        };
-
-        if first_at_level {
-            // if our label is the first for this vertex at this level we have
-            // to update the vertex's summary to reflect the new incident level.
-            let label = self.top_tree.first_label(v).unwrap();
-            let label = self.top_tree.node_label_key(label).unwrap();
-
-            // updates incident_C and the part tree for this vertex's label cluster.
-            self.top_tree
-                .update_label_summary_by_cluster(cluster, |sum| {
-                    sum.add_vertex_levels(level_bit(level))
-                });
-        }
-        id
-    }
-
-    /// `RemoveLabel(l)`: removes a user label.
-    pub fn remove_label(&mut self, label: UserLabel) -> Option<Level> {
-        let (cluster, level) = self.labels.remove(&label)?;
-
-        let last_at_level = {
+        for cluster in [u_cluster, v_cluster] {
             let labels = self
-                .labels_at
-                .get_mut(&(cluster, level))
-                .expect("live label must have a (vertex, level) index bucket");
-            assert!(labels.remove(&label));
-            labels.is_empty()
-        };
+                .top_tree
+                .leaf_weight_mut(cluster)
+                .into_label()
+                .unwrap()
+                .entry(level)
+                .or_default();
 
-        if last_at_level {
-            // let label = self.top_tree.first_label(v).unwrap();
-            // let label = self.top_tree.node_label_key(label).unwrap();
+            let first = {
+                let first = labels.is_empty();
+                labels.insert(id);
+                first
+            };
 
-            self.top_tree
-                .update_label_summary_by_cluster(cluster, |sum| {
-                    sum.remove_vertex_levels(level_bit(level))
-                });
+            if first {
+                self.top_tree
+                    .update_label_summary_by_cluster(cluster, |sum| {
+                        sum.add_vertex_levels(level_bit(level))
+                    });
+            }
         }
 
-        Some(level)
+        id
     }
 
     /// `FindFirstLabel(v, w, i)`.
@@ -1173,12 +1404,12 @@ impl FindBridge {
     /// `CoverLevel(u, meet(u, v, w)) >= i`, minimizing the distance from `v`
     /// to `meet(u, v, w)`. Correctness is guaranteed for levels in
     /// `-1..=LEVEL_CAP`, the range represented by the incident masks.
-    pub fn find_first_label(
+    fn find_first_label(
         &mut self,
         v: top_tree::VertexId,
         w: top_tree::VertexId,
         level: Level,
-    ) -> Option<UserLabel> {
+    ) -> Option<NonTreeEdgeId> {
         if !self.connected(v, w) {
             return None;
         }
@@ -1194,15 +1425,19 @@ impl FindBridge {
     }
 
     /// The smallest live label id at `vertex` with the given exact level.
-    fn smallest_label_at(&self, vertex: top_tree::VertexId, level: Level) -> Option<UserLabel> {
+    fn smallest_label_at(&self, vertex: top_tree::VertexId, level: Level) -> Option<NonTreeEdgeId> {
         let structural_label = self
             .top_tree
             .first_label(vertex)
             .expect("every live vertex has a structural label leaf");
 
-        self.labels_at
-            .get(&(structural_label, level))
-            .and_then(|labels| labels.iter().next().copied())
+        self.top_tree
+            .leaf_weight(structural_label)
+            .into_label()
+            .unwrap()
+            .get(&level)?
+            .first()
+            .copied()
     }
 
     /// Descends a path cluster to the valid level-`i` label whose projection
@@ -1220,10 +1455,7 @@ impl FindBridge {
             return None;
         }
 
-        if !matches!(
-            self.top_tree.node_leaf_data(node),
-            top_tree::NodeData::Internal
-        ) {
+        if !matches!(self.top_tree.node_kind(node), top_tree::NodeKind::Internal) {
             return None;
         }
 
@@ -1277,15 +1509,15 @@ impl FindBridge {
             return None;
         }
 
-        match self.top_tree.node_leaf_data(node) {
-            top_tree::NodeData::Label(_) => {
+        match self.top_tree.node_kind(node) {
+            top_tree::NodeKind::Label => {
                 return self
                     .top_tree
                     .node_label_key(node)
                     .and_then(|key| self.top_tree.label_vertex(key));
             }
-            top_tree::NodeData::Edge(_) => return None,
-            top_tree::NodeData::Internal => {}
+            top_tree::NodeKind::Edge => return None,
+            top_tree::NodeKind::Internal => {}
         }
 
         self.top_tree.push_node_tag(node);

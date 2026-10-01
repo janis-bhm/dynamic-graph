@@ -347,6 +347,22 @@ pub enum ClusterWeight<N, E> {
     Internal,
 }
 
+impl<N, E> ClusterWeight<N, E> {
+    pub fn into_edge(self) -> Option<E> {
+        match self {
+            ClusterWeight::Edge(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn into_label(self) -> Option<N> {
+        match self {
+            ClusterWeight::Label(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
 type Clusters<S, N, E> = SlotVec<Cluster<S, N, E>, ClusterId>;
 
 /// A dynamic top tree over a forest of trees.
@@ -485,14 +501,19 @@ where
         self.tree.label_vertex(label)
     }
 
+    pub fn edge_endpoints(&self, edge: ClusterId) -> Option<(tree::VertexId, tree::VertexId)> {
+        match self.cl(edge).data {
+            ClusterData::Edge { tree_id: edge, .. } => self.tree.edge_endpoints(edge),
+            _ => None,
+        }
+    }
+
     pub fn label_clusters(&self, v: tree::VertexId) -> impl Iterator<Item = ClusterId> + '_ {
         self.tree.incident_label_weights(v).copied()
     }
 
     pub fn first_label(&self, v: tree::VertexId) -> Option<ClusterId> {
-        if self.tree.node(v).is_none() {
-            return None;
-        }
+        self.tree.node(v)?;
         self.tree.incident_label_weights(v).next().copied()
     }
 
