@@ -233,14 +233,14 @@ fn cluster_vertex_tracks_attached_labels_across_compaction() {
     let a = tt.add_vertex();
     let moved_vertex = tt.add_vertex();
 
-    let removed_cluster = tt.attach(removed_vertex);
-    let a_cluster = tt.attach(a);
-    let moved_cluster = tt.attach(moved_vertex);
+    let removed_cluster = tt.attach(removed_vertex, ());
+    let a_cluster = tt.attach(a, ());
+    let moved_cluster = tt.attach(moved_vertex, ());
     assert_eq!(tt.cluster_vertex(removed_cluster), Some(removed_vertex));
     assert_eq!(tt.cluster_vertex(a_cluster), Some(a));
     assert_eq!(tt.cluster_vertex(moved_cluster), Some(moved_vertex));
 
-    let edge_cluster = tt.link(a, moved_vertex);
+    let edge_cluster = tt.link(a, moved_vertex, ());
     assert!(tt.cluster_vertex(edge_cluster).is_none());
     let internal_cluster = tt
         .expose_path_node(a, moved_vertex)
@@ -261,7 +261,7 @@ fn cluster_vertex_tracks_attached_labels_across_compaction() {
 fn cluster_vertex_rejects_freed_cluster_handles() {
     let mut tt = TopTree::<PathLen>::new();
     let v = tt.add_vertex();
-    let cluster = tt.attach(v);
+    let cluster = tt.attach(v, ());
     assert_eq!(tt.cluster_vertex(cluster), Some(v));
 
     tt.remove_vertex(v).expect("the attached vertex is removed");
@@ -271,19 +271,19 @@ fn cluster_vertex_rejects_freed_cluster_handles() {
 
     let a = tt.add_vertex();
     let b = tt.add_vertex();
-    let edge_cluster = tt.link(a, b);
+    let edge_cluster = tt.link(a, b, ());
     assert!(tt.cut(a, b).is_some());
     assert!(tt.cluster_vertex(edge_cluster).is_none());
     assert!(tt.clusters.get(edge_cluster).is_none());
 
     let a = tt.add_vertex();
     let b = tt.add_vertex();
-    tt.link(a, b);
-    tt.attach(a);
+    tt.link(a, b, ());
+    tt.attach(a, ());
     let internal_cluster = tt
         .expose_path_node(a, b)
         .expect("the linked path has a cluster");
-    assert_eq!(tt.node_leaf_data(internal_cluster), NodeData::Internal);
+    assert_eq!(tt.node_kind(internal_cluster), NodeKind::Internal);
 
     tt.remove_vertex(a)
         .expect("the attached endpoint and its edge are removed");
@@ -300,47 +300,47 @@ fn cluster_liveness_bitmap_matches_allocator() {
     let d = tt.add_vertex();
     let e = tt.add_vertex();
 
-    let initial_label_cluster = tt.attach(a);
+    let initial_label_cluster = tt.attach(a, ());
     let initial_label = tt
         .node_label_key(initial_label_cluster)
         .expect("attached cluster is a label leaf");
-    tt.link(a, b);
+    tt.link(a, b, ());
     assert!(tt.cut(a, b).is_some());
     tt.detach(initial_label);
 
-    let old_len = tt.clusters.nodes.len();
-    let cluster_to_remove = tt.attach(a);
+    let old_len = tt.clusters.slots.len();
+    let cluster_to_remove = tt.attach(a, ());
     assert!(
         cluster_to_remove.index() < old_len,
         "the first attach must reuse a free cluster slot"
     );
-    tt.attach(b);
-    tt.attach(c);
-    let fresh_cluster = tt.attach(d);
-    tt.attach(e);
+    tt.attach(b, ());
+    tt.attach(c, ());
+    let fresh_cluster = tt.attach(d, ());
+    tt.attach(e, ());
     assert!(
         fresh_cluster.index() >= old_len,
         "attaching after exhausting the free list must grow the arena"
     );
-    assert!(tt.clusters.nodes.len() > old_len);
+    assert!(tt.clusters.slots.len() > old_len);
 
     tt.remove_vertex(a)
         .expect("the vertex and its attached label are removed");
     assert!(tt.clusters.get(cluster_to_remove).is_none());
 
-    for index in 0..tt.clusters.nodes.len() {
+    for index in 0..tt.clusters.slots.len() {
         let id =
             ClusterId(crate::NonMaxUsize::new(index).expect("cluster index must fit the ID type"));
         assert_eq!(
             tt.clusters.get(id).is_some(),
-            tt.clusters.live.get(index),
+            tt.clusters.occupancy.get(index),
             "liveness mismatch at cluster index {index}"
         );
     }
 
     let iter_indices: Vec<_> = tt.clusters.iter().map(|(id, _)| id.index()).collect();
-    let live_indices: Vec<_> = (0..tt.clusters.nodes.len())
-        .filter(|&index| tt.clusters.live.get(index))
+    let live_indices: Vec<_> = (0..tt.clusters.slots.len())
+        .filter(|&index| tt.clusters.occupancy.get(index))
         .collect();
     assert_eq!(iter_indices, live_indices);
 }
@@ -352,14 +352,14 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
     let initial_labels: Vec<_> = vertices
         .iter()
         .map(|&vertex| {
-            let cluster = tt.attach(vertex);
+            let cluster = tt.attach(vertex, ());
             tt.node_label_key(cluster)
                 .expect("attached cluster is a label leaf")
         })
         .collect();
 
     let assert_free_list_matches_live = |tt: &TopTree<PathLen>| {
-        let nodes_len = tt.clusters.nodes.len();
+        let nodes_len = tt.clusters.slots.len();
         let mut free_slots = vec![false; nodes_len];
         let mut free_count = 0;
         let mut current = tt.clusters.first_free;
@@ -370,9 +370,12 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
             };
             let index = free_index.get();
             assert!(index < nodes_len, "cluster free list link out of bounds");
-            assert!(!free_slots[index], "cluster free list must not contain a cycle");
             assert!(
-                !tt.clusters.live.get(index),
+                !free_slots[index],
+                "cluster free list must not contain a cycle"
+            );
+            assert!(
+                !tt.clusters.occupancy.get(index),
                 "cluster free list must not point at a live slot"
             );
             free_slots[index] = true;
@@ -380,26 +383,24 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
 
             // SAFETY: The bounds/liveness checks above passed, and the free-list
             // invariant means this slot's first word contains its next link.
-            current = unsafe {
-                tt.clusters.nodes[index]
-                    .as_ptr()
-                    .cast::<Option<crate::NonMaxUsize>>()
-                    .read()
-            };
+            current = unsafe { tt.clusters.slots[index].next };
         }
 
-        assert!(current.is_none(), "cluster free list traversal exceeded arena length");
+        assert!(
+            current.is_none(),
+            "cluster free list traversal exceeded arena length"
+        );
         for index in 0..nodes_len {
             assert_eq!(
                 free_slots[index],
-                !tt.clusters.live.get(index),
+                !tt.clusters.occupancy.get(index),
                 "free-list/liveness mismatch at cluster index {index}"
             );
         }
         assert_eq!(
             free_count,
             (0..nodes_len)
-                .filter(|&index| !tt.clusters.live.get(index))
+                .filter(|&index| !tt.clusters.occupancy.get(index))
                 .count(),
             "free-list length must match the number of non-live slots"
         );
@@ -412,7 +413,7 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
         .iter()
         .take(4)
         .map(|&vertex| {
-            let cluster = tt.attach(vertex);
+            let cluster = tt.attach(vertex, ());
             tt.node_label_key(cluster)
                 .expect("attached cluster is a label leaf")
         })
@@ -434,10 +435,10 @@ fn removing_isolated_vertex_remaps_surviving_clusters() {
     let mut moved = tt.add_vertex();
 
     for vertex in [removed, left, middle, moved] {
-        tt.attach(vertex);
+        tt.attach(vertex, ());
     }
-    tt.link(left, middle);
-    tt.link(middle, moved);
+    tt.link(left, middle, ());
+    tt.link(middle, moved, ());
 
     let swap = tt.remove_vertex(removed).expect("live vertex is removed");
     moved.swap(swap);
@@ -503,15 +504,13 @@ impl<S: Summary + Clone> Harness<S> {
     }
 
     fn link(&mut self, u: usize, v: usize) {
-        self.tt.link(self.v(u), self.v(v));
+        self.tt.link(self.v(u), self.v(v), ());
         self.adj.get_mut(&u).unwrap().insert(v);
         self.adj.get_mut(&v).unwrap().insert(u);
     }
 
     fn cut(&mut self, u: usize, v: usize) {
-        self.tt
-            .cut(self.v(u), self.v(v))
-            .expect("edge must exist");
+        self.tt.cut(self.v(u), self.v(v)).expect("edge must exist");
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
@@ -533,7 +532,7 @@ impl<S: Summary + Clone> Harness<S> {
     }
 
     fn attach(&mut self, v: usize) -> tree::LabelId {
-        let cluster = self.tt.attach(self.v(v));
+        let cluster = self.tt.attach(self.v(v), ());
         self.tt
             .node_label_key(cluster)
             .expect("attached cluster must represent a label")
@@ -663,11 +662,11 @@ fn count_incident_leaves<S: Summary>(
     vertex: tree::VertexId,
 ) -> usize {
     match tt.cl(node).data {
-        ClusterData::Edge(edge) => {
+        ClusterData::Edge { tree_id: edge, .. } => {
             let (u, v) = tt.tree.edge_endpoints(edge).expect("edge must exist");
             usize::from(u == vertex || v == vertex)
         }
-        ClusterData::Node(label) => {
+        ClusterData::Node { tree_id: label, .. } => {
             usize::from(tt.tree.label_vertex(label).expect("label must exist") == vertex)
         }
         ClusterData::Internal => {
@@ -704,7 +703,7 @@ fn check_node_boundaries_in<S: Summary>(
     let effective_flip = parity ^ cluster.flipped;
 
     let materialized = match cluster.data {
-        ClusterData::Edge(edge) => {
+        ClusterData::Edge { tree_id: edge, .. } => {
             let (left, right) = tt.tree.edge_endpoints(edge).expect("edge must exist");
             // Materialized left endpoint is `endpoints[effective_flip]`.
             let (left, right) = if effective_flip {
@@ -721,7 +720,7 @@ fn check_node_boundaries_in<S: Summary>(
             }
             c
         }
-        ClusterData::Node(label) => {
+        ClusterData::Node { tree_id: label, .. } => {
             let vertex = tt.tree.label_vertex(label).expect("label must exist");
             let mut c = Boundaries::default();
             if tt.is_boundary_vertex(vertex) {
@@ -863,11 +862,17 @@ fn check_invariants<S: Summary + Clone>(h: &Harness<S>) {
 
         for leaf in leaves {
             match tt.cl(leaf).data {
-                ClusterData::Edge(edge) => {
-                    assert!(covered_edges.insert(edge.index()), "edge leaf appears twice");
+                ClusterData::Edge { tree_id: edge, .. } => {
+                    assert!(
+                        covered_edges.insert(edge.index()),
+                        "edge leaf appears twice"
+                    );
                 }
-                ClusterData::Node(label) => {
-                    assert!(covered_labels.insert(label.index()), "label leaf appears twice");
+                ClusterData::Node { tree_id: label, .. } => {
+                    assert!(
+                        covered_labels.insert(label.index()),
+                        "label leaf appears twice"
+                    );
                 }
                 ClusterData::Internal => panic!("leaf cannot be internal"),
             }
@@ -897,7 +902,7 @@ fn check_invariants<S: Summary + Clone>(h: &Harness<S>) {
         let mut top_edges = BTreeSet::new();
         let mut sample = None;
         for leaf in leaves {
-            if let ClusterData::Edge(edge) = tt.cl(leaf).data {
+            if let ClusterData::Edge { tree_id: edge, .. } = tt.cl(leaf).data {
                 let (u, v) = tt.tree.edge_endpoints(edge).unwrap();
                 top_edges.insert((u.index().min(v.index()), u.index().max(v.index())));
                 sample = Some(u);
@@ -1010,7 +1015,7 @@ fn orientation_sensitive_summary_flips_with_cluster() {
     let mut tt: TopTree<DirectedPath> = TopTree::new();
     let u = tt.add_vertex();
     let v = tt.add_vertex();
-    tt.link(u, v);
+    tt.link(u, v, ());
 
     // The payload of the forest edge is the index of its top tree leaf.
     let edge = tt.tree.edge_index_of(u, v).expect("edge must exist");
@@ -1097,7 +1102,7 @@ fn lazy_path_tag_propagates() {
     let mut tt: TopTree<PathSum> = TopTree::new();
     let vertices: Vec<_> = (0..5).map(|_| tt.add_vertex()).collect();
     for i in 1..5 {
-        tt.link(vertices[i - 1], vertices[i]);
+        tt.link(vertices[i - 1], vertices[i], ());
     }
 
     // Path 1..3 has edges 2 and 3.

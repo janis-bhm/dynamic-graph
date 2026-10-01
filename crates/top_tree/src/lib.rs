@@ -88,7 +88,7 @@ mod top_tree;
 mod tree;
 
 pub use summary::{Boundary, MergeContext, Summary};
-pub use top_tree::{ClusterId, NodeData, TopTree};
+pub use top_tree::{ClusterId, ClusterWeight, NodeKind, TopTree};
 pub use tree::{Edge, EdgeId, Label, LabelId, Node, SwapResult, Tree, VertexId};
 
 macro_rules! impl_nonmax_type {
@@ -295,28 +295,97 @@ pub mod slot {
 
     use crate::{BitVec, NonMaxUsize};
 
-    union Slot<T> {
+    pub trait OptionalIndexing<I>: Copy + Sized {
+        const NONE: Self;
+        fn into_option(self) -> Option<I>;
+        fn some(value: I) -> Self;
+    }
+
+    pub trait Indexing: Sized + Copy {
+        type Optional: OptionalIndexing<Self>;
+
+        fn get(&self) -> usize;
+        fn new(value: usize) -> Self;
+        fn into_optional(self) -> Self::Optional {
+            Self::Optional::some(self)
+        }
+    }
+
+    impl<T: Copy> OptionalIndexing<T> for Option<T> {
+        const NONE: Self = None;
+
+        fn into_option(self) -> Option<T> {
+            self
+        }
+
+        fn some(value: T) -> Self {
+            Some(value)
+        }
+    }
+
+    impl Indexing for NonMaxUsize {
+        type Optional = Option<Self>;
+
+        fn get(&self) -> usize {
+            NonMaxUsize::get(*self)
+        }
+
+        fn new(value: usize) -> Self {
+            debug_assert!(
+                value != usize::MAX,
+                "value must be in the range 0..usize::MAX"
+            );
+            // SAFETY: The value is guaranteed to be in the valid range for this type.
+            unsafe { NonMaxUsize::new_unchecked(value) }
+        }
+    }
+
+    pub(crate) union Slot<T, U: Copy> {
         value: ManuallyDrop<T>,
-        next: Option<NonMaxUsize>,
+        pub(crate) next: U,
     }
 
-    pub struct SlotVec<T> {
-        slots: Vec<Slot<T>>,
-        occupancy: BitVec,
-        first_free: Option<NonMaxUsize>,
+    pub struct SlotVec<T, I: Indexing = NonMaxUsize> {
+        pub(crate) slots: Vec<Slot<T, I::Optional>>,
+        pub(crate) occupancy: BitVec,
+        pub(crate) first_free: I::Optional,
     }
 
-    impl<T> SlotVec<T> {
+    impl<T, I: Indexing> Drop for SlotVec<T, I> {
+        fn drop(&mut self) {
+            for (i, slot) in self.slots.iter_mut().enumerate() {
+                if self.occupancy.get(i) {
+                    unsafe { ManuallyDrop::drop(&mut slot.value) }
+                }
+            }
+        }
+    }
+
+    impl<T, I: Indexing> std::ops::Index<I> for SlotVec<T, I> {
+        type Output = T;
+
+        fn index(&self, index: I) -> &Self::Output {
+            self.get(index).expect("index out of bounds")
+        }
+    }
+
+    impl<T, I: Indexing> std::ops::IndexMut<I> for SlotVec<T, I> {
+        fn index_mut(&mut self, index: I) -> &mut Self::Output {
+            self.get_mut(index).expect("index out of bounds")
+        }
+    }
+
+    impl<T, I: Indexing> SlotVec<T, I> {
         pub fn new() -> Self {
             Self {
                 slots: Vec::new(),
                 occupancy: BitVec::new(),
-                first_free: None,
+                first_free: I::Optional::NONE,
             }
         }
 
-        pub fn push(&mut self, value: T) -> NonMaxUsize {
-            let index = if let Some(free) = self.first_free {
+        pub fn push(&mut self, value: T) -> I {
+            let index = if let Some(free) = self.first_free.into_option() {
                 let free_index = free.get();
                 self.first_free = unsafe { self.slots[free_index].next };
                 self.slots[free_index] = Slot {
@@ -325,13 +394,12 @@ pub mod slot {
 
                 free
             } else {
-                let index = self.slots.len();
+                let index = I::new(self.slots.len());
                 self.slots.push(Slot {
                     value: ManuallyDrop::new(value),
                 });
 
-                // SAFETY: Vec cannot grow beyond isize::MAX elements.
-                unsafe { NonMaxUsize::new_unchecked(index) }
+                index
             };
 
             self.occupancy.grow_to(index.get() + 1);
@@ -340,8 +408,8 @@ pub mod slot {
             index
         }
 
-        pub fn push_with(&mut self, f: impl FnOnce(NonMaxUsize) -> T) -> NonMaxUsize {
-            let index = if let Some(free) = self.first_free {
+        pub fn push_with(&mut self, f: impl FnOnce(I) -> T) -> I {
+            let index = if let Some(free) = self.first_free.into_option() {
                 let free_index = free.get();
                 self.first_free = unsafe { self.slots[free_index].next };
                 self.slots[free_index] = Slot {
@@ -351,7 +419,7 @@ pub mod slot {
                 free
             } else {
                 // SAFETY: Vec cannot grow beyond isize::MAX elements.
-                let index = unsafe { NonMaxUsize::new_unchecked(self.slots.len()) };
+                let index = I::new(self.slots.len());
                 self.slots.push(Slot {
                     value: ManuallyDrop::new(f(index)),
                 });
@@ -365,7 +433,7 @@ pub mod slot {
             index
         }
 
-        pub fn remove(&mut self, index: NonMaxUsize) -> Option<T> {
+        pub fn remove(&mut self, index: I) -> Option<T> {
             let idx = index.get();
             if !self.occupancy.get(idx) {
                 return None;
@@ -384,13 +452,13 @@ pub mod slot {
                 self.slots.pop();
                 // self.occupancy.shrink_to(self.slots.len());
             } else {
-                self.first_free = Some(index);
+                self.first_free = index.into_optional();
             }
 
             Some(elt)
         }
 
-        pub fn get(&self, index: NonMaxUsize) -> Option<&T> {
+        pub fn get(&self, index: I) -> Option<&T> {
             let idx = index.get();
             if !self.occupancy.get(idx) {
                 return None;
@@ -399,7 +467,7 @@ pub mod slot {
             unsafe { Some(&self.slots[idx].value) }
         }
 
-        pub fn get_mut(&mut self, index: NonMaxUsize) -> Option<&mut T> {
+        pub fn get_mut(&mut self, index: I) -> Option<&mut T> {
             let idx = index.get();
             if !self.occupancy.get(idx) {
                 return None;
@@ -417,9 +485,9 @@ pub mod slot {
             }
         }
 
-        pub fn iter(&self) -> impl Iterator<Item = (NonMaxUsize, &T)> {
+        pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
             self.slots.iter().enumerate().filter_map(move |(i, slot)| {
-                let index = unsafe { NonMaxUsize::new_unchecked(i) };
+                let index = I::new(i);
                 if self.occupancy.get(i) {
                     Some((index, unsafe { &*slot.value }))
                 } else {

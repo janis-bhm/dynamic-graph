@@ -12,10 +12,11 @@
 //! information (connectivity, bridge/cover levels, biconnectivity data, ...)
 //! over a fully dynamic forest.
 
-use std::{hash::Hash, mem::MaybeUninit};
+use std::hash::Hash;
 
 use crate::{
     BitVec, NonMaxUsize,
+    slot::{Indexing, SlotVec},
     summary::{Boundary, MergeContext, Summary},
     tree::{self, SwapResult, Tree},
 };
@@ -36,191 +37,25 @@ impl ClusterId {
     }
 }
 
-struct Clusters<S>
-where
-    S: Summary,
-{
-    nodes: Vec<MaybeUninit<Cluster<S>>>,
-    first_free: Option<NonMaxUsize>,
-    live: BitVec,
-}
+impl Indexing for ClusterId {
+    type Optional = Option<Self>;
 
-impl<S> Clusters<S>
-where
-    S: Summary,
-{
-    fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            first_free: None,
-            live: BitVec::new(),
-        }
+    fn get(&self) -> usize {
+        self.index()
     }
 
-    fn get(&self, id: ClusterId) -> Option<&Cluster<S>> {
-        if !self.live.get(id.index()) {
-            return None;
-        }
-
-        let node = self.nodes.get(id.index())?;
-        // SAFETY: A set liveness bit means this slot contains an initialized cluster.
-        Some(unsafe { &*node.as_ptr() })
-    }
-
-    fn get_mut(&mut self, id: ClusterId) -> Option<&mut Cluster<S>> {
-        if !self.live.get(id.index()) {
-            return None;
-        }
-
-        let node = self.nodes.get_mut(id.index())?;
-        // SAFETY: A set liveness bit means this slot contains an initialized cluster.
-        Some(unsafe { &mut *node.as_mut_ptr() })
-    }
-
-    fn remove(&mut self, id: ClusterId) -> Cluster<S> {
-        let index = id.index();
-        assert!(self.live.get(index), "cluster must exist");
-        let node = self.nodes.get_mut(index).expect("cluster must exist");
-        // SAFETY: The liveness bit was checked above, so this slot is initialized.
-        let removed = unsafe { node.assume_init_read() };
-        let next_free = self.first_free;
-        self.first_free = NonMaxUsize::new(index);
-
-        // write the next free index into the first word of the removed cluster
-        // SAFETY: The slot is now uninitialized, and its first word can store the
-        // free-list link until this slot is initialized again.
-        unsafe {
-            node.as_mut_ptr()
-                .cast::<Option<NonMaxUsize>>()
-                .write(next_free);
-        }
-        self.live.set(index, false);
-
-        removed
-    }
-
-    fn push(&mut self, cluster: Cluster<S>) -> ClusterId {
-        if let Some(free_index) = self.first_free {
-            let index = free_index.get();
-            debug_assert!(
-                index < self.nodes.len(),
-                "cluster free list link out of bounds"
-            );
-            debug_assert!(
-                !self.live.get(index),
-                "cluster free list must not point at a live slot"
-            );
-            // SAFETY: The debug assertions above validate that `first_free` is
-            // in-bounds and its slot is not live; the free-list invariant says its
-            // first word contains the next link rather than initialized cluster data.
-            unsafe {
-                let slot_ptr = self.nodes.as_mut_ptr().add(index);
-                let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
-                self.first_free = next_free;
-
-                slot_ptr.write(MaybeUninit::new(cluster));
-            }
-            self.live.set(index, true);
-            ClusterId(free_index)
-        } else {
-            assert!(self.nodes.len() < usize::MAX, "too many clusters");
-            let index = self.nodes.len();
-            // SAFETY: The length check above ensures the index is below usize::MAX.
-            let idx = unsafe { NonMaxUsize::new_unchecked(index) };
-            self.live.grow_to(index + 1);
-            self.nodes.push(MaybeUninit::new(cluster));
-            self.live.set(index, true);
-
-            ClusterId(idx)
-        }
-    }
-
-    fn push_with(&mut self, f: impl FnOnce(ClusterId) -> Cluster<S>) -> ClusterId {
-        if let Some(free_index) = self.first_free {
-            let index = free_index.get();
-            debug_assert!(
-                index < self.nodes.len(),
-                "cluster free list link out of bounds"
-            );
-            debug_assert!(
-                !self.live.get(index),
-                "cluster free list must not point at a live slot"
-            );
-            // SAFETY: The debug assertions above validate that `first_free` is
-            // in-bounds and its slot is not live; the free-list invariant says its
-            // first word contains the next link rather than initialized cluster data.
-            unsafe {
-                let slot_ptr = self.nodes.as_mut_ptr().add(index);
-                let next_free = slot_ptr.cast::<Option<NonMaxUsize>>().read();
-                self.first_free = next_free;
-
-                slot_ptr.write(MaybeUninit::new(f(ClusterId(free_index))));
-            }
-            self.live.set(index, true);
-            ClusterId(free_index)
-        } else {
-            assert!(self.nodes.len() < usize::MAX, "too many clusters");
-            let index = self.nodes.len();
-            // SAFETY: The length check above ensures the index is below usize::MAX.
-            let idx = unsafe { NonMaxUsize::new_unchecked(index) };
-            self.live.grow_to(index + 1);
-            self.nodes.push(MaybeUninit::new(f(ClusterId(idx))));
-            self.live.set(index, true);
-
-            ClusterId(idx)
-        }
-    }
-
-    fn for_each_mut(&mut self, mut f: impl FnMut(&mut Cluster<S>)) {
-        let live = &self.live;
-        for (index, node) in self.nodes.iter_mut().enumerate() {
-            if live.get(index) {
-                // SAFETY: A set liveness bit means this slot contains an initialized cluster.
-                f(unsafe { &mut *node.as_mut_ptr() });
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn iter(&self) -> impl Iterator<Item = (ClusterId, &Cluster<S>)> + '_ {
-        (0..self.nodes.len()).filter_map(move |index| {
-            if !self.live.get(index) {
-                return None;
-            }
-
-            let id = ClusterId(NonMaxUsize::new(index).expect("cluster index must fit"));
-            self.get(id).map(|cluster| (id, cluster))
-        })
-    }
-}
-
-impl<S> core::ops::Index<ClusterId> for Clusters<S>
-where
-    S: Summary,
-{
-    type Output = Cluster<S>;
-
-    fn index(&self, index: ClusterId) -> &Self::Output {
-        self.get(index).expect("cluster must exist")
-    }
-}
-
-impl<S> core::ops::IndexMut<ClusterId> for Clusters<S>
-where
-    S: Summary,
-{
-    fn index_mut(&mut self, index: ClusterId) -> &mut Self::Output {
-        self.get_mut(index).expect("cluster must exist")
+    fn new(value: usize) -> Self {
+        Self(NonMaxUsize::new(value).expect("cluster index must be less than usize::MAX"))
     }
 }
 
 /// What a cluster node represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClusterData {
+enum ClusterData<N, E> {
     /// The cluster is a single tree edge, stored by its index in the forest.
-    Edge(tree::EdgeId),
+    Edge { tree_id: tree::EdgeId, weight: E },
     /// The cluster is a single label, stored by its index in the forest.
-    Node(tree::LabelId),
+    Node { tree_id: tree::LabelId, weight: N },
     /// The cluster is the union of its two children.
     Internal,
 }
@@ -238,13 +73,13 @@ impl Children {
 }
 
 /// A node of the top tree.
-struct Cluster<S: Summary> {
+struct Cluster<S: Summary, N, E> {
     parent: Option<ClusterId>,
     children: Option<Children>,
     /// Whether the logical orientation of the cluster is reversed.
     flipped: bool,
     /// What this cluster represents.
-    data: ClusterData,
+    data: ClusterData<N, E>,
     /// The boundary vertices of the cluster.
     boundary_vertices: BoundaryVertices,
     /// The user supplied summary of this cluster.
@@ -253,7 +88,7 @@ struct Cluster<S: Summary> {
     tag: S::Tag,
 }
 
-impl<S: Summary> Cluster<S> {
+impl<S: Summary, N, E> Cluster<S, N, E> {
     fn flipped_boundary_vertices(&self) -> BoundaryVertices {
         if self.flipped {
             self.boundary_vertices.flipped()
@@ -500,28 +335,36 @@ fn shared(a: Boundary, b: Boundary) -> tree::VertexId {
 
 /// What a cluster node represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeData {
-    Edge(tree::EdgeId),
-    Label(tree::LabelId),
+pub enum NodeKind {
+    Edge,
+    Label,
     Internal,
 }
+
+pub enum ClusterWeight<N, E> {
+    Edge(E),
+    Label(N),
+    Internal,
+}
+
+type Clusters<S, N, E> = SlotVec<Cluster<S, N, E>, ClusterId>;
 
 /// A dynamic top tree over a forest of trees.
 ///
 /// `S` is the user-supplied [`Summary`] type.
-pub struct TopTree<S>
+pub struct TopTree<S, N = (), E = ()>
 where
     S: Summary,
 {
     /// The underlying forest of trees, storing indices into the `nodes` vec of
     /// clusters on edges and labels, of which one per vertex exists.
     tree: tree::Tree<(), ClusterId, ClusterId>,
-    clusters: Clusters<S>,
+    clusters: Clusters<S, N, E>,
     /// Whether each vertex is currently exposed, indexed by vertex index.
     exposed: BitVec,
 }
 
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary,
 {
@@ -550,7 +393,7 @@ where
     }
 }
 
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary,
 {
@@ -576,8 +419,8 @@ where
     /// given weight and returns the index of the new edge.
     ///
     /// `u` and `v` must be in different trees.
-    pub fn link(&mut self, u: tree::VertexId, v: tree::VertexId) -> ClusterId {
-        self.link_internal(u, v)
+    pub fn link(&mut self, u: tree::VertexId, v: tree::VertexId, weight: E) -> ClusterId {
+        self.link_internal(u, v, weight)
     }
 
     /// Cuts the tree edge connecting `u` and `v`, returning its weight.
@@ -592,8 +435,8 @@ where
     ///
     /// Labels act as leaf edges that are not part of the spanning forest,
     /// e.g. non-tree edges in the underlying graph.
-    pub fn attach(&mut self, v: tree::VertexId) -> ClusterId {
-        self.attach_internal(v)
+    pub fn attach(&mut self, v: tree::VertexId, weight: N) -> ClusterId {
+        self.attach_internal(v, weight)
     }
 
     /// Removes the label identified by `label`, returning its weight.
@@ -605,7 +448,7 @@ where
     }
 }
 
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary,
 {
@@ -627,7 +470,7 @@ where
     ) {
         let node = cluster;
         assert!(
-            matches!(self.cl(node).data, ClusterData::Node(_)),
+            matches!(self.cl(node).data, ClusterData::Node { .. }),
             "update_label_summary expects a label node"
         );
         update(&mut self.cl_mut(node).sum);
@@ -660,13 +503,13 @@ where
     /// because its freed slot may later be reused by an unrelated cluster.
     pub fn cluster_vertex(&self, cluster: ClusterId) -> Option<tree::VertexId> {
         match self.clusters.get(cluster)?.data {
-            ClusterData::Node(label) => self.tree.label_vertex(label),
-            ClusterData::Edge(_) | ClusterData::Internal => None,
+            ClusterData::Node { tree_id: label, .. } => self.tree.label_vertex(label),
+            ClusterData::Edge { .. } | ClusterData::Internal => None,
         }
     }
 }
 
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary,
 {
@@ -706,19 +549,35 @@ where
         Some(shared(left_vertices, right_vertices))
     }
 
-    /// What `node` represents.
-    pub fn node_leaf_data(&self, node: ClusterId) -> NodeData {
+    /// Whether `node` is a leaf cluster representing a tree edge, a label, or an internal cluster.
+    pub fn node_kind(&self, node: ClusterId) -> NodeKind {
         match self.cl(node).data {
-            ClusterData::Edge(edge) => NodeData::Edge(edge),
-            ClusterData::Node(index) => NodeData::Label(index),
-            ClusterData::Internal => NodeData::Internal,
+            ClusterData::Edge { .. } => NodeKind::Edge,
+            ClusterData::Node { .. } => NodeKind::Label,
+            ClusterData::Internal => NodeKind::Internal,
+        }
+    }
+
+    pub fn leaf_weight(&self, node: ClusterId) -> ClusterWeight<&N, &E> {
+        match &self.cl(node).data {
+            ClusterData::Edge { weight, .. } => ClusterWeight::Edge(weight),
+            ClusterData::Node { weight, .. } => ClusterWeight::Label(weight),
+            ClusterData::Internal => ClusterWeight::Internal,
+        }
+    }
+
+    pub fn leaf_weight_mut(&mut self, node: ClusterId) -> ClusterWeight<&mut N, &mut E> {
+        match &mut self.cl_mut(node).data {
+            ClusterData::Edge { weight, .. } => ClusterWeight::Edge(weight),
+            ClusterData::Node { weight, .. } => ClusterWeight::Label(weight),
+            ClusterData::Internal => ClusterWeight::Internal,
         }
     }
 
     /// The key of the label represented by `node`, if it is a label leaf.
     pub fn node_label_key(&self, node: ClusterId) -> Option<tree::LabelId> {
         match self.cl(node).data {
-            ClusterData::Node(index) => Some(index),
+            ClusterData::Node { tree_id: index, .. } => Some(index),
             _ => None,
         }
     }
@@ -731,7 +590,7 @@ where
     }
 }
 
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary + Clone,
 {
@@ -810,7 +669,7 @@ where
     }
 }
 
-impl<S> Default for TopTree<S>
+impl<S, N, E> Default for TopTree<S, N, E>
 where
     S: Summary,
 {
@@ -820,17 +679,17 @@ where
 }
 
 /// Low level cluster tree operations.
-impl<S> TopTree<S>
+impl<S, N, E> TopTree<S, N, E>
 where
     S: Summary,
 {
     #[inline]
-    fn cl(&self, node: ClusterId) -> &Cluster<S> {
+    fn cl(&self, node: ClusterId) -> &Cluster<S, N, E> {
         &self.clusters[node]
     }
 
     #[inline]
-    fn cl_mut(&mut self, node: ClusterId) -> &mut Cluster<S> {
+    fn cl_mut(&mut self, node: ClusterId) -> &mut Cluster<S, N, E> {
         &mut self.clusters[node]
     }
 
@@ -921,14 +780,14 @@ where
     fn add_boundary(&mut self, node: ClusterId, vertex: tree::VertexId) {
         let (data, children) = {
             let cluster = self.cl(node);
-            (cluster.data, cluster.children)
+            (&cluster.data, cluster.children)
         };
 
         match data {
-            ClusterData::Edge(edge) => {
+            ClusterData::Edge { tree_id: edge, .. } => {
                 // `boundary_vertices` is stored in the cluster's local
                 // (unflipped) frame, so compare against the physical endpoints.
-                let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
+                let (left, right) = self.tree.edge_endpoints(*edge).expect("edge must exist");
                 if left == vertex {
                     self.cl_mut(node).boundary_vertices.add(vertex, true);
                 } else if right == vertex {
@@ -937,7 +796,7 @@ where
                     panic!("vertex must be an endpoint of the edge");
                 }
             }
-            ClusterData::Node(_) => {
+            ClusterData::Node { .. } => {
                 self.cl_mut(node).boundary_vertices.add(vertex, false);
             }
             ClusterData::Internal => {
@@ -1041,12 +900,12 @@ where
 
     fn has_left_boundary(&self, node: ClusterId) -> bool {
         match self.cl(node).data {
-            ClusterData::Edge(edge) => {
+            ClusterData::Edge { tree_id: edge, .. } => {
                 let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
                 let endpoint = if self.cl(node).flipped { right } else { left };
                 self.is_boundary_vertex(endpoint)
             }
-            ClusterData::Node(label) => {
+            ClusterData::Node { tree_id: label, .. } => {
                 let vertex = self
                     .tree
                     .label_vertex(label)
@@ -1064,12 +923,12 @@ where
 
     fn has_right_boundary(&self, node: ClusterId) -> bool {
         match self.cl(node).data {
-            ClusterData::Edge(edge) => {
+            ClusterData::Edge { tree_id: edge, .. } => {
                 let (left, right) = self.tree.edge_endpoints(edge).expect("edge must exist");
                 let endpoint = if self.cl(node).flipped { left } else { right };
                 self.is_boundary_vertex(endpoint)
             }
-            ClusterData::Node(label) => {
+            ClusterData::Node { tree_id: label, .. } => {
                 let vertex = self.tree.label_vertex(label).expect("label must exist");
                 self.is_boundary_vertex(vertex)
             }
@@ -1162,7 +1021,7 @@ where
         left: ClusterId,
         right: ClusterId,
         boundary_vertices: BoundaryVertices,
-    ) -> Cluster<S> {
+    ) -> Cluster<S, N, E> {
         let left_vertices = self.cl(left).flipped_boundary_vertices().to_boundary();
         let right_vertices = self.cl(right).flipped_boundary_vertices().to_boundary();
         let parent_vertices = boundary_vertices.to_boundary();
@@ -1383,9 +1242,11 @@ where
         }
 
         let (left_endpoint, right_endpoint) = match self.cl(clid).data {
-            ClusterData::Edge(edge) => self.tree.edge_endpoints(edge).expect("edge must exist"),
-            ClusterData::Node(node) => {
-                let vertex = self.tree.label_vertex(node).expect("vertex must exist");
+            ClusterData::Edge { tree_id: edge, .. } => {
+                self.tree.edge_endpoints(edge).expect("edge must exist")
+            }
+            ClusterData::Node { tree_id: label, .. } => {
+                let vertex = self.tree.label_vertex(label).expect("vertex must exist");
 
                 (vertex, vertex)
             }
@@ -1623,7 +1484,7 @@ where
         self.clusters.remove(node);
     }
 
-    fn link_internal(&mut self, u: tree::VertexId, v: tree::VertexId) -> ClusterId {
+    fn link_internal(&mut self, u: tree::VertexId, v: tree::VertexId, weight: E) -> ClusterId {
         let mut root_u = self.expose_vertex(u);
         if let Some(node) = root_u
             && self.has_left_boundary(node)
@@ -1652,7 +1513,10 @@ where
                 children: None,
                 flipped: false,
                 boundary_vertices,
-                data: ClusterData::Edge(edge),
+                data: ClusterData::Edge {
+                    tree_id: edge,
+                    weight,
+                },
                 sum,
                 tag: S::Tag::default(),
             }
@@ -1678,24 +1542,45 @@ where
     }
 
     fn swap_edge(
-        clusters: &mut Clusters<S>,
+        clusters: &mut Clusters<S, N, E>,
         tree: &Tree<(), ClusterId, ClusterId>,
         swap: SwapResult<tree::EdgeId>,
     ) {
         if let SwapResult::Some { current, .. } = swap {
             let clid = *tree.edge_weight(current).expect("edge must exist");
-            clusters[clid].data = ClusterData::Edge(current);
+            let ClusterData::Edge { tree_id, .. } = &mut clusters[clid].data else {
+                panic!(
+                    "cluster {clid:?} must be an edge cluster, but was {:?}",
+                    match &clusters[clid].data {
+                        ClusterData::Internal => "internal",
+                        ClusterData::Node { .. } => "node",
+                        ClusterData::Edge { .. } => unreachable!(),
+                    }
+                );
+            };
+            *tree_id = current;
         }
     }
 
     fn swap_label(
-        clusters: &mut Clusters<S>,
+        clusters: &mut Clusters<S, N, E>,
         tree: &Tree<(), ClusterId, ClusterId>,
         swap: SwapResult<tree::LabelId>,
     ) {
         if let SwapResult::Some { current, .. } = swap {
             let clid = *tree.label_weight(current).expect("label must exist");
-            clusters[clid].data = ClusterData::Node(current);
+            let ClusterData::Node { tree_id, .. } = &mut clusters[clid].data else {
+                panic!(
+                    "cluster {clid:?} must be a node cluster, but was {:?}",
+                    match &clusters[clid].data {
+                        ClusterData::Internal => "internal",
+                        ClusterData::Node { .. } => unreachable!(),
+                        ClusterData::Edge { .. } => "edge",
+                    }
+                );
+            };
+
+            *tree_id = current;
         }
     }
 
@@ -1766,7 +1651,7 @@ where
 
         // TODO: just find the root and ascend
         if let SwapResult::Some { prev, current } = swap {
-            self.clusters.for_each_mut(|cluster| {
+            self.clusters.for_each_mut(|_, cluster| {
                 cluster.boundary_vertices.remap(prev, current);
                 cluster.sum.remap_vertex(prev, current);
             });
@@ -1775,7 +1660,7 @@ where
         Some(swap)
     }
 
-    fn attach_internal(&mut self, vertex: tree::VertexId) -> ClusterId {
+    fn attach_internal(&mut self, vertex: tree::VertexId, weight: N) -> ClusterId {
         let root_v = self.expose_vertex(vertex);
         if let Some(node) = root_v
             && self.has_left_boundary(node)
@@ -1794,7 +1679,10 @@ where
                 children: None,
                 flipped: false,
                 boundary_vertices,
-                data: ClusterData::Node(label),
+                data: ClusterData::Node {
+                    tree_id: label,
+                    weight,
+                },
                 sum,
                 tag: S::Tag::default(),
             }
