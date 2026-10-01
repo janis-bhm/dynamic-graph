@@ -442,7 +442,7 @@ where
     /// Cuts the tree edge connecting `u` and `v`, returning its weight.
     ///
     /// Returns `None` if there is no such edge.
-    pub fn cut(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<()> {
+    pub fn cut(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<E> {
         self.cut_internal(u, v)
     }
 
@@ -1515,14 +1515,14 @@ where
         root
     }
 
-    fn delete_all_ancestors(&mut self, node: ClusterId) {
+    fn delete_all_ancestors(&mut self, node: ClusterId) -> Option<Cluster<S, N, E>> {
         if let Some(parent) = self.parent(node) {
             let sibling = self.sibling(node).expect("node with parent has sibling");
             self.delete_all_ancestors(parent);
             self.set_parent(sibling, None);
         }
 
-        self.clusters.remove(node);
+        self.clusters.remove(node)
     }
 
     fn link_internal(&mut self, u: tree::VertexId, v: tree::VertexId, weight: E) -> ClusterId {
@@ -1637,11 +1637,18 @@ where
         }
     }
 
-    fn cut_edge(&mut self, u: tree::VertexId, v: tree::VertexId, edge: tree::EdgeId) {
+    fn cut_edge(&mut self, u: tree::VertexId, v: tree::VertexId, edge: tree::EdgeId) -> E {
         let leaf = *self.tree.edge_weight(edge).expect("edge must exist");
 
         self.full_splay(leaf);
-        self.delete_all_ancestors(leaf);
+
+        let Some(Cluster {
+            data: ClusterData::Edge { weight, .. },
+            ..
+        }) = self.delete_all_ancestors(leaf)
+        else {
+            panic!("cluster did exist");
+        };
 
         let (_weight, swap) = self.tree.remove_edge(edge).expect("edge must exist");
 
@@ -1652,13 +1659,15 @@ where
 
         self.deexpose_vertex(u);
         self.deexpose_vertex(v);
+
+        weight
     }
 
-    fn cut_internal(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<()> {
+    fn cut_internal(&mut self, u: tree::VertexId, v: tree::VertexId) -> Option<E> {
         let edge = self.tree.edge_index_of(u, v)?;
 
-        self.cut_edge(u, v, edge);
-        Some(())
+        let cluster = self.cut_edge(u, v, edge);
+        Some(cluster)
     }
 
     fn remove_node(&mut self, vertex: tree::VertexId) -> Option<SwapResult<tree::VertexId>> {
