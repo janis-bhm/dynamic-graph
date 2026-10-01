@@ -1,41 +1,54 @@
 # `find_bridge` crate guide
 
-`find_bridge` implements dynamic bridge finding on top of `top_tree`. It has two layers: `FindBridge` exposes the paper's dynamic-forest operations, while `DynamicGraph` manages graph edges and applies the insertion/deletion reduction.
+`find_bridge` implements dynamic bridge finding on top of `top_tree`. Everything that compiles lives in one module: `FindBridge` owns a dynamic forest whose edge weights are `EdgeId` handles and whose node weights are per-vertex `VertexLabels`, and it applies the paper's graph-level reduction itself.
+
+The public API is therefore the single module's worth of items re-exported from `lib.rs`: `CoverLevel`, `CoverTag`, `FindBridge`, `Level`, `NO_COVER`, `UserLabel`, and the `VertexId`/`EdgeId` handles.
 
 ## Structure
 
-- `src/lib.rs` documents and re-exports the public API: `FindBridge`, `Level`, `CoverLevel`, `CoverTag`, and `DynamicGraph` with its graph-level IDs.
-- `src/cover_level.rs` contains the tree-level implementation. `CoverLevel` is the `top_tree::Summary`; it stores path and off-path minimum cover levels and their edges, plus the data used for `FindSize` and `FindFirstLabel`. `FindBridge` owns `TopTree<CoverLevel>` and implements `Link`, `Cut`, `Connected`, `Cover`, `Uncover`, cover/min-edge queries, `FindSize`, label operations, and removal of a vertex with no incident forest edges.
-- `src/graph.rs` contains `DynamicGraph`, the Appendix A reduction. It translates stable public IDs through each vertex's stable label-cluster `ClusterId` instead of retaining compaction-sensitive `top_tree::VertexId`s, records whether each graph edge is a tree or non-tree edge, and implements insert/delete, vertex removal, replacement-edge search, and recovery/promotion.
-- `src/cover_level/tests.rs` checks the tree-level operations against a simple forest model. `src/graph/tests.rs` checks dynamic graph behavior against a naive graph implementation, including randomized update sequences.
-- `augmented_tree` supplies the aggregated balanced `BTree` used by `PartTree` in `cover_level.rs`; `top_tree` supplies the dynamic forest and summary callbacks.
-
-## How the layers fit together
-
-1. `DynamicGraph` keeps a spanning forest in `FindBridge`. An inserted edge joining two components becomes a tree edge. An edge whose endpoints are already connected becomes a non-tree edge: its two endpoints get user labels at the edge's level, and that level covers the tree path between them.
-2. `FindBridge` maintains one structural label leaf per vertex. The leaf makes each vertex count once in `FindSize` and stores a bit mask of levels that have user labels at that vertex. Actual user-label handles and their `(vertex, level)` buckets are indexed separately; they are not additional top-tree leaves.
-3. `CoverLevel` is recomputed by `TopTree` whenever clusters are merged or rebalanced. `cover`/`min_path_edge` describe the cluster path; `global_cover`/`min_global_edge` describe edges off that path. A cover level of `-1` identifies a bridge among the forest edges.
-4. Path `Cover` and `Uncover` operations use `CoverTag`, the composed monotone function `g(x) = if x > threshold { x } else { constant }`, and are applied lazily to the exposed path. `PartTree` stores per-cover-level size vectors and incident-level masks, supporting `FindSize` and the guided descent for `FindFirstLabel`.
-5. On deletion of a covered tree edge, `DynamicGraph` swaps in a replacement non-tree edge. `FindReplacement`, `Recover`, and `RecoverPhase` search labels and promote eligible edges/labels to higher levels while restoring path covers.
+- `src/lib.rs` is 72 lines of crate docs, then `mod cover_level;` and one `pub use`. Those crate docs are stale — see *Known gaps*.
+- `src/cover_level.rs` (1679 lines) holds everything that is compiled:
+  - `PartTree = BTree<i32, PartEntry>` with `SizeVector`, `PartEntry`, and the FindSize helpers (`along_path_find_size`, `off_path_find_size`, `total_sum`, `range_sum`, `restrict`, `diagonal_sum`, ...). `augmented_tree` supplies the aggregated balanced `BTree`.
+  - `CoverLevel`, the `top_tree::Summary` impl with `type Tag = CoverTag`; `CoverTag`; `NO_COVER`; `Level` over `-1..=LEVEL_CAP` with `LEVEL_CAP = 32` and `SLOTS = LEVEL_CAP + 2`.
+  - Handles `VertexId(top_tree::ClusterId)`, `EdgeId(NonMaxUsize)`, `UserLabel(NonMaxUsize)`.
+  - `FindBridge`, owning `top_tree::TopTree<CoverLevel, VertexLabels, EdgeId>` and `edges: SlotVec<Edge, EdgeId>`.
+  - The Appendix A reduction: `add_non_tree_edge`, `find_first_label`, `smallest_label_at`, `first_path`, `find_label_vertex`, `remove_edge`, `swap_edge_for_delete`, `recover`, `find_repalcement` (typo is in the source, `cover_level.rs:1265`), `recover_phase`, `with_path_tag`, `with_vertex_id_path_tag`.
+- `FindBridge`'s public methods: `new`, `add_vertex() -> VertexId` (takes no arguments), `remove_vertex`, `edge_count`, `link -> EdgeId`, `cut_edge -> bool`, `connected`, `remove_edge`, `cover`, `uncover`, `cover_level_between -> i32`, `min_covered_edge_between -> Option<EdgeId>`, `find_bridge -> Option<EdgeId>`, `find_bridge_between -> Option<EdgeId>`, `component_size -> u64`, `two_edge_component_size -> u64`.
+- `src/graph.rs` and `src/graph/tests.rs` are on disk but outside the build — see *Known gaps*.
+- `top_tree` supplies the forest and summary callbacks; it needs nightly (`#![feature(pattern_types, pattern_type_macro, structural_match)]` in `crates/top_tree/src/lib.rs`).
 
 ## Important constraints and maintenance notes
 
-- `Level` represents `-1..=32`; `NO_COVER` is the separate sentinel above real cover levels. The dense size vectors and incident masks are tied to this fixed cap. `DynamicGraph` documents a supported range of fewer than `2^31` vertices; revisit the level representation and promotion logic together if changing that limit.
-- `DynamicGraph::VertexId` and `DynamicGraph::EdgeId` are public stable handles, distinct from the internal `top_tree` IDs. Removed public vertex IDs are tombstoned and never reused. `vertices` maps them to stable cluster IDs, `vertex_of_cluster` and `tree_edge_at` are keyed by those IDs, and `label_to_edge` remains label-keyed; keep these maps consistent when changing swap, recovery, or deletion behavior. Because surviving endpoints retain their stable IDs, removal requires no remapping of surviving vertices or edges (though the delete/recover path may still promote a surviving non-tree edge and change its level and labels) and no rebuild of `tree_edge_at`; it still deletes incident edges through `delete_edge` first, then tombstones the handle and clears its inverse cluster entry.
-- `FindBridge::remove_vertex` is only valid after a vertex has no incident forest edges; it removes the structural leaf and attached user labels. Use the stable `ClusterId` from `vertex_cluster` and `cluster_vertex` to re-resolve a moved internal vertex after compaction.
-- `CoverLevel::combine`, `flip`, `apply`, and `compose` must agree with `top_tree::Summary` semantics. Boundary-indexed `PartTree` entries must follow the logical boundary order when a cluster flips; tags must affect path children only.
-- Keep graph-edge policy in `graph.rs` and tree-level summary/query logic in `cover_level.rs`. The former should use `FindBridge` operations rather than editing top-tree summaries directly.
+- `Level` spans `-1..=32`; `NO_COVER` is the separate sentinel above every real level. The dense `SizeVector`s and the `u64` incident masks are sized to that fixed cap. The graph-level `< 2^31` vertex caveat now lives in `graph.rs`'s `DynamicGraph` docs (a WIP module): the paper's `l_max = floor(log2 n)` can exceed the cap, and hitting it can invalidate the size invariant used to guarantee a replacement edge. Revisit the level representation and the promotion logic together if that limit changes.
+- `FindBridge` attaches exactly one label leaf per vertex in `add_vertex`; that leaf's `top_tree::ClusterId` is the stable identity wrapped by `VertexId`. Internal `top_tree::VertexId`/`EdgeId` are compaction-sensitive and must be re-resolved through the private `vertex_cluster`/`cluster_vertex` after a removal. `top_tree::Summary` requires only `tree_edge`, `label`, `combine`, `flip`, `apply`, and `compose` — there is no `remap_vertex`, so nothing remaps cluster data for you.
+- `find_bridge` and `find_bridge_between` return a single `Option<EdgeId>`, not a vertex pair; `link` returns the new `EdgeId`.
+- `remove_vertex` is only valid for a vertex with no incident forest edge and panics otherwise; cut or remove those edges first.
+- `CoverLevel`'s `combine`, `flip`, `apply`, and `compose` must agree with `top_tree::Summary` semantics. Boundary-indexed `PartTree` entries must follow the logical boundary order when a cluster flips; tags must affect path children only.
+- The Section 5/6 entry points are private: `find_size_internal`, `find_first_label`, `smallest_label_at`, `first_path`. Only `component_size` and `two_edge_component_size` are public, and there is no public label add/remove operation on `FindBridge`.
+
+## Known gaps / WIP state
+
+- `mod graph;` is absent from `lib.rs` (commit `953782c`, "disable graph module"), so `src/graph.rs`'s `DynamicGraph` and `src/graph/tests.rs` are dead code. `DynamicGraph` is **not** part of the public API; its docs are the only place the graph-level `< 2^31` limit is written down.
+- `graph.rs` has uncommitted WIP on `main`: a half-finished migration from `EdgeRecord`/`EdgeKind` to a new `Edge`/`EdgeLabels` pair plus a `Vertex { cluster, generation }` record using `top_tree::Generation`. The field is already `edges: Vec<Option<Edge>>` while most of the file still constructs `EdgeRecord`, so the module would not compile if re-enabled. Do not treat it as a description of the current API.
+- The last two lines of `cover_level.rs` are `// #[cfg(test)]` / `// mod tests;`, so `src/cover_level/tests.rs` is not compiled.
+- `lib.rs`'s crate docs still describe `DynamicGraph`, `FindBridge::find_size`, `add_label`, `remove_label`, and `find_first_label`, none of which are public today.
 
 ## Paper references
 
 The primary reference is [*Dynamic Bridge-Finding in O(log² n) Amortized Time* by Holm, Rotenberg, and Thorup (2017)](../../papers/Dynamic%20Bridge-Finding%20in%20O%28log2%20n%29%20Amortized%20Time%20%28holm%2Crotenberg%2Cthorup%29.txt):
 
 - Section 2 gives the dynamic-tree operation interface and the level/cover invariants.
-- Sections 4–6 describe `CoverLevel`, `FindSize`, and `FindFirstLabel`, respectively; these are combined in `cover_level.rs`.
-- Appendix A gives the graph-level `Insert`, `Delete`, `Swap`, `FindReplacement`, `Recover`, and `RecoverPhase` reduction implemented in `graph.rs`.
+- Section 4 is `CoverLevel`/`CoverTag`.
+- Section 5 is `FindSize`: `along_path_find_size`, `off_path_find_size`, `find_size_internal`.
+- Section 6 is `FindFirstLabel`: `add_non_tree_edge`, `find_first_label`, `smallest_label_at`, `first_path`, `find_label_vertex`.
+- Appendix A is the graph-level `Insert`, `Delete`, `Swap`, `FindReplacement`, `Recover`, `RecoverPhase` reduction. Those internals now live inside `FindBridge` in `cover_level.rs`; `graph.rs` is the WIP graph-level wrapper.
 
-Use those sections to understand the algorithmic invariants, but check the Rust implementation before attributing the paper's full asymptotic bounds to a code path: this implementation uses a fixed level cap and exact `u64` size vectors.
+Use those sections for the algorithmic invariants, but check the Rust before attributing the paper's full asymptotic bounds to a code path: this implementation has a fixed level cap and exact `u64` size vectors.
 
 ## Tests
 
-From the workspace root, run `cargo test -p find_bridge` after changes. For tree-summary changes, start with `src/cover_level/tests.rs`; for graph insertion/deletion or recovery changes, use `src/graph/tests.rs` and its differential/randomized cases.
+`cargo test -p find_bridge` currently **fails**: the only two tests are the stale doctests in `lib.rs`, and both fail to compile — the one at `lib.rs:22` asserts `graph.find_bridge(a) == Some((a, b))` (`E0308`, `find_bridge` now returns `Option<EdgeId>`) and the one at `lib.rs:48` does `use find_bridge::DynamicGraph;` (`E0432`).
+
+`cargo test -p find_bridge --lib` runs **0 tests**, because `mod tests;` is commented out in `cover_level.rs`. `cargo build -p find_bridge` is clean; the lib-test build warns about the unused private `FindBridge::debug_root_incident`.
+
+Intended test locations once re-enabled: `src/cover_level/tests.rs` for the tree-level operations against a simple forest model, and `src/graph/tests.rs` for differential/randomized dynamic-graph behavior against a naive oracle (it still imports the old `EdgeKind`, so it needs porting too).
