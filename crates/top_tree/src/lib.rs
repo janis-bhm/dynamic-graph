@@ -467,6 +467,20 @@ pub mod slot {
             unsafe { Some(&self.slots[idx].value) }
         }
 
+        pub fn replace(&mut self, index: I, value: T) -> Option<T> {
+            let idx = index.get();
+            if !self.occupancy.get(idx) {
+                return None;
+            }
+
+            let old_value = unsafe { ManuallyDrop::take(&mut self.slots[idx].value) };
+            self.slots[idx] = Slot {
+                value: ManuallyDrop::new(value),
+            };
+
+            Some(old_value)
+        }
+
         pub fn get_mut(&mut self, index: I) -> Option<&mut T> {
             let idx = index.get();
             if !self.occupancy.get(idx) {
