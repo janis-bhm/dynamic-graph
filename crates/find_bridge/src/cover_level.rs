@@ -949,8 +949,9 @@ impl VertexLabels {
 /// Section 4.
 ///
 /// The forest is maintained in a [`top_tree::TopTree`]; tree edges start with
-/// cover level `-1` (they are bridges). [`FindBridge::cover`] and
-/// [`FindBridge::uncover`] update the cover levels of a whole path lazily.
+/// cover level `-1` (they are bridges). Covering and uncovering a path update
+/// the cover levels along it lazily; those two operations are internal, because
+/// callers never manage cover levels themselves.
 pub struct FindBridge {
     top_tree: top_tree::TopTree<CoverLevel, VertexLabels, EdgeId>,
     edges: SlotVec<Edge, EdgeId>,
@@ -1123,13 +1124,15 @@ impl FindBridge {
 
     /// Applies `Cover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is below `level` is raised to `level`.
-    pub(crate) fn cover(&mut self, u: VertexId, v: VertexId, level: Level) {
+    #[cfg(test)]
+    fn cover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::cover(level));
     }
 
     /// Applies `Uncover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is at most `level` gets cover level `-1`.
-    pub(crate) fn uncover(&mut self, u: VertexId, v: VertexId, level: Level) {
+    #[cfg(test)]
+    fn uncover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::uncover(level));
     }
 
@@ -1419,6 +1422,7 @@ impl FindBridge {
         self.top_tree.deexpose(u);
     }
 
+    #[cfg(test)]
     fn with_path_tag(&mut self, u: VertexId, v: VertexId, tag: CoverTag) {
         if u == v {
             // A trivial path has no edges, so there is nothing to tag.

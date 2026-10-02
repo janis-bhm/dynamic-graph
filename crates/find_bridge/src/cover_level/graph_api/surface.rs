@@ -108,9 +108,9 @@ fn unordered((u, v): (VertexId, VertexId)) -> (VertexId, VertexId) {
 /// * a tree edge is resolved through `top_tree::edge_endpoints`, so only the
 ///   unordered pair is promised.
 ///
-/// The `cover` in the middle is the graph-level step the `Graph` driver performs
-/// after `link` on an already-connected pair (`graph_api::Graph::insert`); it
-/// must not disturb any record.
+/// The `cover` in the middle repeats, at level 0, the cover [`FindBridge::link`]
+/// already applied when it recorded the closing record on an already-connected
+/// pair; it must not disturb any record.
 #[test]
 fn endpoints_resolves_tree_and_non_tree_handles() {
     let mut fb = FindBridge::new();
@@ -174,8 +174,9 @@ fn endpoints_resolves_tree_and_non_tree_handles() {
     );
 
     // A non-tree record answers identically before and after the path it closes
-    // is covered. The cover is the graph-level step the `Graph` driver performs
-    // after `link` on a connected pair (`graph_api::Graph::insert`).
+    // is covered again. `link` covers that path itself when it records the
+    // record, so this `cover` repeats the same level-0 operation; repeating it
+    // must not move or reorder a record.
     let ca = fb.link(c, a);
     let before = fb.endpoints(ca).expect("a live non-tree record");
     assert_eq!(before, (c, a), "recorded in link order");
@@ -1293,18 +1294,37 @@ fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     let b = fb.add_vertex();
     let tree = fb.link(a, b);
     let parallel = fb.link(a, b);
-
-    // Remove only the *tree* edge. The non-tree record stays live and still
-    // names `a`, but `a` has no incident forest edge, so the panic does not fire.
-    fb.remove_edge(tree);
-    assert_eq!(
-        fb.component_size(a),
-        2,
-        "a is connected to b through `parallel`"
+    assert!(
+        matches!(fb.edges[parallel], Edge::NonTree(_)),
+        "the second link on a connected pair is a non-tree record"
     );
 
-    fb.remove_edge(parallel);
-    assert_eq!(fb.component_size(a), 1, "a is now forest-isolated");
+    // `link` covers the path itself when it records a non-tree record, so `tree`
+    // is a *covered* tree edge and `remove_edge(tree)` would run `Swap`:
+    // `parallel` would be promoted into the forest as `a`'s only tree edge, and
+    // the record this test is about would be gone before `remove_vertex` ever
+    // saw it. Un-cover the path so `tree` is a plain bridge again and the cut
+    // leaves `parallel` live -- a record whose endpoint has no incident forest
+    // edge is exactly the state `Swap` prevents, so the public API cannot reach
+    // it and the crate-private `Uncover` is used to set it up.
+    fb.uncover(a, b, lvl(0));
+    assert_eq!(
+        fb.cover_level_between(a, b),
+        -1,
+        "a-b is a bridge again, so removing it is a plain cut"
+    );
+
+    fb.remove_edge(tree);
+    assert_eq!(fb.component_size(a), 1, "the plain cut separates a from b");
+    assert!(
+        matches!(fb.edges[parallel], Edge::NonTree(_)),
+        "a plain cut must leave the non-tree record live for `remove_vertex` to clean up"
+    );
+    assert_eq!(
+        label_at(&mut fb, b, lvl(0)),
+        Some(parallel),
+        "and b still carries the record's label"
+    );
 
     assert!(fb.connected(a, a), "and still a live vertex");
 

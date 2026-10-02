@@ -43,11 +43,6 @@ mod fixed;
 mod randomized;
 mod surface;
 
-/// The level used for every inserted non-tree edge, as in Appendix A.
-fn non_tree_level() -> Level {
-    Level::new(0).expect("level zero is always representable")
-}
-
 /// A deliberately straightforward multigraph used as the test oracle.
 ///
 /// The adjacency map stores the multiplicity of each undirected endpoint pair,
@@ -446,24 +441,21 @@ impl Graph {
     /// returning its [`EdgeId`] handle, or `None` for an unknown vertex or a
     /// self-loop.
     ///
-    /// This is Appendix A's `Insert`. An edge between two different trees
-    /// becomes a tree edge, which [`FindBridge::link`] already does. An edge
-    /// whose endpoints are already connected becomes a level-0 non-tree edge
-    /// *and* must cover the tree path between its endpoints:
-    /// [`FindBridge::link`] records the non-tree edge but deliberately does not
-    /// raise the path cover, so the cover is applied here. Connectivity is
-    /// therefore sampled *before* the link.
+    /// This is Appendix A's `Insert`, and [`FindBridge::link`] carries out
+    /// both of its branches. `Connect(v, w)` is the condition the paper tests
+    /// first, and `link` evaluates it itself: endpoints in different trees get a
+    /// new tree edge, while endpoints that are already connected get a level-0
+    /// non-tree edge *and* have the tree path between them covered at that same
+    /// level-0. Each branch is therefore already complete when `link` returns,
+    /// so the driver only has to keep the returned handle and the oracle edge in
+    /// step.
     fn insert(&mut self, u: usize, v: usize) -> Option<EdgeId> {
         let (u_handle, v_handle) = (*self.verts.get(&u)?, *self.verts.get(&v)?);
         if u == v {
             return None;
         }
 
-        let already_connected = self.fb.connected(u_handle, v_handle);
         let edge = self.fb.link(u_handle, v_handle);
-        if already_connected {
-            self.fb.cover(u_handle, v_handle, non_tree_level());
-        }
 
         let oracle = self.naive.insert(u, v);
         let previous = self.live.insert(edge, LiveEdge { oracle, u, v });
