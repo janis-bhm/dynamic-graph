@@ -459,8 +459,8 @@ where
     ///
     /// The handle is invalidated; all other [`LabelId`]s remain valid.
     /// This also invalidates the [`ClusterId`] returned by [`Self::attach`].
-    pub fn detach(&mut self, label: tree::LabelId) {
-        self.detach_internal(label);
+    pub fn detach(&mut self, label: tree::LabelId) -> N {
+        self.detach_internal(label)
     }
 }
 
@@ -1744,7 +1744,7 @@ where
         leaf
     }
 
-    fn detach_internal(&mut self, label: tree::LabelId) {
+    fn detach_internal(&mut self, label: tree::LabelId) -> N {
         let vertex = self.tree.label_vertex(label).expect("label must exist");
         let label_node = *self.tree.label_weight(label).expect("label must exist");
 
@@ -1768,13 +1768,21 @@ where
             self.set_parent(sibling, None);
             self.clusters.remove(parent);
         }
-        self.clusters.remove(label_node);
+        let Some(Cluster {
+            data: ClusterData::Node { weight, .. },
+            ..
+        }) = self.clusters.remove(label_node)
+        else {
+            panic!("label cluster must exist");
+        };
 
         let (_weight, swap) = self.tree.remove_label(label).expect("label must exist");
 
         Self::swap_label(&mut self.clusters, &self.tree, swap);
 
         let _ = self.deexpose_vertex(vertex);
+
+        weight
     }
 }
 
