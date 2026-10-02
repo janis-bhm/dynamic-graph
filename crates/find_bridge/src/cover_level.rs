@@ -570,10 +570,6 @@ fn off_path_find_size(
     (size, incident, parts)
 }
 
-/// A stable handle to a user label added with [`FindBridge::add_label`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct UserLabel(pub NonMaxUsize);
-
 /// A lazily pending pair of `Cover`/`Uncover` operations, represented as the
 /// monotone function `g(x) = if x > threshold { x } else { constant }`.
 ///

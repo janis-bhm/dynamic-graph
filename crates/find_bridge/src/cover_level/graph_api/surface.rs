@@ -21,8 +21,6 @@
 //! and not the subject of these tests, so the shared helper types of
 //! `cover_level::tests` are re-implemented locally where needed.
 
-use std::collections::{BTreeSet, HashSet};
-
 use top_tree::Summary;
 use top_tree::slot::Indexing;
 
@@ -1000,92 +998,6 @@ fn handle_indices_are_per_type_and_not_a_creation_counter() {
         unordered((v[0], v[3])),
         "and it now names the new edge"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Gap 8: `UserLabel`.
-// ---------------------------------------------------------------------------
-
-/// Pins [`UserLabel`] for what it actually is: a public newtype over
-/// [`top_tree::NonMaxUsize`] whose payload a caller can both read and construct,
-/// with no behaviour of its own.
-///
-/// **This type is vestigial and its doc comment is stale.** It is re-exported
-/// from `lib.rs` and documented as "A stable handle to a user label added with
-/// `FindBridge::add_label`", but `FindBridge::add_label` does not exist and no
-/// other item in the crate mentions `UserLabel`: labels in this implementation
-/// are non-tree edges (a self edge at a vertex is how `cover_level::tests` adds
-/// one), and they are addressed by `EdgeId`, not by `UserLabel`. So the only
-/// contract to pin is the type's identity/order behaviour, and that is what this
-/// test does. Whether to delete the type is left to a human; see the report.
-///
-/// Nothing here pins the type's size or layout: `UserLabel` carries no `repr`
-/// attribute, so its layout is whatever the compiler picks and asserting on it
-/// would only break under an unrelated repr change.
-#[test]
-fn user_label_is_a_public_newtype_handle() {
-    // The field is public, so a `UserLabel` is constructible from any
-    // representable `NonMaxUsize`; `usize::MAX` is not representable.
-    let zero = UserLabel(top_tree::NonMaxUsize::new(0).expect("0 is representable"));
-    let one = UserLabel(top_tree::NonMaxUsize::new(1).expect("1 is representable"));
-    let large = UserLabel(
-        top_tree::NonMaxUsize::new(usize::MAX - 1).expect("usize::MAX - 1 is representable"),
-    );
-    assert_eq!(
-        top_tree::NonMaxUsize::new(usize::MAX),
-        None,
-        "the one excluded value"
-    );
-
-    // `Copy` and `Eq` are the two derives a handle needs to be storable in two
-    // places safely. The generic bound on `assert_copy` is the compile-time
-    // check; passing by value and then using the original again is the runtime
-    // demonstration.
-    fn assert_copy<T: Copy>(t: T) -> T {
-        t
-    }
-    let copied = assert_copy(zero);
-    assert_eq!(copied, zero, "a by-value copy compares equal");
-    assert_eq!(
-        zero, zero,
-        "and the original is still usable afterwards, which is what Copy means"
-    );
-    assert_ne!(zero, one, "different payloads are different labels");
-    assert_eq!(
-        zero.0.get(),
-        0,
-        "the payload is readable and is what it was"
-    );
-
-    // `Ord` is the derived integer order on the payload, so `sort` works and
-    // the handle is a usable *ordered* set element.
-    let mut set = BTreeSet::new();
-    set.insert(large);
-    set.insert(one);
-    set.insert(zero);
-    set.insert(zero);
-    assert_eq!(
-        set.iter().copied().collect::<Vec<_>>(),
-        vec![zero, one, large],
-        "a BTreeSet of user labels behaves as an ordered set and de-duplicates"
-    );
-    assert!(set.contains(&one), "membership works");
-    assert!(
-        !set.contains(&UserLabel(
-            top_tree::NonMaxUsize::new(2).expect("2 is representable")
-        )),
-        "a label that was never inserted is absent"
-    );
-
-    // `Hash` is derived too, so the handle can key a hash-based map. This is
-    // only a consistency check: the hash is not specified.
-    let mut hashed = HashSet::new();
-    hashed.insert(one);
-    assert!(hashed.contains(&one), "a hashed label is found by value");
-    assert_eq!(hashed.len(), 1, "inserting a copy does not grow the set");
-    hashed.insert(zero);
-    assert_eq!(hashed.len(), 2, "a different label is a different key");
-    assert!(!hashed.contains(&large), "and an absent label is not a key");
 }
 
 // ---------------------------------------------------------------------------
