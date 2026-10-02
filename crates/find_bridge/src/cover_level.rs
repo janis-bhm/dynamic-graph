@@ -1096,6 +1096,7 @@ impl FindBridge {
                 Edge::Tree(cluster)
             })
         } else {
+            self.with_vertex_id_path_tag(u, v, CoverTag::cover(Level(0)));
             let (u, v) = {
                 (
                     self.vertex_cluster(u).expect("the u cluster must exist"),
@@ -1122,13 +1123,13 @@ impl FindBridge {
 
     /// Applies `Cover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is below `level` is raised to `level`.
-    pub fn cover(&mut self, u: VertexId, v: VertexId, level: Level) {
+    pub(crate) fn cover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::cover(level));
     }
 
     /// Applies `Uncover(u, v, level)`: every edge on the `u`-`v` path whose
     /// cover level is at most `level` gets cover level `-1`.
-    pub fn uncover(&mut self, u: VertexId, v: VertexId, level: Level) {
+    pub(crate) fn uncover(&mut self, u: VertexId, v: VertexId, level: Level) {
         self.with_path_tag(u, v, CoverTag::uncover(level));
     }
 
@@ -1528,11 +1529,13 @@ impl FindBridge {
         }
     }
 
+    /// `ComponentSize(v)`: the number of vertices in `v`'s connected component.
     pub fn component_size(&mut self, v: VertexId) -> u64 {
         let v = self.cluster_vertex(v.0).expect("the v cluster must exist");
         self.find_size_internal(v, v, -1)
     }
 
+    /// `TwoEdgeComponentSize(v)`: the number of vertices in `v`'s 2-edge-connected component.
     pub fn two_edge_component_size(&mut self, v: VertexId) -> u64 {
         let v = self.cluster_vertex(v.0).expect("the v cluster must exist");
         self.find_size_internal(v, v, 0)

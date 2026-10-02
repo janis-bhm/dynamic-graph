@@ -317,6 +317,7 @@ fn endpoints_survive_an_unrelated_vertex_removal() {
         "a non-tree record stores clusters, so it needs no re-resolution at all"
     );
 
+    fb.remove_edge(parallel);
     // The other queries that take `VertexId` still work on the moved vertices.
     assert!(fb.connected(s, t), "s and t are still joined");
     assert_eq!(fb.component_size(s), 2, "the component is unchanged");
@@ -1296,7 +1297,15 @@ fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     // Remove only the *tree* edge. The non-tree record stays live and still
     // names `a`, but `a` has no incident forest edge, so the panic does not fire.
     fb.remove_edge(tree);
+    assert_eq!(
+        fb.component_size(a),
+        2,
+        "a is connected to b through `parallel`"
+    );
+
+    fb.remove_edge(parallel);
     assert_eq!(fb.component_size(a), 1, "a is now forest-isolated");
+
     assert!(fb.connected(a, a), "and still a live vertex");
 
     assert!(
