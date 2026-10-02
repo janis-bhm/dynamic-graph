@@ -314,7 +314,7 @@ fn cluster_liveness_bitmap_matches_allocator() {
 
     let initial_label_cluster = tt.attach(a, ());
     let initial_label = tt
-        .node_label_key(initial_label_cluster)
+        .try_label_id_for_cluster(initial_label_cluster)
         .expect("attached cluster is a label leaf");
     tt.link(a, b, ());
     assert!(tt.cut(a, b).is_some());
@@ -375,7 +375,7 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
     for &vertex in vertices.iter() {
         let cluster = tt.attach(vertex, ());
         assert!(
-            tt.node_label_key(cluster).is_some(),
+            tt.try_label_id_for_cluster(cluster).is_some(),
             "attached cluster is a label leaf"
         );
     }
@@ -439,7 +439,7 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
     let detach_label_at = |tt: &mut TopTree<PathLen>, vertex: tree::VertexId| {
         let cluster = tt.first_label(vertex).expect("vertex must have a label");
         let label = tt
-            .node_label_key(cluster)
+            .try_label_id_for_cluster(cluster)
             .expect("incident leaf must be a label leaf");
         tt.detach(label);
     };
@@ -455,7 +455,7 @@ fn cluster_free_list_matches_liveness_bitmap_after_reuse() {
     for &vertex in vertices.iter().take(4) {
         let cluster = tt.attach(vertex, ());
         assert!(
-            tt.node_label_key(cluster).is_some(),
+            tt.try_label_id_for_cluster(cluster).is_some(),
             "attached cluster is a label leaf"
         );
     }
@@ -643,7 +643,7 @@ impl<S: Summary + Clone> Harness<S> {
     fn attach(&mut self, v: usize) -> tree::LabelId {
         let cluster = self.tt.attach(self.v(v), ());
         self.tt
-            .node_label_key(cluster)
+            .try_label_id_for_cluster(cluster)
             .expect("attached cluster must represent a label")
     }
 
@@ -1185,11 +1185,11 @@ fn node_inspection_and_label_lookup() {
         "a label leaf is not a tree edge"
     );
     assert_eq!(
-        tt.label_vertex(tt.node_label_key(label2).expect("label leaf")),
+        tt.label_vertex(tt.try_label_id_for_cluster(label2).expect("label leaf")),
         Some(v[2])
     );
     assert_eq!(
-        tt.node_label_key(leaf_01),
+        tt.try_label_id_for_cluster(leaf_01),
         None,
         "an edge leaf is not a label"
     );
@@ -1250,7 +1250,7 @@ fn node_inspection_and_label_lookup() {
     assert_eq!(tt.node_kind(right), NodeKind::Label);
     assert_eq!(tt.node_boundary(right), Boundary::One(v[2]));
     assert_eq!(
-        tt.label_vertex(tt.node_label_key(right).expect("label leaf")),
+        tt.label_vertex(tt.try_label_id_for_cluster(right).expect("label leaf")),
         Some(v[2])
     );
     assert_eq!(tt.node_central(right), None, "a leaf has no central vertex");
@@ -1310,7 +1310,7 @@ fn node_inspection_and_label_lookup() {
     tt.deexpose(v[2]);
 
     // The other entry point identifies the leaf by the forest's `LabelId`.
-    let key0 = tt.node_label_key(label0).expect("label leaf");
+    let key0 = tt.try_label_id_for_cluster(label0).expect("label leaf");
     tt.update_label_summary(key0, |summary| summary.value = 9);
     assert_eq!(
         tt.component_summary(v[3]),

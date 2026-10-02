@@ -1704,7 +1704,7 @@ impl FindBridge {
             top_tree::NodeKind::Label => {
                 return self
                     .top_tree
-                    .node_label_key(node)
+                    .try_label_id_for_cluster(node)
                     .and_then(|key| self.top_tree.label_vertex(key));
             }
             top_tree::NodeKind::Edge => return None,

@@ -596,7 +596,7 @@ where
     }
 
     /// The key of the label represented by `node`, if it is a label leaf.
-    pub fn node_label_key(&self, node: ClusterId) -> Option<tree::LabelId> {
+    pub fn try_label_id_for_cluster(&self, node: ClusterId) -> Option<tree::LabelId> {
         match self.cl(node).data {
             ClusterData::Node { tree_id: index, .. } => Some(index),
             _ => None,
