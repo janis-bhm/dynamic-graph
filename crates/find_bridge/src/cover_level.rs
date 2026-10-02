@@ -1059,13 +1059,15 @@ impl FindBridge {
             .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
 
         for edge in edges.edges() {
-            if let Edge::NonTree(NonTreeEdge { u, v, level }) = self.edges[edge] {
-                let w = if u == cluster { v } else { u };
-                self.remove_edge_labels(edge, level, [w]);
-                self.edges
-                    .remove(edge)
-                    .expect("edge slot is live, we just accessed it.");
-            }
+            let Some(Edge::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge) else {
+                panic!("FindBridge::remove_vertex found a tree edge in vertex labels")
+            };
+
+            // `detach` took this vertex's own `VertexLabels` away, so only the
+            // other endpoint of a non-self record still needs cleaning. A
+            // self-edge label (u == v) lives only in the removed vertex.
+            let survivors = [u, v].into_iter().filter(|c| *c != cluster);
+            self.remove_edge_labels(edge, level, survivors);
         }
 
         let _ = self
@@ -1102,37 +1104,6 @@ impl FindBridge {
             };
 
             self.add_non_tree_edge(u, v, Level(0))
-        }
-    }
-
-    /// Cuts `edge_id` out of the forest, returning whether its handle was live.
-    ///
-    /// This is the low-level *forest* cut, not the graph-level delete. On a tree
-    /// edge it only splits the forest: it runs neither Appendix A's `Swap` nor
-    /// its `Recover`, so the cover levels and the non-tree labels left behind
-    /// still describe the pre-cut path. A non-tree record loses its labels at
-    /// both endpoints, but its path is not uncovered either.
-    ///
-    /// A caller wanting graph-level deletion semantics -- the `Delete` reduction,
-    /// which cuts a bridge or `Swap`s a covered tree edge and then recovers --
-    /// must use [`FindBridge::remove_edge`] instead.
-    pub fn cut_edge(&mut self, edge_id: EdgeId) -> bool {
-        match self.edges.remove(edge_id) {
-            Some(Edge::NonTree(non_tree_edge)) => {
-                let level = non_tree_edge.level;
-                self.remove_edge_labels(edge_id, level, [non_tree_edge.u, non_tree_edge.v]);
-
-                true
-            }
-            Some(Edge::Tree(cluster_id)) => {
-                let (u, v) = self
-                    .top_tree
-                    .edge_endpoints(cluster_id)
-                    .expect("the tree edge must exist");
-
-                self.top_tree.cut(u, v).is_some()
-            }
-            None => false,
         }
     }
 
@@ -1206,6 +1177,13 @@ impl FindBridge {
         }
     }
 
+    /// Applies Appendix A's `Delete` reduction to a live edge record.
+    ///
+    /// An uncovered tree edge is cut as a bridge. A covered tree edge runs
+    /// `Swap` to promote a crossing non-tree edge, then its former path is
+    /// uncovered and recovered. A non-tree record loses its endpoint
+    /// labels and its covered path is uncovered. A self-record is only a label:
+    /// it was never a graph edge, so removing it only drops that label.
     pub fn remove_edge(&mut self, edge_id: EdgeId) {
         let ((u, v), level) = match self.edges[edge_id] {
             Edge::Tree(cluster_id) => {
@@ -1239,6 +1217,12 @@ impl FindBridge {
                             .expect("the non-tree edge's v cluster must exist"),
                     )
                 };
+
+                if u == v {
+                    // A self-record is a label, not a graph edge: it was never
+                    // covered, and there is no path to uncover or recover.
+                    return;
+                }
 
                 ((u, v), level)
             }

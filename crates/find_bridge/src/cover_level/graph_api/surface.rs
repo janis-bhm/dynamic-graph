@@ -8,8 +8,7 @@
 //! This module instead pins one documented promise of the public API per test,
 //! including the corners that the oracle comparison cannot reach: dead and
 //! unissued [`EdgeId`] handles, the numbering spaces of the two handle types,
-//! [`CoverTag`] in isolation, and the difference between [`FindBridge::cut_edge`]
-//! and [`FindBridge::remove_edge`].
+//! [`CoverTag`] in isolation, and the graph-level effects of [`FindBridge::remove_edge`].
 //!
 //! The oracle-based modules never call `FindBridge::endpoints` on a handle the
 //! driver does not own, and never pin the `Level`/`CoverTag` boundary tables, so
@@ -249,13 +248,13 @@ fn endpoints_of_a_dead_or_unissued_handle_is_none() {
         "the slot freed by remove_edge on a covered tree edge is dead"
     );
 
-    // A slot freed by `cut_edge`, for both record kinds.
+    // A bridge tree edge and a non-tree record both become dead after removal.
     let mut fb2 = FindBridge::new();
     let (x, y) = (fb2.add_vertex(), fb2.add_vertex());
     let tree = fb2.link(x, y);
     let non_tree = fb2.link(x, y);
-    assert!(fb2.cut_edge(tree));
-    assert!(fb2.cut_edge(non_tree));
+    fb2.remove_edge(tree);
+    fb2.remove_edge(non_tree);
     assert_eq!(fb2.endpoints(tree), None, "a cut tree edge slot is dead");
     assert_eq!(
         fb2.endpoints(non_tree),
@@ -533,6 +532,15 @@ fn cover_level_between_degenerate_inputs_are_no_cover() {
         fb.cover_level_between(lonely, a),
         NO_COVER,
         "the disconnected case is symmetric"
+    );
+
+    fb.cover(a, lonely, lvl(2));
+    assert_eq!(fb.cover_level_between(a, b), -1);
+    fb.uncover(a, lonely, lvl(2));
+    assert_eq!(
+        fb.cover_level_between(a, b),
+        -1,
+        "cover and uncover across components leave the existing tree unchanged"
     );
 
     // The sentinel really is above every real level, which is what makes it
@@ -986,7 +994,12 @@ fn handle_indices_are_per_type_and_not_a_creation_counter() {
     // ... and a removal recycles the freed index, so density does not survive
     // one. This is the "a deleted EdgeId is not stable" caveat of the
     // `graph_api` module docs, pinned on the public accessor.
-    assert!(fb2.cut_edge(edges[1]), "the middle edge can be cut");
+    fb2.remove_edge(edges[1]);
+    assert_eq!(
+        fb2.tree_edge_count(),
+        2,
+        "one of three tree edges is removed"
+    );
     let recycled = fb2.link(v[0], v[3]);
     assert_eq!(
         recycled.index(),
@@ -1000,149 +1013,19 @@ fn handle_indices_are_per_type_and_not_a_creation_counter() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Gap 9: `cut_edge` versus `remove_edge`.
-// ---------------------------------------------------------------------------
-
-/// Characterises [`FindBridge::cut_edge`] on a *covered* tree edge, and pins
-/// the difference from [`FindBridge::remove_edge`].
-///
-/// `cut_edge` is the low-level forest operation: its body is
-/// `self.edges.remove(id)` followed by `top_tree.cut(u, v)`. It does **not** run
-/// the Appendix-A `Swap`/`Recover` reduction that `remove_edge` runs, and that
-/// difference is consequential:
-///
-/// * the forest splits immediately and exactly -- the component sizes, the
-///   connectivity and the handle bookkeeping are all correct;
-/// * but the cover levels and the non-tree labels are *not* recovered, so the
-///   surviving component still carries the cover it had as part of the cycle,
-///   and the non-tree edge that used to close the cycle now spans two trees.
-///
-/// So after this cut the structure answers the bridge queries about the
-/// *pre-cut* covering: `q-r` is reported covered at level 0 and no bridge is
-/// reported, although in the graph as it now stands -- the two edges `q-r` and
-/// `r-p`, which no longer close a cycle -- `q-r` is a bridge.
-///
-/// This is characterised here as *different by design*, not broken: the split
-/// itself is right, `component_size` is right, no invariant of the `CoverLevel`
-/// summary is violated, and nothing panics (the test's last block shows a
-/// `remove_edge` of the now-dangling non-tree record is still accepted). The
-/// distinction is exactly the one `lib.rs` draws -- `cut_edge` is one of "the
-/// tree operations of Section 2", while `remove_edge` "drops it and then
-/// uncovers the path it covered" -- and it is why the `Graph` driver in
-/// `graph_api` implements Appendix-A `Delete` with `remove_edge` and never with
-/// `cut_edge`. Note that `cut_edge` carries no doc comment of its own, so the
-/// contract above is inferred from the module docs, not from `cut_edge`.
-///
-/// The public API has no "which labels are attached to this vertex" query, so
-/// the label assertions go through `label_at`, i.e. the private Section 6
-/// `find_first_label` entry point that `cover_level::tests` also reaches for.
-#[test]
-fn cut_edge_on_a_covered_tree_edge_only_splits_the_forest() {
-    let mut fb = FindBridge::new();
-    let p = fb.add_vertex();
-    let q = fb.add_vertex();
-    let r = fb.add_vertex();
-    let pq = fb.link(p, q);
-    let qr = fb.link(q, r);
-    let closing = fb.link(r, p);
-    fb.cover(r, p, lvl(0));
-    assert_eq!(
-        fb.two_edge_component_size(p),
-        3,
-        "the cycle is covered to start with"
-    );
-    assert_eq!(fb.find_bridge(p), None, "and has no bridge to start with");
-
-    assert!(fb.cut_edge(pq), "a live tree edge can be cut");
-
-    // The forest split is immediate and exact.
-    assert_eq!(fb.tree_edge_count(), 1, "the tree lost exactly one edge");
-    assert!(!fb.connected(p, q), "p and q are now in different trees");
-    assert!(fb.connected(q, r), "q and r are still joined");
-    assert_eq!(fb.endpoints(pq), None, "the cut handle's slot is freed");
-    assert_eq!(
-        fb.component_size(p),
-        1,
-        "component_size follows the split immediately"
-    );
-    assert_eq!(fb.component_size(q), 2, "component_size follows the split");
-    assert_eq!(fb.component_size(r), 2, "component_size follows the split");
-
-    // No reduction ran, so the covering of the pre-cut cycle survives.
-    assert_eq!(
-        fb.cover_level_between(q, r),
-        0,
-        "cut_edge does not uncover the path, so the surviving edge is still covered"
-    );
-    assert_eq!(
-        fb.min_covered_edge_between(q, r),
-        Some(qr),
-        "and it is still the reported minimum of its own path"
-    );
-    assert_eq!(
-        fb.find_bridge(q),
-        None,
-        "so no bridge is reported, even though qr is a bridge of the real graph"
-    );
-    assert_eq!(
-        fb.two_edge_component_size(q),
-        2,
-        "and q and r still look two-edge connected"
-    );
-
-    // The non-tree record that used to close the cycle is untouched, and still
-    // labels both of its endpoints -- which now live in different trees.
-    assert_eq!(
-        fb.endpoints(closing),
-        Some((r, p)),
-        "cut_edge does not touch non-tree records"
-    );
-    assert_eq!(
-        label_at(&mut fb, r, lvl(0)),
-        Some(closing),
-        "the dangling non-tree edge still labels r"
-    );
-    assert_eq!(
-        label_at(&mut fb, p, lvl(0)),
-        Some(closing),
-        "and it still labels p, although p is now in another tree"
-    );
-
-    // The state is not merely stale, it is recoverable by the caller: the
-    // dangling record can still be deleted with the graph-level operation, and
-    // that removes the labels from both endpoints without uncovering anything.
-    fb.remove_edge(closing);
-    assert_eq!(fb.endpoints(closing), None, "the dangling record is gone");
-    assert_eq!(label_at(&mut fb, p, lvl(0)), None, "p's label is gone");
-    assert_eq!(label_at(&mut fb, r, lvl(0)), None, "r's label is gone");
-    assert_eq!(
-        fb.cover_level_between(q, r),
-        0,
-        "deleting the non-tree edge of an already-cut forest changes no cover level"
-    );
-    assert_eq!(fb.component_size(q), 2, "and changes no component size");
-}
-
-// ---------------------------------------------------------------------------
-
-/// Pins the other half of the `cut_edge` / `remove_edge` contrast: the same
-/// covered tree edge, deleted with [`FindBridge::remove_edge`].
+/// Pins `remove_edge`'s Appendix A reduction for a covered tree edge.
 ///
 /// `remove_edge` runs Appendix A's `Delete`: for a covered tree edge it runs
 /// `Swap` (promote a replacement non-tree edge to a tree edge, re-record the
 /// deleted handle as a non-tree edge) and then uncovers the path and runs
 /// `Recover` for every level up to the deleted edge's cover level. The
-/// observable consequences, which `cut_edge` does not have, are that the forest
-/// stays connected and the covering is restored so the remaining path is a
-/// bridge again.
+/// observable consequences are that the forest stays connected and the
+/// covering is restored so the remaining path is a bridge again.
 ///
-/// `lib.rs` documents only the non-tree branch ("drops it and then uncovers the
-/// path it covered"); the tree branch is documented in `cover_level::tests`, so
-/// this test keeps to the parts that are not already pinned there: the promoted
-/// record, the freed handle, and the recovered cover level. The public API
-/// cannot express "this handle used to be a non-tree edge and is now a tree
-/// edge", so that assertion reads the private `fb.edges`.
+/// The assertions cover the connected component, the promoted replacement, the
+/// freed handle, and the recovered cover level. The public API cannot express
+/// "this handle used to be a non-tree edge and is now a tree edge", so that
+/// assertion reads the private `fb.edges`.
 #[test]
 fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
     let mut fb = FindBridge::new();
@@ -1157,6 +1040,9 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
         "the edge closing the cycle starts out as a non-tree record"
     );
     fb.cover(r, p, lvl(0));
+    assert_eq!(fb.cover_level_between(p, q), 0);
+    assert_eq!(fb.find_bridge(p), None);
+    assert_eq!(fb.two_edge_component_size(p), 3);
 
     fb.remove_edge(pq);
 
@@ -1192,8 +1078,8 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
         "the tree edge that did not cross the cut is untouched"
     );
 
-    // `Recover` undid the covering that `cut_edge` would have left behind, so
-    // the surviving path is uncovered and a bridge is exposed again.
+    // `Recover` restored the invariant: the surviving path is uncovered and a
+    // bridge is exposed again.
     assert_eq!(
         fb.cover_level_between(p, r),
         -1,
@@ -1210,21 +1096,8 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
         "every vertex is alone in its two-edge component again"
     );
 
-    // Contrast, stated in one line: the same sequence through `cut_edge` leaves
-    // `cover_level_between(q, r) == 0` and no bridge; see
-    // `cut_edge_on_a_covered_tree_edge_only_splits_the_forest`.
-    let mut plain = FindBridge::new();
-    let (x, y, z) = (plain.add_vertex(), plain.add_vertex(), plain.add_vertex());
-    let xy = plain.link(x, y);
-    plain.link(y, z);
-    plain.link(z, x);
-    plain.cover(z, x, lvl(0));
-    assert!(plain.cut_edge(xy));
-    assert_eq!(
-        plain.cover_level_between(y, z),
-        0,
-        "cut_edge leaves the pre-cut covering in place where remove_edge recovers it"
-    );
+    assert_eq!(fb.cover_level_between(q, r), -1);
+    assert!(fb.find_bridge(p).is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,15 +1233,15 @@ fn cover_and_uncover_at_level_max() {
 }
 
 /// Pins that a vertex is removable once every record mentioning it is gone, in
-/// particular once its *only* incident non-tree record has been cut.
+/// particular once its *only* incident non-tree record has been removed.
 ///
 /// `remove_vertex` documents that it "Removes an isolated-in-the-forest vertex,
 /// its structural label leaf, and all user labels attached to it", and panics
 /// while a forest edge is still incident. `cover_level::tests` removes labels
-/// through its own `remove_label` helper rather than through `cut_edge` followed
-/// by `remove_vertex`, so this combination is untested.
+/// through its own `remove_label` helper rather than through the public API, so
+/// this combination is tested here.
 #[test]
-fn remove_vertex_after_its_only_non_tree_record_was_cut() {
+fn remove_vertex_after_its_only_non_tree_record_was_removed() {
     let mut fb = FindBridge::new();
     let a = fb.add_vertex();
     let b = fb.add_vertex();
@@ -1384,15 +1257,15 @@ fn remove_vertex_after_its_only_non_tree_record_was_cut() {
         "the non-tree record labels a at level 0"
     );
 
-    assert!(fb.cut_edge(parallel), "the non-tree record can be cut");
+    fb.remove_edge(parallel);
     assert_eq!(
         label_at(&mut fb, a, lvl(0)),
         None,
-        "cut_edge drops the label from both endpoints"
+        "removing the non-tree record drops the label from both endpoints"
     );
     assert_eq!(fb.tree_edge_count(), 1, "the forest is untouched");
 
-    assert!(fb.cut_edge(tree), "the tree edge can be cut too");
+    fb.remove_edge(tree);
     assert_eq!(fb.tree_edge_count(), 0, "both records are gone");
     assert_eq!(fb.component_size(a), 1, "a is now isolated");
     assert_eq!(fb.component_size(b), 1, "b is now isolated");
@@ -1410,49 +1283,19 @@ fn remove_vertex_after_its_only_non_tree_record_was_cut() {
     assert_eq!(fb.tree_edge_count(), 0, "an empty forest at the end");
 }
 
-/// Characterises a *known defect* in `remove_vertex` -- what it leaves behind at
-/// the **other** end of a non-tree record whose first endpoint is deleted -- and,
-/// around it, the part of its behaviour that really is the contract.
-///
-/// `remove_vertex` walks the removed vertex's own `VertexLabels` and drops each
-/// edge from `edges`, but it does not touch the *other* endpoint's label set or
-/// incident mask. So deleting one endpoint of a non-tree record leaves the
-/// survivor still listing a dead `EdgeId` at that level. **No doc comment
-/// promises that, and none should:** `remove_vertex`'s own doc says it removes
-/// labels attached to *the removed vertex* and says nothing about the other
-/// endpoint, so a surviving dangling label is a low-severity bug, not a contract.
-///
-/// **The fix this test is written against:** `remove_vertex` should drop the
-/// record from *both* endpoints -- the `remove_edge_labels` call
-/// [`FindBridge::cut_edge`] makes for a non-tree record, made before the vertex
-/// goes -- so that the survivor has no label at that level and no stale incident
-/// bit. That is a change to `remove_vertex`, not to this test. As written below,
-/// the assertions that read the survivor's private label set are fenced off in a
-/// `KNOWN DEFECT` block: they *record* the hazard rather than promise it, and
-/// when the fix lands that block -- and nothing else -- is deleted.
-///
-/// The rest of the test is the part that is real. The panic is about *forest*
-/// edges, so `remove_vertex` accepts a vertex whose only remaining record is a
-/// non-tree one; the record is then gone from `edges` (so `endpoints` says
-/// `None`). The public queries are all unaffected -- `component_size`,
-/// `two_edge_component_size`, `cover_level_between` and both bridge queries keep
-/// answering correctly once the survivor is re-linked -- because a vertex's cover
-/// level to itself is the `NO_COVER` sentinel, so a stale incident bit on a
-/// point cluster does not raise any cover level. The only observable effect is
-/// that the private Section 6 `find_first_label` reports a handle that
-/// `endpoints` calls dead, which `recover_phase` already tolerates (its
-/// `self.edges.get(edge)?` yields `None`).
+/// Removing one endpoint of a non-tree record removes the record from the edge
+/// arena and from the surviving endpoint's labels, leaving the survivor usable.
 #[test]
-fn remove_vertex_leaves_a_dangling_label_at_the_other_endpoint() {
+fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     let mut fb = FindBridge::new();
     let a = fb.add_vertex();
     let b = fb.add_vertex();
     let tree = fb.link(a, b);
     let parallel = fb.link(a, b);
 
-    // Cut only the *tree* edge. The non-tree record stays live and still names
-    // `a`, but `a` has no incident forest edge, so the panic does not fire.
-    assert!(fb.cut_edge(tree), "the tree edge can be cut");
+    // Remove only the *tree* edge. The non-tree record stays live and still
+    // names `a`, but `a` has no incident forest edge, so the panic does not fire.
+    fb.remove_edge(tree);
     assert_eq!(fb.component_size(a), 1, "a is now forest-isolated");
     assert!(fb.connected(a, a), "and still a live vertex");
 
@@ -1465,24 +1308,27 @@ fn remove_vertex_leaves_a_dangling_label_at_the_other_endpoint() {
         None,
         "the record is dropped from the edge arena"
     );
-    // KNOWN DEFECT: this block asserts a known defect, not intended behaviour.
-    // When `remove_vertex` is fixed to drop the record from *both* endpoints,
-    // delete this assertion block and nothing else.
-    // ---------------------------------------------------------------------
     assert_eq!(
         label_at(&mut fb, b, lvl(0)),
-        Some(parallel),
-        "but b's label set still lists the now-dead handle: this is the dangling label"
+        None,
+        "the surviving endpoint no longer lists the removed record"
+    );
+    let internal_b = fb
+        .cluster_vertex(b.0)
+        .expect("the surviving vertex still has a cluster");
+    assert_eq!(
+        fb.debug_root_incident(internal_b, internal_b) & level_bit(lvl(0)),
+        0,
+        "the surviving endpoint's incident mask has no stale bit at the record's level"
     );
     assert_eq!(
         label_at(&mut fb, b, lvl(1)),
         None,
-        "and only at the level the record was made at"
+        "the surviving endpoint has no label at another level"
     );
-    // ---------------------------------------------------------------------
 
-    // No public query is affected. Re-link b into a component and check that the
-    // bridge and size answers are still right.
+    // Re-link b into a component and check that the bridge and size queries
+    // still work after removing the non-tree record.
     let c = fb.add_vertex();
     let bc = fb.link(b, c);
     assert_eq!(fb.tree_edge_count(), 1, "only b-c is a tree edge now");
@@ -1491,7 +1337,7 @@ fn remove_vertex_leaves_a_dangling_label_at_the_other_endpoint() {
     assert_eq!(
         fb.two_edge_component_size(b),
         1,
-        "a stale incident bit on a point cluster does not make b two-edge connected to c"
+        "the removed record does not make b two-edge connected to c"
     );
     assert_eq!(fb.two_edge_component_size(c), 1, "and c is alone as well");
     assert_eq!(

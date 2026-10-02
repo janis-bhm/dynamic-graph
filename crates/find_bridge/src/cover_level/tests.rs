@@ -73,13 +73,15 @@ fn add_label(fb: &mut FindBridge, v: VertexId, level: Level) -> EdgeId {
     fb.add_non_tree_edge(cluster, cluster, level)
 }
 
-/// Removes a label added by [`add_label`], returning its level, or `None` if
-/// the label is no longer live (for instance because its vertex was removed).
+/// Removes a self-edge label added by [`add_label`], returning its level, or
+/// `None` if the label is no longer live (for instance because its vertex was
+/// removed). `remove_edge` takes the label-only path for a self-record because
+/// it has no graph path to uncover or recover.
 fn remove_label(fb: &mut FindBridge, label: EdgeId) -> Option<Level> {
     match fb.edges.get(label) {
         Some(Edge::NonTree(NonTreeEdge { level, .. })) => {
             let level = *level;
-            assert!(fb.cut_edge(label), "a live non-tree edge can be cut");
+            fb.remove_edge(label);
             Some(level)
         }
         _ => None,
@@ -943,17 +945,27 @@ fn randomized_cover_uncover() {
                     naive.uncover_path(u, v, level);
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    // The edge is identified by the vertices it was linked
-                    // between; capture that before cutting, because the
-                    // record is gone afterwards.
-                    assert_eq!(
-                        unordered(edge_endpoints(&fb, id)),
-                        unordered((verts[a], verts[b])),
-                        "the tree edge must be the one linked between these vertices"
-                    );
-                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
-                    naive.cut(a, b);
+                    let removable: Vec<_> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (a, b, _))| naive.cover_between(*a, *b) == -1)
+                        .map(|(index, _)| index)
+                        .collect();
+                    if !removable.is_empty() {
+                        let index = removable[(rng.next() as usize) % removable.len()];
+                        let (a, b, id) = edges.swap_remove(index);
+                        // The edge is identified by the vertices it was linked
+                        // between; capture that before removal, because its
+                        // record is gone afterwards.
+                        assert_eq!(
+                            unordered(edge_endpoints(&fb, id)),
+                            unordered((verts[a], verts[b])),
+                            "the tree edge must be the one linked between these vertices"
+                        );
+                        fb.remove_edge(id);
+                        assert!(!fb.connected(verts[a], verts[b]));
+                        naive.cut(a, b);
+                    }
                 }
                 3 => {
                     // Link two vertices that are in different components, if
@@ -1279,9 +1291,19 @@ fn randomized_find_size_and_labels() {
                     }
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
-                    naive.cut(a, b);
+                    let removable: Vec<_> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (a, b, _))| naive.cover_between(*a, *b) == -1)
+                        .map(|(index, _)| index)
+                        .collect();
+                    if !removable.is_empty() {
+                        let index = removable[(rng.next() as usize) % removable.len()];
+                        let (a, b, id) = edges.swap_remove(index);
+                        fb.remove_edge(id);
+                        assert!(!fb.connected(verts[a], verts[b]));
+                        naive.cut(a, b);
+                    }
                 }
                 3 => {
                     for _ in 0..8 {
@@ -1406,9 +1428,19 @@ fn incident_mask_matches_naive() {
                     }
                 }
                 2 if !edges.is_empty() => {
-                    let (a, b, id) = edges.swap_remove((rng.next() as usize) % edges.len());
-                    assert!(fb.cut_edge(id), "a live tree edge can be cut");
-                    naive.cut(a, b);
+                    let removable: Vec<_> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (a, b, _))| naive.cover_between(*a, *b) == -1)
+                        .map(|(index, _)| index)
+                        .collect();
+                    if !removable.is_empty() {
+                        let index = removable[(rng.next() as usize) % removable.len()];
+                        let (a, b, id) = edges.swap_remove(index);
+                        fb.remove_edge(id);
+                        assert!(!fb.connected(verts[a], verts[b]));
+                        naive.cut(a, b);
+                    }
                 }
                 3 => {
                     for _ in 0..8 {
@@ -1728,51 +1760,7 @@ fn link_on_connected_pair_is_a_non_tree_edge() {
 }
 
 #[test]
-fn cut_edge_on_tree_edge() {
-    let mut fb = FindBridge::new();
-    let verts = new_vertices(&mut fb, 3);
-    let ab = fb.link(verts[0], verts[1]);
-    fb.link(verts[1], verts[2]);
-    assert_eq!(fb.tree_edge_count(), 2);
-    assert!(fb.connected(verts[0], verts[2]));
-
-    assert!(fb.cut_edge(ab));
-    assert_eq!(fb.tree_edge_count(), 1);
-    assert!(!fb.connected(verts[0], verts[2]));
-    assert!(fb.connected(verts[1], verts[2]));
-    assert!(fb.edges.get(ab).is_none());
-
-    // Cutting it again reports that nothing was there.
-    assert!(!fb.cut_edge(ab));
-    assert_eq!(fb.tree_edge_count(), 1);
-}
-
-#[test]
-fn cut_edge_on_non_tree_edge() {
-    let mut fb = FindBridge::new();
-    let verts = new_vertices(&mut fb, 3);
-    fb.link(verts[0], verts[1]);
-    fb.link(verts[1], verts[2]);
-    let cycle = fb.link(verts[0], verts[2]);
-    assert!(matches!(fb.edges[cycle], Edge::NonTree(_)));
-    assert_eq!(live_non_tree_edges(&fb), [cycle].into());
-
-    let (a, b) = internal_endpoints(&fb, verts[0], verts[2]);
-    assert_eq!(fb.find_first_label(a, b, lvl(0)), Some(cycle));
-
-    assert!(fb.cut_edge(cycle));
-    assert!(fb.edges.get(cycle).is_none());
-    assert_eq!(live_non_tree_edges(&fb), BTreeSet::new());
-    assert_eq!(fb.tree_edge_count(), 2);
-    // The label is gone from both endpoints.
-    assert_eq!(fb.find_first_label(a, b, lvl(0)), None);
-
-    // The dead id reports that nothing was there.
-    assert!(!fb.cut_edge(cycle));
-}
-
-#[test]
-fn connected_and_edge_count_across_link_and_cut() {
+fn connected_and_edge_count_across_link_and_remove_edge() {
     let mut fb = FindBridge::new();
     let verts = new_vertices(&mut fb, 4);
     assert_eq!(fb.tree_edge_count(), 0);
@@ -1789,7 +1777,7 @@ fn connected_and_edge_count_across_link_and_cut() {
     assert!(fb.connected(verts[0], verts[3]));
 
     for (index, edge) in live.iter().enumerate() {
-        assert!(fb.cut_edge(*edge));
+        fb.remove_edge(*edge);
         assert_eq!(fb.tree_edge_count(), live.len() - index - 1);
         assert!(!fb.connected(verts[0], verts[3]));
     }
@@ -1890,6 +1878,8 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
     let bc = fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
     assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    let (a, c) = internal_endpoints(&fb, verts[0], verts[2]);
+    assert_eq!(fb.find_first_label(a, c, lvl(0)), Some(ca));
 
     fb.cover(verts[2], verts[0], lvl(0));
     assert!(fb.find_bridge(verts[0]).is_none());
@@ -1897,6 +1887,7 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
 
     fb.remove_edge(ca);
     assert!(fb.edges.get(ca).is_none());
+    assert_eq!(fb.find_first_label(a, c, lvl(0)), None);
     assert_eq!(fb.tree_edge_count(), 2);
     assert_eq!(fb.component_size(verts[0]), 3);
     // The cycle is gone, so every path edge is a bridge once more.
@@ -1906,6 +1897,114 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
     assert_eq!(fb.cover_level(internal(&fb, verts[0])), -1);
     assert_eq!(fb.two_edge_component_size(verts[0]), 1);
     assert_eq!(fb.find_bridge(verts[0]), Some(ab));
+}
+
+/// A self-record is only a label, so removing it must not run `Recover` on the
+/// trivial path at its vertex. In particular, doing so must not promote or
+/// otherwise re-level another label attached there. The early return in
+/// `remove_edge` exists to preserve that invariant; this covered four-vertex
+/// neighbourhood is deliberately non-trivial so the promotion branch in
+/// `recover_phase` is genuinely reachable rather than excluded by a zero size
+/// budget.
+#[test]
+fn remove_edge_on_self_record_does_not_promote_another_label() {
+    let mut fb = FindBridge::new();
+    let verts = new_vertices(&mut fb, 4);
+    fb.link(verts[0], verts[1]);
+    fb.link(verts[1], verts[2]);
+    fb.link(verts[2], verts[3]);
+    fb.cover(verts[0], verts[3], lvl(0));
+
+    let vertex = verts[1];
+    let target = add_label(&mut fb, vertex, lvl(0));
+    let survivor = add_label(&mut fb, vertex, lvl(0));
+    let internal_vertex = internal(&fb, vertex);
+
+    // `recover` uses half the level-0 neighborhood size as its budget. The
+    // level-1 size for this self-record fits, proving promotion is eligible.
+    let size_budget = fb.find_size_internal(internal_vertex, internal_vertex, 0) / 2;
+    let next_level = lvl(0)
+        .increment()
+        .expect("level 0 has a next level for the promotion branch");
+    let next_level_size = fb.find_size_internal(internal_vertex, internal_vertex, next_level.0);
+    assert!(
+        size_budget >= next_level_size,
+        "the covered neighborhood must give the surviving self-label a promotion-sized budget"
+    );
+
+    assert_eq!(
+        fb.find_first_label(internal_vertex, internal_vertex, lvl(0)),
+        Some(target),
+        "the target self-record is initially the first level-0 label"
+    );
+    assert_eq!(
+        fb.find_first_label(internal_vertex, internal_vertex, lvl(1)),
+        None,
+        "neither self-record starts at level 1"
+    );
+    let before_surviving_level = match fb.edges.get(survivor) {
+        Some(Edge::NonTree(edge)) => edge.level,
+        _ => panic!("the surviving self-record is live before deletion"),
+    };
+    assert_eq!(
+        before_surviving_level,
+        lvl(0),
+        "the surviving self-record starts at level 0"
+    );
+    let before_cover_level = fb.cover_level(internal_vertex);
+    let before_component_size = fb.component_size(vertex);
+    let before_two_edge_component_size = fb.two_edge_component_size(vertex);
+    let before_live_non_tree_edges = live_non_tree_edges(&fb);
+
+    fb.remove_edge(target);
+
+    assert!(
+        fb.edges.get(target).is_none(),
+        "the target record is removed"
+    );
+    let after_surviving_level = match fb.edges.get(survivor) {
+        Some(Edge::NonTree(edge)) => edge.level,
+        _ => panic!("the surviving self-record remains live after deletion"),
+    };
+    assert_eq!(
+        after_surviving_level, before_surviving_level,
+        "removing a self-record must leave the other record's stored level unchanged"
+    );
+    assert_eq!(
+        fb.find_first_label(internal_vertex, internal_vertex, lvl(0)),
+        Some(survivor),
+        "the surviving label remains visible at its original level 0"
+    );
+    assert_eq!(
+        fb.find_first_label(internal_vertex, internal_vertex, lvl(1)),
+        None,
+        "the surviving label must not be promoted and disappear from level 0"
+    );
+    assert_eq!(
+        fb.cover_level(internal_vertex),
+        before_cover_level,
+        "removing a label-only self-record does not change the vertex cover level"
+    );
+    assert_eq!(
+        fb.component_size(vertex),
+        before_component_size,
+        "removing a self-record does not change the component size"
+    );
+    assert_eq!(
+        fb.two_edge_component_size(vertex),
+        before_two_edge_component_size,
+        "removing a self-record does not change the two-edge component size"
+    );
+    assert_eq!(
+        live_non_tree_edges(&fb),
+        [survivor].into(),
+        "only the surviving self-record remains live"
+    );
+    assert_eq!(
+        before_live_non_tree_edges,
+        [target, survivor].into(),
+        "the initial live non-tree set contains exactly the two self-records"
+    );
 }
 
 #[test]
@@ -1946,12 +2045,8 @@ fn remove_edge_on_covered_tree_edge_frees_deleted_edge_id() {
     fb.remove_edge(ab);
 
     assert!(
-        fb.edges.get(ab).is_none(),
-        "the deleted edge slot must be freed"
-    );
-    assert!(
-        !fb.cut_edge(ab),
-        "a deleted edge cannot be cut a second time"
+        fb.endpoints(ab).is_none(),
+        "endpoints is the public liveness signal for a freed edge handle"
     );
 }
 
