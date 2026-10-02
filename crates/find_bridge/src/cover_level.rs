@@ -1058,12 +1058,18 @@ impl FindBridge {
             "FindBridge::remove_vertex requires no incident forest edges"
         );
 
-        let top_tree::ClusterWeight::Label(edges) = self.top_tree.leaf_weight(cluster) else {
-            panic!("FindBridge::remove_vertex requires a label leaf cluster")
-        };
+        let edges = self
+            .top_tree
+            .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
 
         for edge in edges.edges() {
-            self.edges.remove(edge);
+            if let Edge::NonTree(NonTreeEdge { u, v, level }) = self.edges[edge] {
+                let w = if u == cluster { v } else { u };
+                self.remove_edge_labels(edge, level, [w]);
+                self.edges
+                    .remove(edge)
+                    .expect("edge slot is live, we just accessed it.");
+            }
         }
 
         let _ = self
