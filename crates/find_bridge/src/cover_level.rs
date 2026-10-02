@@ -1118,7 +1118,7 @@ impl FindBridge {
         match self.edges.remove(edge_id) {
             Some(Edge::NonTree(non_tree_edge)) => {
                 let level = non_tree_edge.level;
-                self.remove_edge_labels(edge_id, level, non_tree_edge.u, non_tree_edge.v);
+                self.remove_edge_labels(edge_id, level, [non_tree_edge.u, non_tree_edge.v]);
 
                 true
             }
@@ -1163,10 +1163,9 @@ impl FindBridge {
         &mut self,
         edge_id: EdgeId,
         level: Level,
-        u: top_tree::ClusterId,
-        v: top_tree::ClusterId,
+        ids: impl IntoIterator<Item = top_tree::ClusterId>,
     ) {
-        for cluster in [u, v] {
+        for cluster in ids.into_iter() {
             if self
                 .top_tree
                 .leaf_weight_mut(cluster)
@@ -1225,7 +1224,7 @@ impl FindBridge {
                 (endpoints, level)
             }
             Edge::NonTree(NonTreeEdge { u, v, level }) => {
-                self.remove_edge_labels(edge_id, level, u, v);
+                self.remove_edge_labels(edge_id, level, [u, v]);
                 self.edges.remove(edge_id);
 
                 let (u, v) = {
@@ -1310,7 +1309,7 @@ impl FindBridge {
             panic!("replacement edge must be a non-tree edge")
         };
 
-        self.remove_edge_labels(replacement, level, cr, cq);
+        self.remove_edge_labels(replacement, level, [cr, cq]);
 
         let (r, q) = (
             self.cluster_vertex(cr)
@@ -1405,7 +1404,7 @@ impl FindBridge {
             if let Some(next_level) = level.increment()
                 && self.find_size_internal(q, r, next_level.0) <= size
             {
-                self.remove_edge_labels(edge, level, cr, cq);
+                self.remove_edge_labels(edge, level, [cr, cq]);
                 self.add_edge_labels(edge, next_level, cr, cq);
 
                 self.edges.get_mut(edge).unwrap().set_level(next_level);
