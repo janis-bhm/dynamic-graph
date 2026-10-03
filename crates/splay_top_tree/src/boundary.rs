@@ -1,5 +1,37 @@
 use crate::tree::VertexId;
 
+pub struct PackedBoundaryVertices {
+    pub left: Option<VertexId>,
+    pub right: Option<VertexId>,
+}
+
+impl PackedBoundaryVertices {
+    fn unpack(&self) -> BoundaryVertices {
+        match (self.left, self.right) {
+            (None, None) => BoundaryVertices::None,
+            (Some(v), None) | (None, Some(v)) => BoundaryVertices::One(v),
+            (Some(left), Some(right)) => BoundaryVertices::Two { left, right },
+        }
+    }
+
+    fn pack(boundary: BoundaryVertices) -> Self {
+        match boundary {
+            BoundaryVertices::None => Self {
+                left: None,
+                right: None,
+            },
+            BoundaryVertices::One(v) => Self {
+                left: Some(v),
+                right: None,
+            },
+            BoundaryVertices::Two { left, right } => Self {
+                left: Some(left),
+                right: Some(right),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryVertices {
     None,
