@@ -407,6 +407,10 @@ where
     pub fn label_count(&self) -> usize {
         self.tree.label_count()
     }
+
+    pub fn vertex_count(&self) -> usize {
+        self.tree.node_count()
+    }
 }
 
 impl<S, N, E> TopTree<S, N, E>
