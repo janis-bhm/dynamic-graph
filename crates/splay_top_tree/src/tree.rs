@@ -88,6 +88,7 @@ impl<V, E, L> Tree<V, E, L> {
         }
     }
 
+    /// Adds a new vertex to the tree with the given weight and returns its `VertexId`.
     pub fn add_vertex(&mut self, weight: V) -> VertexId {
         let vertex_id = VertexId::new_from_usize(self.vertices.len(), self.generation.current());
         self.vertices.push(Vertex {
@@ -100,6 +101,13 @@ impl<V, E, L> Tree<V, E, L> {
         vertex_id
     }
 
+    /// Adds a new edge between the given vertices with the given weight and
+    /// returns its `EdgeId`.  The vertices must be distinct and valid, and the
+    /// caller is responsible for ensuring that the two vertices are not already
+    /// part of the same tree.
+    ///
+    /// # Panics
+    /// Panics if the vertices are the same or if either vertex is invalid.
     pub fn add_edge(&mut self, v: VertexId, w: VertexId, weight: E) -> EdgeId {
         self.assert_valid_vid(v);
         self.assert_valid_vid(w);
@@ -132,6 +140,10 @@ impl<V, E, L> Tree<V, E, L> {
         edge_id
     }
 
+    /// Adds a new label to the given vertex with the given weight and returns its `LabelId`.
+    ///
+    /// # Panics
+    /// Panics if the vertex is invalid.
     pub fn add_label(&mut self, vertex: VertexId, weight: L) -> LabelId {
         self.assert_valid_vid(vertex);
 
@@ -153,6 +165,10 @@ impl<V, E, L> Tree<V, E, L> {
         label_id
     }
 
+    /// Returns the `EdgeId` of the edge connecting the given vertices, if it exists.
+    ///
+    /// # Panics
+    /// Panics if either vertex is invalid.
     pub fn find_edge_with_endpoints(&self, v: VertexId, w: VertexId) -> Option<EdgeId> {
         self.assert_valid_vid(v);
         self.assert_valid_vid(w);
@@ -166,11 +182,19 @@ impl<V, E, L> Tree<V, E, L> {
         None
     }
 
+    /// Returns the endpoints of the edge with the given `EdgeId`.
+    ///
+    /// # Panics
+    /// Panics if `id` is invalid.
     pub fn edge_endpoints(&self, id: EdgeId) -> Endpoints {
         assert!(self.is_valid_edge(id), "EdgeId {:?} is invalid", id);
         self.edges[id.index()].endpoints
     }
 
+    /// Returns the weight of the vertex with the given `VertexId`.
+    ///
+    /// # Panics
+    /// Panics if `id` is invalid.
     pub fn vertex_weight(&self, id: VertexId) -> &V {
         self.assert_valid_vid(id);
         &self.vertices[id.index()].weight
@@ -270,6 +294,8 @@ impl<V, E, L> Tree<V, E, L> {
         );
     }
 
+    /// Removes the vertex with the given `VertexId` from the tree, along with
+    /// all incident edges and labels.
     pub fn remove_vertex(&mut self, vertex: VertexId) -> VertexRemoval<'_, V, E, L> {
         self.assert_valid_vid(vertex);
         VertexRemoval::new(self, vertex)
