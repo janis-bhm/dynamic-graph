@@ -8,25 +8,24 @@
 )]
 #![allow(dead_code)]
 
-use std::{
-    mem,
-    ptr::{self, NonNull},
-};
+use std::ptr::{self, NonNull};
 
-use crate::{
-    tree::{EdgeEndpoints, EdgeKey, OwningEdgeKey, Tree},
-    util::TaggedPtr,
-};
+use crate::util::TaggedPtr;
 
 pub use index::VertexId;
 
 mod boundary;
 mod index;
 mod non_max;
+mod summary;
 #[cfg(test)]
 mod tests;
 mod tree;
 mod util;
+
+struct ClusterId(NonNull<Node<()>>);
+
+type Tree<W> = tree::Tree<(), NonNull<LeafNode<W>>, NonNull<LabelNode<W>>>;
 
 #[repr(u8)]
 enum NodeKind {
@@ -126,24 +125,17 @@ impl<W> Node<W> {
 #[repr(C)]
 struct LabelNode<W> {
     node: Node<W>,
-    vertex: Index,
-    label: Index,
+    label: tree::LabelId,
 }
 
 #[repr(C)]
 struct LeafNode<W> {
     node: Node<W>,
-    edge: OwningEdgeKey,
+    edge: tree::EdgeId,
 }
 
 impl<W> LabelNode<W> {
-    fn init(
-        node: NonNull<LabelNode<W>>,
-        weight: W,
-        vertex: Index,
-        label: Index,
-        num_boundary: usize,
-    ) {
+    fn init(node: NonNull<LabelNode<W>>, weight: W, label: tree::LabelId, num_boundary: usize) {
         unsafe {
             let uninit = node.as_uninit_mut();
             uninit.write(LabelNode {
@@ -151,7 +143,6 @@ impl<W> LabelNode<W> {
                     parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
                     weight,
                 },
-                vertex,
                 label,
             });
 
@@ -161,7 +152,7 @@ impl<W> LabelNode<W> {
 }
 
 impl<W> LeafNode<W> {
-    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: OwningEdgeKey, num_boundary: usize) {
+    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: tree::EdgeId, num_boundary: usize) {
         unsafe {
             let uninit = node.as_uninit_mut();
             uninit.write(LeafNode {
@@ -177,10 +168,41 @@ impl<W> LeafNode<W> {
     }
 }
 
+struct Children<W> {
+    left: NonNull<Node<W>>,
+    right: NonNull<Node<W>>,
+}
+
+impl<W> IntoIterator for &Children<W> {
+    type Item = NonNull<Node<W>>;
+    type IntoIter = std::array::IntoIter<Self::Item, 2>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [self.left, self.right].into_iter()
+    }
+}
+
+impl<W> Children<W> {
+    fn flip(&mut self) {
+        std::mem::swap(&mut self.left, &mut self.right);
+    }
+
+    fn get(&self, left: bool) -> NonNull<Node<W>> {
+        if left { self.left } else { self.right }
+    }
+    fn get_mut(&mut self, left: bool) -> &mut NonNull<Node<W>> {
+        if left {
+            &mut self.left
+        } else {
+            &mut self.right
+        }
+    }
+}
+
 #[repr(C)]
 struct InternalNode<W> {
     node: Node<W>,
-    children: [NonNull<Node<W>>; 2],
+    children: Children<W>,
 }
 
 impl<W> InternalNode<W> {
@@ -195,7 +217,7 @@ impl<W> InternalNode<W> {
                 parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
                 weight,
             },
-            children: [left, right],
+            children: Children { left, right },
         });
         node.node.set_num_boundary(num_boundary);
 
@@ -358,10 +380,10 @@ impl<W> Node<W> {
     unsafe fn sibling(&self) -> Option<NonNull<Node<W>>> {
         self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
             let self_ptr = NonNull::from(self);
-            if p.children[0] == self_ptr {
-                p.children[1]
+            if p.children.left == self_ptr {
+                p.children.right
             } else {
-                p.children[0]
+                p.children.left
             }
         })
     }
@@ -369,7 +391,7 @@ impl<W> Node<W> {
     unsafe fn is_left_child(&self) -> Option<bool> {
         self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
             let self_ptr = NonNull::from(self);
-            p.children[0] == self_ptr
+            p.children.left == self_ptr
         })
     }
 
@@ -654,28 +676,28 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    fn has_left_boundary(&self, root: &Tree<W>) -> bool {
+    fn has_left_boundary(&self, root: &TopTree<W>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
-                let v = root.endpoints(leaf.edge())[self.is_flipped()];
+                let v = root.tree.edge_endpoints(leaf.edge())[self.is_flipped()];
 
                 root.is_boundary_vertex(v)
             }
-            Label(label) => root.is_boundary_vertex(label.vertex()),
+            Label(label) => root.is_boundary_vertex(root.tree.label_vertex(label.label())),
             Internal(internal) => internal.child(!self.is_flipped()).is_path(),
         }
     }
 
-    fn has_right_boundary(&self, root: &Tree<W>) -> bool {
+    fn has_right_boundary(&self, root: &TopTree<W>) -> bool {
         use LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
-                let v = root.endpoints(leaf.edge())[!self.is_flipped()];
+                let v = root.tree.edge_endpoints(leaf.edge())[!self.is_flipped()];
 
                 root.is_boundary_vertex(v)
             }
-            Label(label) => root.is_boundary_vertex(label.vertex()),
+            Label(label) => root.is_boundary_vertex(root.tree.label_vertex(label.label())),
             Internal(internal) => internal.child(self.is_flipped()).is_path(),
         }
     }
@@ -718,21 +740,24 @@ impl<W, NodeType> Handle<W, NodeType> {
 }
 
 impl<W> Handle<W, marker::Label> {
-    fn label(&self) -> Index {
+    fn label(&self) -> tree::LabelId {
         unsafe { self.node.cast::<LabelNode<W>>().as_ref().label }
-    }
-    fn vertex(&self) -> Index {
-        unsafe { self.node.cast::<LabelNode<W>>().as_ref().vertex }
     }
 }
 
 impl<W> Handle<W, marker::Leaf> {
-    fn endpoints(&self) -> [Index; 2] {
+    fn endpoints(&self, root: &TopTree<W>) -> [tree::VertexId; 2] {
         match self.force() {
             LeafOrInternal::Edge(edge) => unsafe {
-                edge.node.cast::<LeafNode<W>>().as_ref().edge.endpoints()
+                let edge = edge.node.cast::<LeafNode<W>>().as_ref().edge;
+
+                root.tree.edge_endpoints(edge).0
             },
-            LeafOrInternal::Label(label) => [label.vertex(), label.vertex()],
+            LeafOrInternal::Label(label) => {
+                let label = label.label();
+                let vertex = root.tree.label_vertex(label);
+                [vertex, vertex]
+            }
             LeafOrInternal::Internal(_) => {
                 unreachable!("Handle<W, marker::Leaf> cannot be Internal")
             }
@@ -741,8 +766,8 @@ impl<W> Handle<W, marker::Leaf> {
 }
 
 impl<W> Handle<W, marker::Edge> {
-    fn edge(&self) -> &OwningEdgeKey {
-        unsafe { &self.node.cast::<LeafNode<W>>().as_ref().edge }
+    fn edge(&self) -> tree::EdgeId {
+        unsafe { self.node.cast::<LeafNode<W>>().as_ref().edge }
     }
 }
 
@@ -753,9 +778,9 @@ impl<W> Handle<W, marker::Internal> {
                 let node = self.node.cast::<InternalNode<W>>().as_mut();
 
                 node.set_flipped(false);
-                node.children.swap(0, 1);
+                node.children.flip();
 
-                for mut child in node.children {
+                for mut child in &node.children {
                     child.as_mut().toggle_flipped();
                 }
             }
@@ -773,8 +798,8 @@ impl<W> Handle<W, marker::Internal> {
         unsafe {
             let internal = self.node.cast::<InternalNode<W>>().as_ref();
             [
-                Handle::new(internal.children[0]),
-                Handle::new(internal.children[1]),
+                Handle::new(internal.children.left),
+                Handle::new(internal.children.right),
             ]
         }
     }
@@ -784,13 +809,13 @@ impl<W> Handle<W, marker::Internal> {
             let internal = self.node.cast::<InternalNode<W>>().as_ref();
             if self.is_flipped() {
                 [
-                    Handle::new(internal.children[1]),
-                    Handle::new(internal.children[0]),
+                    Handle::new(internal.children.right),
+                    Handle::new(internal.children.left),
                 ]
             } else {
                 [
-                    Handle::new(internal.children[0]),
-                    Handle::new(internal.children[1]),
+                    Handle::new(internal.children.left),
+                    Handle::new(internal.children.right),
                 ]
             }
         }
@@ -799,14 +824,14 @@ impl<W> Handle<W, marker::Internal> {
     fn child(&self, left: bool) -> Handle<W, marker::Internal> {
         unsafe {
             let internal = self.node.cast::<InternalNode<W>>().as_ref();
-            Handle::new(internal.children[(!left) as usize])
+            Handle::new(internal.children.get(left))
         }
     }
 
     fn set_child(&mut self, mut child: NonNull<Node<W>>, left: bool) {
         unsafe {
             let internal = self.node.cast::<InternalNode<W>>().as_mut();
-            internal.children[(!left) as usize] = child;
+            *internal.children.get_mut(left) = child;
             child
                 .as_mut()
                 .set_parent(Some(self.node.cast::<InternalNode<W>>()));
@@ -829,47 +854,44 @@ impl<W> Handle<W, marker::Internal> {
 
 fn incident_leaves<W>(
     root: &Tree<W>,
-    v: Index,
+    v: tree::VertexId,
 ) -> impl Iterator<Item = Handle<W, marker::Leaf>> + '_ {
-    root.vertices.get(&v).into_iter().flat_map(|v| {
-        let labels = v
-            .labels
-            .iter()
-            .filter_map(|key| root.labels.get(key))
-            .map(|label| Handle::<W, marker::Leaf>::new(label.cast()));
-        v.edges
-            .iter()
-            .filter_map(|key| root.edges.get(key))
-            .map(|edge| Handle::<W, marker::Leaf>::new(edge.edge_node.cast()))
-            .chain(labels)
-    })
+    root.incident_label_weights(v)
+        .map(|l| Handle::<W, marker::Leaf>::new(l.cast()))
+        .chain(
+            root.incident_edge_weights(v)
+                .map(|e| Handle::<W, marker::Leaf>::new(e.cast())),
+        )
 }
 
 /// Finds the least common ancestor of all leaves incident to `v` in the tree rooted at `root`.
-pub(crate) fn find_consuming_node<W>(root: &Tree<W>, v: Index) -> Option<Handle<W, marker::Either>>
+pub(crate) fn find_consuming_node<W>(
+    root: &TopTree<W>,
+    v: tree::VertexId,
+) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
-    let node = incident_leaves(root, v).next()?;
+    let node = incident_leaves(&root.tree, v).next()?;
     unsafe { ptr::read(&node) }.semi_splay();
 
     // if the vertex has exactly one incident edge, then the consuming node is the incident leaf.
-    if root.has_at_most_one_incident_element(v) {
+    if root.tree.is_exactly_degree_n(v, 1) {
         return Some(node.forget_type());
     }
 
     let endpoints = match node.force() {
-        LeafOrInternal::Edge(edge) => root.endpoints(edge.edge()),
-        LeafOrInternal::Label(label) => EdgeEndpoints {
-            left: label.vertex(),
-            right: label.vertex(),
-        },
+        LeafOrInternal::Edge(edge) => root.tree.edge_endpoints(edge.edge()),
+        LeafOrInternal::Label(label) => {
+            let vertex = root.tree.label_vertex(label.label());
+            tree::Endpoints([vertex, vertex])
+        }
         LeafOrInternal::Internal(_) => unreachable!("node must be a leaf"),
     };
 
     let flip = node.is_flipped();
-    let mut is_left = (endpoints.left == v) != flip;
-    let mut is_right = (endpoints.right == v) != flip;
+    let mut is_left = (endpoints.left() == v) != flip;
+    let mut is_right = (endpoints.right() == v) != flip;
     let mut is_middle = false;
 
     let mut last_middle_node = None;
@@ -898,7 +920,10 @@ where
     last_middle_node
 }
 
-pub(crate) fn expose<W>(v: Index, root: &mut Tree<W>) -> Option<Handle<W, marker::Either>>
+pub(crate) fn expose<W>(
+    v: tree::VertexId,
+    root: &mut TopTree<W>,
+) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
@@ -980,18 +1005,21 @@ where
             let consuming_node = prepare_expose(consuming_node);
 
             let node = expose_prepared(consuming_node);
-            root.expose_vertex(v);
+            root.exposed.set(v.index(), true);
 
             Some(node)
         }
         None => {
-            root.expose_vertex(v);
+            root.exposed.set(v.index(), true);
             None
         }
     }
 }
 
-pub(crate) fn deexpose<W>(v: Index, tree: &mut Tree<W>) -> Option<Handle<W, marker::Either>>
+pub(crate) fn deexpose<W>(
+    v: tree::VertexId,
+    tree: &mut TopTree<W>,
+) -> Option<Handle<W, marker::Either>>
 where
     W: Reduce,
 {
@@ -1004,14 +1032,17 @@ where
         root = Some(some_node);
     }
 
-    if let Some(vert) = tree.vertices.get_mut(&v) {
-        vert.exposed = false;
-    }
+    tree.exposed.set(v.index(), false);
 
     root
 }
 
-pub(crate) fn link<W>(u: Index, v: Index, weight: W, tree: &mut Tree<W>) -> NonNull<Node<W>>
+pub(crate) fn link<W>(
+    u: tree::VertexId,
+    v: tree::VertexId,
+    weight: W,
+    tree: &mut TopTree<W>,
+) -> NonNull<Node<W>>
 where
     W: Reduce,
 {
@@ -1021,7 +1052,7 @@ where
     {
         tu.toggle_flipped();
     }
-    tree.set_vertex_exposed(u, false);
+    tree.exposed.set(u.index(), false);
 
     let mut rv = expose(v, tree);
     if let Some(ref mut tv) = rv
@@ -1029,18 +1060,18 @@ where
     {
         tv.toggle_flipped();
     }
-    tree.set_vertex_exposed(v, false);
+    tree.exposed.set(u.index(), false);
 
-    let node = Box::into_non_null(Box::new_uninit()).cast_init();
-    let edge = tree.add_edge(u, v, node);
+    let leaf = Box::into_non_null(Box::new_uninit()).cast_init();
+    let edge = tree.tree.add_edge(u, v, leaf);
     LeafNode::init(
-        node,
+        leaf,
         weight,
         edge,
         ru.is_some() as usize + rv.is_some() as usize,
     );
 
-    let mut node = node.cast::<Node<W>>();
+    let mut node = leaf.cast::<Node<W>>();
     if let Some(ru) = ru {
         let left = ru;
         let right = node.cast::<Node<W>>();
@@ -1060,17 +1091,17 @@ where
             let wr = &right.node.as_ref().weight;
             W::reduce(wl, wr)
         };
-        node = InternalNode::alloc(weight, left, right.node, 0).cast();
+        InternalNode::alloc(weight, left, right.node, 0);
     }
 
-    node
+    leaf.cast()
 }
 
 #[expect(clippy::type_complexity)]
 pub(crate) fn cut<W>(
-    u: Index,
-    v: Index,
-    tree: &mut Tree<W>,
+    u: tree::VertexId,
+    v: tree::VertexId,
+    tree: &mut TopTree<W>,
 ) -> (
     Option<Handle<W, marker::Either>>,
     Option<Handle<W, marker::Either>>,
@@ -1078,21 +1109,23 @@ pub(crate) fn cut<W>(
 where
     W: Reduce,
 {
-    let edge = EdgeKey::<()>::new(u, v);
-    let Some(edge) = tree.try_edge(&edge) else {
+    let Some((id, edge)) = tree
+        .tree
+        .find_edge_with_endpoints(u, v)
+        .map(|id| (id, tree.tree.edge(id)))
+    else {
         return (None, None);
     };
 
-    let edge = Handle::new_edge(edge.edge_node.cast::<Node<W>>());
+    let edge_handle = Handle::new_edge(edge.weight.cast::<Node<W>>());
 
-    let key = unsafe { ptr::read(edge.edge()) };
-    unsafe { ptr::read(&edge) }.full_splay();
-    edge.delete_all_ancestors();
+    unsafe { ptr::read(&edge_handle) }.full_splay();
+    edge_handle.delete_all_ancestors();
 
-    _ = tree.remove_edge(key);
+    _ = tree.tree.remove_edge(id);
 
-    tree.expose_vertex(u);
-    tree.expose_vertex(v);
+    tree.exposed.set(u.index(), true);
+    tree.exposed.set(v.index(), true);
 
     let ru = deexpose(u, tree);
     let rv = deexpose(v, tree);
@@ -1100,71 +1133,75 @@ where
     (ru, rv)
 }
 
-pub(crate) fn attach<W>(v: Index, weight: W, tree: &mut Tree<W>) -> (Index, NonNull<Node<W>>)
-where
-    W: Reduce,
-{
-    let mut rv = expose(v, tree);
-    if let Some(ref mut tv) = rv
-        && Handle::has_left_boundary(tv, tree)
-    {
-        tv.toggle_flipped();
-    }
-    tree.set_vertex_exposed(v, false);
+// pub(crate) fn attach<W>(
+//     v: tree::VertexId,
+//     weight: W,
+//     tree: &mut TopTree<W>,
+// ) -> (tree::LabelId, NonNull<Node<W>>)
+// where
+//     W: Reduce,
+// {
+//     let mut rv = expose(v, tree);
+//     if let Some(ref mut tv) = rv
+//         && Handle::has_left_boundary(tv, tree)
+//     {
+//         tv.toggle_flipped();
+//     }
+//     tree.exposed.set(v.index(), false);
 
-    let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
-    let label = tree.add_vertex_label(v, node.cast()).expect("asdf");
-    LabelNode::init(node, weight, v, label, usize::from(rv.is_some()));
+//     let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
+//     let label = tree.tree.add_label(v, node.cast());
+//     LabelNode::init(node, weight, label, usize::from(rv.is_some()));
 
-    let root: NonNull<Node<W>> = match rv {
-        Some(rv) => {
-            let left = rv;
-            let right = node.cast::<Node<W>>();
-            let weight = unsafe {
-                let wl = &left.node.as_ref().weight;
-                let wr = &right.as_ref().weight;
-                W::reduce(wl, wr)
-            };
-            InternalNode::alloc(weight, left.node, right, 0).cast()
-        }
-        None => node.cast(),
-    };
+//     let root: NonNull<Node<W>> = match rv {
+//         Some(rv) => {
+//             let left = rv;
+//             let right = node.cast::<Node<W>>();
+//             let weight = unsafe {
+//                 let wl = &left.node.as_ref().weight;
+//                 let wr = &right.as_ref().weight;
+//                 W::reduce(wl, wr)
+//             };
+//             InternalNode::alloc(weight, left.node, right, 0).cast()
+//         }
+//         None => node.cast(),
+//     };
 
-    (label, root)
-}
+//     (label, root)
+// }
 
-pub(crate) fn detach<W>(v: Index, tree: &mut Tree<W>) {
-    // labels are never path components, so removing them can never disconnect the tree.
-    // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
-    let label = tree.labels.remove(&v).expect("label must exist");
-    let label_handle = Handle::<W, marker::Label>::new(label.cast());
-    if let Some(parent) = label_handle.parent() {
-        let mut sibling = label_handle.sibling().expect("label must have a sibling");
+// pub(crate) fn detach<W>(v: tree::LabelId, tree: &mut Tree<W>) {
+//     // labels are never path components, so removing them can never disconnect the tree.
+//     // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
+//     let (label, swap) = tree.remove_label(v);
+//     let label_handle = Handle::<W, marker::Label>::new(label.cast());
+//     if let Some(parent) = label_handle.parent() {
+//         let mut sibling = label_handle.sibling().expect("label must have a sibling");
 
-        if let Some(mut gp) = parent.parent() {
-            let parent_is_left = parent.is_left_child().expect("parent has parent");
-            // we need to flip the sibling if it is on the opposite side of the parent.
-            // if the parent was flipped, then flip the sibling (again).
-            let flip_sibling = (sibling.is_left_child().expect("sibling has parent")
-                != parent_is_left)
-                ^ parent.is_flipped();
+//         if let Some(mut gp) = parent.parent() {
+//             let parent_is_left = parent.is_left_child().expect("parent has parent");
+//             // we need to flip the sibling if it is on the opposite side of the parent.
+//             // if the parent was flipped, then flip the sibling (again).
+//             let flip_sibling = (sibling.is_left_child().expect("sibling has parent")
+//                 != parent_is_left)
+//                 ^ parent.is_flipped();
 
-            if flip_sibling {
-                sibling.toggle_flipped();
-            }
+//             if flip_sibling {
+//                 sibling.toggle_flipped();
+//             }
 
-            gp.set_child(sibling.node, parent_is_left);
-        } else {
-            // parent is root, so we just make the sibling the new root.
-            sibling.set_parent(None);
-        }
+//             gp.set_child(sibling.node, parent_is_left);
+//         } else {
+//             // parent is root, so we just make the sibling the new root.
+//             sibling.set_parent(None);
+//         }
 
-        unsafe {
-            Node::<W>::dealloc(parent.node);
-            Node::<W>::dealloc(label_handle.node);
-        }
-    }
-}
+//         unsafe {
+//             Node::<W>::dealloc(parent.node);
+//             Node::<W>::dealloc(label_handle.node);
+//         }
+//     }
+// }
 
 enum LeafOrInternal<T, V, U> {
     Edge(T),
@@ -1193,113 +1230,20 @@ impl<'a, W> Entry<'a, W> {
 
 pub struct TopTree<W> {
     tree: Tree<W>,
+    // indexed by tree vertex index, true if the vertex is exposed in the top tree.
+    exposed: util::BitVec,
 }
 
 impl<W> TopTree<W> {
     pub fn new() -> Self {
-        Self { tree: Tree::new() }
-    }
-
-    pub fn add_vertex(&mut self) -> Index {
-        self.tree.add_vertex()
-    }
-
-    pub fn attach(&mut self, index: Index, label: W)
-    where
-        W: Reduce,
-    {
-        attach(index, label, &mut self.tree);
-    }
-
-    pub fn remove_vertex(&mut self, index: Index)
-    where
-        W: Reduce,
-    {
-        use std::collections::btree_map::Entry::Occupied;
-        let Occupied(mut entry) = self.tree.vertices.entry(index) else {
-            return;
-        };
-
-        let edges = mem::take(&mut entry.get_mut().edges);
-        let labels = mem::take(&mut entry.get_mut().labels);
-
-        for edge in edges {
-            let [u, v] = edge.endpoints();
-            cut(u, v, &mut self.tree);
+        Self {
+            tree: Tree::new(),
+            exposed: util::BitVec::new(),
         }
-
-        for label in labels {
-            detach(label, &mut self.tree);
-        }
-
-        self.tree.vertices.remove(&index);
     }
 
-    pub fn link(&mut self, u: Index, v: Index, weight: W)
-    where
-        W: Reduce,
-    {
-        link(u, v, weight, &mut self.tree);
-    }
-
-    pub fn cut(&mut self, u: Index, v: Index) -> (Option<Entry<'_, W>>, Option<Entry<'_, W>>)
-    where
-        W: Reduce,
-    {
-        let (ru, rv) = cut(u, v, &mut self.tree);
-
-        let ru = ru.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        });
-        let rv = rv.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        });
-
-        (ru, rv)
-    }
-
-    pub fn expose(&mut self, v: Index) -> Option<Entry<'_, W>>
-    where
-        W: Reduce,
-    {
-        let node = expose(v, &mut self.tree);
-        node.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        })
-    }
-
-    pub fn expose2(&mut self, u: Index, v: Index) -> (Option<Entry<'_, W>>, Option<Entry<'_, W>>)
-    where
-        W: Reduce,
-    {
-        let ru = expose(u, &mut self.tree);
-        _ = ru.as_ref().map(|h| assert!(h.is_point()));
-        let rv = expose(v, &mut self.tree);
-
-        let ru = ru.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        });
-        let rv = rv.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        });
-
-        (ru, rv)
-    }
-
-    pub fn deexpose(&mut self, v: Index) -> Option<Entry<'_, W>>
-    where
-        W: Reduce,
-    {
-        let node = deexpose(v, &mut self.tree);
-        node.map(|h| Entry {
-            handle: h,
-            _marker: core::marker::PhantomData,
-        })
+    fn is_boundary_vertex(&self, v: tree::VertexId) -> bool {
+        self.exposed.get(v.index()) || self.tree.is_at_least_degree_n(v, 2)
     }
 }
 
@@ -1311,299 +1255,12 @@ impl<W> Default for TopTree<W> {
 
 impl<W> Drop for TopTree<W> {
     fn drop(&mut self) {
-        self.tree.edges.retain(|_, edge| {
-            Handle::new_edge(edge.edge_node.cast::<Node<W>>()).delete_all_ancestors();
+        self.tree.edges.retain(|edge| {
+            Handle::new_edge(edge.weight.cast::<Node<W>>()).delete_all_ancestors();
 
-            unsafe { Node::<W>::dealloc(edge.edge_node.cast()) };
+            unsafe { Node::<W>::dealloc(edge.weight.cast()) };
             true
         });
-    }
-}
-
-mod tree {
-    use std::{
-        collections::BTreeMap,
-        marker::PhantomData,
-        ptr::{self, NonNull},
-    };
-
-    use crate::{LabelNode, LeafNode, index::Index, util::WithDropExt};
-
-    use super::index::IndexAllocator;
-
-    pub struct Tree<W> {
-        index_allocator: IndexAllocator,
-        pub vertices: BTreeMap<Index, Vertex>,
-        pub edges: BTreeMap<EdgeKey<Private>, Edge<W>>,
-        pub labels: BTreeMap<Index, NonNull<LabelNode<W>>>,
-    }
-
-    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Private(pub(self) ());
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct EdgeKey<T = ()>(pub [Index; 2], PhantomData<T>);
-
-    pub type OwningEdgeKey = EdgeKey<Private>;
-
-    impl<T> EdgeKey<T> {
-        pub fn new(u: Index, v: Index) -> EdgeKey<T> {
-            let mut inner = [u, v];
-            inner.sort();
-            Self(inner, unsafe { std::mem::zeroed() })
-        }
-
-        unsafe fn transmute<U>(self) -> EdgeKey<U> {
-            EdgeKey(self.0, PhantomData)
-        }
-
-        unsafe fn transmute_ref<U>(&self) -> &EdgeKey<U> {
-            unsafe { &*(self as *const EdgeKey<T> as *const EdgeKey<U>) }
-        }
-
-        pub fn endpoints(&self) -> [Index; 2] {
-            self.0
-        }
-    }
-
-    impl EdgeKey<Private> {
-        fn new_private(u: Index, v: Index) -> EdgeKey<Private> {
-            let mut inner = [u, v];
-            inner.sort();
-            Self(inner, PhantomData)
-        }
-
-        pub fn downcast(&self) -> EdgeKey<()> {
-            unsafe { *self.transmute_ref() }
-        }
-    }
-
-    #[derive(Default)]
-    pub struct Vertex {
-        pub(crate) edges: Vec<EdgeKey<Private>>,
-        pub(crate) labels: Vec<Index>,
-        pub(crate) exposed: bool,
-    }
-
-    pub struct Edge<W> {
-        pub edge_node: NonNull<LeafNode<W>>,
-        pub endpoints: [Index; 2],
-    }
-
-    #[derive(Debug)]
-    pub struct EdgeEndpoints {
-        pub left: Index,
-        pub right: Index,
-    }
-
-    pub enum EdgeOrLabel<W> {
-        Edge(Edge<W>),
-        Label(Index),
-    }
-
-    impl core::ops::Index<bool> for EdgeEndpoints {
-        type Output = Index;
-
-        fn index(&self, index: bool) -> &Self::Output {
-            if index { &self.right } else { &self.left }
-        }
-    }
-
-    impl<W> Tree<W> {
-        pub fn new() -> Self {
-            Self {
-                index_allocator: IndexAllocator::new(),
-                vertices: BTreeMap::new(),
-                edges: BTreeMap::new(),
-                labels: BTreeMap::new(),
-            }
-        }
-
-        pub fn endpoints(&self, edge: &EdgeKey<Private>) -> EdgeEndpoints {
-            self.edges
-                .get(edge)
-                .map(|e| EdgeEndpoints {
-                    left: e.endpoints[0],
-                    right: e.endpoints[1],
-                })
-                .unwrap()
-        }
-
-        pub fn edge(&self, edge: &EdgeKey<Private>) -> &Edge<W> {
-            self.edges.get(edge).expect("edge must exist in tree")
-        }
-
-        pub fn try_edge<T>(&self, edge: &EdgeKey<T>) -> Option<&Edge<W>> {
-            self.edges.get(unsafe { edge.transmute_ref::<Private>() })
-        }
-
-        pub fn is_boundary_vertex(&self, index: Index) -> bool {
-            self.vertices.get(&index).is_some_and(|v| v.exposed)
-                || self.total_degree(index).is_some_and(|d| d >= 2)
-        }
-
-        pub fn degree(&self, index: Index) -> Option<usize> {
-            self.vertices.get(&index).map(|v| v.edges.len())
-        }
-
-        pub fn total_degree(&self, index: Index) -> Option<usize> {
-            self.vertices
-                .get(&index)
-                .map(|v| v.edges.len() + v.labels.len())
-        }
-
-        pub fn expose_vertex(&mut self, index: Index) {
-            if let Some(vertex) = self.vertices.get_mut(&index) {
-                vertex.exposed = true;
-            }
-        }
-
-        pub fn set_vertex_exposed(&mut self, index: Index, exposed: bool) {
-            if let Some(vertex) = self.vertices.get_mut(&index) {
-                vertex.exposed = exposed;
-            }
-        }
-
-        pub fn incident_edges(&self, index: Index) -> impl Iterator<Item = &Edge<W>> {
-            self.vertices
-                .get(&index)
-                .into_iter()
-                .flat_map(|v| v.edges.iter())
-                .filter_map(move |key| self.edges.get(key))
-        }
-
-        pub fn has_at_most_one_incident_element(&self, index: Index) -> bool {
-            self.vertices
-                .get(&index)
-                .map(|v| v.edges.len() + v.labels.len() <= 1)
-                .unwrap_or(true)
-        }
-
-        pub fn has_at_most_one_incident_edge(&self, index: Index) -> bool {
-            self.vertices
-                .get(&index)
-                .map(|v| v.edges.len() <= 1)
-                .unwrap_or(true)
-        }
-
-        pub fn add_vertex(&mut self) -> Index {
-            let index = self.index_allocator.allocate();
-            self.vertices.insert(
-                index,
-                Vertex {
-                    edges: Vec::new(),
-                    labels: Vec::new(),
-                    exposed: false,
-                },
-            );
-            index
-        }
-
-        pub fn add_vertex_label(
-            &mut self,
-            v: Index,
-            label_node: NonNull<LabelNode<W>>,
-        ) -> Option<Index> {
-            if let Some(v) = self.vertices.get_mut(&v) {
-                let index = self.index_allocator.allocate();
-                self.labels.insert(index, label_node);
-                v.labels.push(index);
-                Some(index)
-            } else {
-                None
-            }
-        }
-
-        pub fn remove_vertex(&mut self, index: Index) -> impl Iterator<Item = EdgeOrLabel<W>> {
-            let edges = &mut self.edges;
-            let labels = &mut self.labels;
-            let (vertex_edges, vertex_labels) = self
-                .vertices
-                .remove(&index)
-                .map(|v| (v.edges, v.labels))
-                .unwrap_or_default();
-
-            let edges = vertex_edges
-                .into_iter()
-                .filter_map(move |key| edges.remove(&key).map(|e| (key, e)));
-
-            let labels = vertex_labels.into_iter().inspect(move |label_index| {
-                labels.remove(label_index);
-            });
-
-            let vertices = &mut self.vertices;
-            let edges = edges.map(move |(key, edge)| {
-                let other_index = if edge.endpoints[0] == index {
-                    edge.endpoints[1]
-                } else {
-                    edge.endpoints[0]
-                };
-                if let Some(other_vertex) = vertices.get_mut(&other_index) {
-                    other_vertex.edges.retain(|e| e != &key);
-                }
-                edge
-            });
-
-            let index_allocator = &mut self.index_allocator;
-
-            let edges = edges.with_drop(move |edges| {
-                // drain iter to ensure that all edges are removed from the tree before deallocating the index
-                for _ in edges {}
-                index_allocator.deallocate(index);
-            });
-
-            edges
-                .map(|edge| EdgeOrLabel::Edge(edge))
-                .chain(labels.map(EdgeOrLabel::Label))
-        }
-
-        pub fn add_edge(
-            &mut self,
-            left: Index,
-            right: Index,
-            edge_node: NonNull<LeafNode<W>>,
-        ) -> EdgeKey<Private> {
-            let key = EdgeKey::new_private(left, right);
-            let edge = Edge {
-                edge_node,
-                endpoints: [left, right],
-            };
-
-            self.edges.insert(unsafe { ptr::read(&key) }, edge);
-
-            self.vertices
-                .entry(left)
-                .or_default()
-                .edges
-                .push(unsafe { ptr::read(&key) });
-
-            self.vertices
-                .entry(right)
-                .or_default()
-                .edges
-                .push(unsafe { ptr::read(&key) });
-
-            key
-        }
-
-        pub fn remove_edge(&mut self, key: OwningEdgeKey) -> Edge<W> {
-            unsafe { self.remove_edge_unchecked(key).unwrap() }
-        }
-
-        unsafe fn remove_edge_unchecked<T>(&mut self, key: EdgeKey<T>) -> Option<Edge<W>> {
-            let key = unsafe { key.transmute::<Private>() };
-            if let Some(edge) = self.edges.remove(&key) {
-                for endpoint in edge.endpoints.iter() {
-                    if let Some(vertex) = self.vertices.get_mut(endpoint) {
-                        vertex.edges.retain(|e| e != &key);
-                    }
-                }
-
-                Some(edge)
-            } else {
-                None
-            }
-        }
     }
 }
 

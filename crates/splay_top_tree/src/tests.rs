@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::tree::{self, EdgeKey};
+use super::tree::{self};
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

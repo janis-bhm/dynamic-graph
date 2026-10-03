@@ -18,7 +18,7 @@ enum SwapResult<T> {
     Swapped { prev: T, next: T },
 }
 
-trait Swappable {
+trait Swappable: Sized {
     fn try_swap(&mut self, other: SwapResult<Self>);
 }
 
@@ -53,7 +53,7 @@ struct Vertex<V> {
     next_label: Option<LabelId>,
     #[cfg(debug_assertions)]
     generation: Generation,
-    weight: V,
+    pub weight: V,
 }
 
 struct Edge<E> {
@@ -61,7 +61,7 @@ struct Edge<E> {
     next: EdgeLinks,
     #[cfg(debug_assertions)]
     generation: Generation,
-    weight: E,
+    pub weight: E,
 }
 
 struct Label<L> {
@@ -69,7 +69,7 @@ struct Label<L> {
     next: Option<LabelId>,
     #[cfg(debug_assertions)]
     generation: Generation,
-    weight: L,
+    pub weight: L,
 }
 
 impl<V, E, L> Default for Tree<V, E, L> {
@@ -86,6 +86,21 @@ impl<V, E, L> Tree<V, E, L> {
             labels: Vec::new(),
             generation: Generation::default(),
         }
+    }
+
+    pub fn vertex(&self, id: VertexId) -> &Vertex<V> {
+        self.assert_valid_vid(id);
+        &self.vertices[id.index()]
+    }
+
+    pub fn edge(&self, id: EdgeId) -> &Edge<E> {
+        assert!(self.is_valid_edge(id), "EdgeId {:?} is invalid", id);
+        &self.edges[id.index()]
+    }
+
+    pub fn label(&self, id: LabelId) -> &Label<L> {
+        assert!(self.is_valid_label(id), "LabelId {:?} is invalid", id);
+        &self.labels[id.index()]
     }
 
     /// Adds a new vertex to the tree with the given weight and returns its `VertexId`.
@@ -118,7 +133,7 @@ impl<V, E, L> Tree<V, E, L> {
         let edge_id = EdgeId::new_from_usize(self.edges.len(), generation);
 
         let [nu, nv] = self
-            .nodes
+            .vertices
             .get_disjoint_mut([v.index(), w.index()])
             .expect("Vertices must be distinct");
 
@@ -215,6 +230,11 @@ impl<V, E, L> Tree<V, E, L> {
         &mut self.edges[id.index()].weight
     }
 
+    pub fn label_vertex(&self, id: LabelId) -> VertexId {
+        assert!(self.is_valid_label(id), "LabelId {:?} is invalid", id);
+        self.labels[id.index()].vertex
+    }
+
     pub fn label_weight(&self, id: LabelId) -> &L {
         assert!(self.is_valid_label(id), "LabelId {:?} is invalid", id);
         &self.labels[id.index()].weight
@@ -265,17 +285,30 @@ impl<V, E, L> Tree<V, E, L> {
         EdgeWeights::new_from_vertex(self, vertex)
     }
 
+    /// Returns the degree of the vertex with the given `VertexId`, counting both incident edges and labels.
     pub fn degree(&self, vertex: VertexId) -> usize {
         self.assert_valid_vid(vertex);
 
         self.incident_label_weights(vertex).count() + self.incident_edge_weights(vertex).count()
     }
 
-    pub fn is_degree_n(&self, vertex: VertexId, n: usize) -> bool {
+    /// Returns true if the vertex with the given `VertexId` has degree at least `n`, counting both incident edges and labels.
+    pub fn is_at_least_degree_n(&self, vertex: VertexId, n: usize) -> bool {
         self.assert_valid_vid(vertex);
         self.incident_label_weights(vertex)
-            .chain(self.incident_edge_weights(vertex))
-            .take(n + 1)
+            .map(|_| ())
+            .chain(self.incident_edge_weights(vertex).map(|_| ()))
+            .take(n)
+            .count()
+            == n
+    }
+
+    pub fn is_exactly_degree_n(&self, vertex: VertexId, n: usize) -> bool {
+        self.assert_valid_vid(vertex);
+        self.incident_label_weights(vertex)
+            .map(|_| ())
+            .chain(self.incident_edge_weights(vertex).map(|_| ()))
+            .take(n)
             .count()
             == n
     }
@@ -755,7 +788,7 @@ impl<'a, E> Iterator for EdgeWalker<'a, E> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Endpoints([VertexId; 2]);
+pub struct Endpoints(pub(crate) [VertexId; 2]);
 
 struct Directions;
 
@@ -766,6 +799,14 @@ enum Direction {
 }
 
 impl Endpoints {
+    pub fn left(&self) -> VertexId {
+        self.0[0]
+    }
+
+    pub fn right(&self) -> VertexId {
+        self.0[1]
+    }
+
     fn direction_of(&self, v: VertexId) -> Option<Direction> {
         if self.0[0] == v {
             Some(Direction::Left)
@@ -782,11 +823,13 @@ impl Endpoints {
         } else if self.0[1] == old {
             self.0[1] = new;
         } else {
-            panic!("Node index {} not found in edge endpoints {:?}", old, self);
+            panic!(
+                "Node index {:?} not found in edge endpoints {:?}",
+                old, self
+            );
         }
     }
 
-    #[cfg(test)]
     fn contains(&self, v: VertexId) -> bool {
         self.0[0] == v || self.0[1] == v
     }
@@ -794,6 +837,14 @@ impl Endpoints {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct EdgeLinks([Option<EdgeId>; 2]);
+
+impl Index<bool> for Endpoints {
+    type Output = VertexId;
+
+    fn index(&self, index: bool) -> &Self::Output {
+        if index { &self.0[1] } else { &self.0[0] }
+    }
+}
 
 impl Index<Direction> for Endpoints {
     type Output = VertexId;
