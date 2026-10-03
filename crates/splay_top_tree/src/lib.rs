@@ -1,4 +1,11 @@
-#![feature(ptr_as_uninit, cast_maybe_uninit)]
+#![expect(internal_features)]
+#![feature(
+    ptr_as_uninit,
+    cast_maybe_uninit,
+    pattern_types,
+    pattern_type_macro,
+    structural_match
+)]
 #![allow(dead_code)]
 
 use std::{
@@ -7,13 +14,18 @@ use std::{
 };
 
 use crate::{
-    index::Index,
     tree::{EdgeEndpoints, EdgeKey, OwningEdgeKey, Tree},
     util::TaggedPtr,
 };
 
+pub use index::VertexId;
+
+mod boundary;
+mod index;
+mod non_max;
 #[cfg(test)]
 mod tests;
+mod tree;
 mod util;
 
 #[repr(u8)]
@@ -1591,45 +1603,6 @@ mod tree {
             } else {
                 None
             }
-        }
-    }
-}
-
-pub mod index {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Index(pub u32);
-
-    pub struct IndexAllocator {
-        next_index: u32,
-        free_indices: Vec<u32>,
-    }
-
-    impl IndexAllocator {
-        pub fn new() -> Self {
-            Self {
-                next_index: 0,
-                free_indices: Vec::new(),
-            }
-        }
-
-        pub fn allocate(&mut self) -> Index {
-            if let Some(index) = self.free_indices.pop() {
-                Index(index)
-            } else {
-                let index = self.next_index;
-                self.next_index += 1;
-                Index(index)
-            }
-        }
-
-        pub fn deallocate(&mut self, index: Index) {
-            self.free_indices.push(index.0);
-        }
-    }
-
-    impl Default for IndexAllocator {
-        fn default() -> Self {
-            Self::new()
         }
     }
 }
