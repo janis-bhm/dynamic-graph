@@ -10,7 +10,7 @@
 
 use std::ptr::{self, NonNull};
 
-use crate::util::TaggedPtr;
+use crate::{boundary::BoundaryVertices, tree::Endpoints, util::TaggedPtr};
 
 pub use index::VertexId;
 
@@ -39,36 +39,11 @@ bitflags::bitflags! {
     struct NodeFlags: u8 {
         const LEAF = 1 << 0;
         const FLIPPED = 1 << 1;
-        const BOUNDARY_LOW = 1 << 2;
-        const BOUNDARY_HIGH = 1 << 3;
-        const LABEL = 1 << 2 | 1 << 3;
+        const LABEL = 1 << 2;
     }
 }
 
 impl NodeFlags {
-    fn num_boundary(&self) -> usize {
-        let mut count = 0;
-        count += usize::from(self.contains(NodeFlags::BOUNDARY_LOW));
-        count += 2 * usize::from(self.contains(NodeFlags::BOUNDARY_HIGH));
-
-        if count == 3 {
-            usize::from(self.contains(NodeFlags::LEAF))
-        } else {
-            count
-        }
-    }
-
-    fn set_num_boundary(&mut self, num: usize) {
-        if self.is_label() {
-            debug_assert!(num <= 1);
-            self.set(NodeFlags::LEAF, num == 1);
-        } else {
-            debug_assert!(num <= 2);
-            self.set(NodeFlags::BOUNDARY_LOW, num & 1 != 0);
-            self.set(NodeFlags::BOUNDARY_HIGH, num & 2 != 0);
-        }
-    }
-
     fn is_edge(&self) -> bool {
         self.contains(NodeFlags::LEAF)
     }
@@ -107,6 +82,7 @@ unsafe impl util::Tag for NodeFlags {
 #[repr(C, align(16))]
 struct Node<W> {
     parent: TaggedPtr<InternalNode<W>, NodeFlags>,
+    boundary: BoundaryVertices,
     weight: W,
 }
 
@@ -118,6 +94,98 @@ impl<W> Node<W> {
             drop(unsafe { Box::from_raw(ptr as *mut LeafNode<W>) });
         } else {
             drop(unsafe { Box::from_raw(ptr as *mut InternalNode<W>) });
+        }
+    }
+}
+
+impl<W> Node<W> {
+    fn flags(&self) -> NodeFlags {
+        self.parent.tag()
+    }
+
+    fn is_edge(&self) -> bool {
+        self.flags().is_edge()
+    }
+
+    fn is_flipped(&self) -> bool {
+        self.flags().contains(NodeFlags::FLIPPED)
+    }
+
+    fn set_flipped(&mut self, flipped: bool) {
+        self.parent.update_tag(|flags| {
+            flags.set(NodeFlags::FLIPPED, flipped);
+        });
+    }
+
+    fn toggle_flipped(&mut self) {
+        self.parent.update_tag(|flags| {
+            flags.toggle(NodeFlags::FLIPPED);
+        });
+    }
+
+    fn num_boundary(&self) -> usize {
+        self.boundary.count() as usize
+    }
+
+    fn is_path(&self) -> bool {
+        self.boundary.is_path()
+    }
+
+    fn is_point(&self) -> bool {
+        self.boundary.is_point()
+    }
+
+    fn parent(&self) -> Option<NonNull<InternalNode<W>>> {
+        self.parent.as_non_null()
+    }
+
+    fn set_parent(&mut self, parent: Option<NonNull<InternalNode<W>>>) {
+        self.parent
+            .set_ptr(parent.map_or(ptr::null_mut(), NonNull::as_ptr));
+    }
+
+    fn parent_node(&self) -> Option<NonNull<Node<W>>> {
+        self.parent().map(NonNull::cast)
+    }
+
+    fn grandparent(&self) -> Option<NonNull<InternalNode<W>>> {
+        self.parent()
+            .and_then(|p| unsafe { p.as_ref().node.parent() })
+    }
+
+    fn ggp(&self) -> Option<NonNull<InternalNode<W>>> {
+        self.parent()
+            .and_then(|p| unsafe { p.as_ref().node.parent() })
+            .and_then(|gp| unsafe { gp.as_ref().node.parent() })
+    }
+
+    /// # Safety
+    /// Creates a reference to the parent of this node.
+    unsafe fn sibling(&self) -> Option<NonNull<Node<W>>> {
+        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
+            let self_ptr = NonNull::from(self);
+            if p.children.left == self_ptr {
+                p.children.right
+            } else {
+                p.children.left
+            }
+        })
+    }
+
+    unsafe fn is_left_child(&self) -> Option<bool> {
+        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
+            let self_ptr = NonNull::from(self);
+            p.children.left == self_ptr
+        })
+    }
+
+    fn force_ptr(
+        this: NonNull<Self>,
+    ) -> LeafOrInternal<NonNull<LeafNode<W>>, NonNull<LabelNode<W>>, NonNull<InternalNode<W>>> {
+        match unsafe { (&*this.as_ptr()).flags().kind() } {
+            NodeKind::EdgeLeaf => LeafOrInternal::Edge(this.cast()),
+            NodeKind::Cluster => LeafOrInternal::Internal(this.cast()),
+            NodeKind::LabelLeaf => LeafOrInternal::Label(this.cast()),
         }
     }
 }
@@ -135,35 +203,38 @@ struct LeafNode<W> {
 }
 
 impl<W> LabelNode<W> {
-    fn init(node: NonNull<LabelNode<W>>, weight: W, label: tree::LabelId, num_boundary: usize) {
+    fn init(
+        node: NonNull<LabelNode<W>>,
+        weight: W,
+        label: tree::LabelId,
+        boundary: BoundaryVertices,
+    ) {
         unsafe {
             let uninit = node.as_uninit_mut();
             uninit.write(LabelNode {
                 node: Node {
                     parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
+                    boundary,
                     weight,
                 },
                 label,
             });
-
-            uninit.assume_init_mut().node.set_num_boundary(num_boundary)
         };
     }
 }
 
 impl<W> LeafNode<W> {
-    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: tree::EdgeId, num_boundary: usize) {
+    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: tree::EdgeId, boundary: BoundaryVertices) {
         unsafe {
             let uninit = node.as_uninit_mut();
             uninit.write(LeafNode {
                 node: Node {
                     parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
+                    boundary,
                     weight,
                 },
                 edge,
             });
-
-            uninit.assume_init_mut().node.set_num_boundary(num_boundary)
         };
     }
 }
@@ -210,16 +281,16 @@ impl<W> InternalNode<W> {
         weight: W,
         left: NonNull<Node<W>>,
         right: NonNull<Node<W>>,
-        num_boundary: usize,
+        boundary: BoundaryVertices,
     ) -> NonNull<Self> {
-        let mut node = Box::new(InternalNode {
+        let node = Box::new(InternalNode {
             node: Node {
                 parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
+                boundary,
                 weight,
             },
             children: Children { left, right },
         });
-        node.node.set_num_boundary(num_boundary);
 
         let node = Box::into_non_null(node);
 
@@ -291,119 +362,6 @@ mod marker {
     pub struct Internal;
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Either;
-}
-
-impl<W> Node<W> {
-    fn flags(&self) -> NodeFlags {
-        self.parent.tag()
-    }
-
-    fn is_edge(&self) -> bool {
-        self.flags().is_edge()
-    }
-
-    fn is_flipped(&self) -> bool {
-        self.flags().contains(NodeFlags::FLIPPED)
-    }
-
-    fn set_flipped(&mut self, flipped: bool) {
-        self.parent.update_tag(|flags| {
-            flags.set(NodeFlags::FLIPPED, flipped);
-        });
-    }
-
-    fn toggle_flipped(&mut self) {
-        self.parent.update_tag(|flags| {
-            flags.toggle(NodeFlags::FLIPPED);
-        });
-    }
-
-    fn num_boundary(&self) -> usize {
-        self.parent.tag().num_boundary()
-    }
-
-    fn set_num_boundary(&mut self, num: usize) {
-        assert!(num <= 2, "num_boundary must be <= 2");
-        self.parent.update_tag(|flags| {
-            flags.set_num_boundary(num);
-        });
-    }
-
-    fn inc_num_boundary(&mut self) {
-        let new = self.num_boundary() + 1;
-        assert!(new <= 2, "num_boundary must be <= 2");
-        self.set_num_boundary(new);
-    }
-
-    fn dec_num_boundary(&mut self) {
-        let new = self
-            .num_boundary()
-            .checked_sub(1)
-            .expect("num_boundary must be >= 0");
-        self.set_num_boundary(new);
-    }
-
-    fn is_path(&self) -> bool {
-        self.num_boundary() == 2
-    }
-
-    fn is_point(&self) -> bool {
-        self.num_boundary() < 2
-    }
-
-    fn parent(&self) -> Option<NonNull<InternalNode<W>>> {
-        self.parent.as_non_null()
-    }
-
-    fn set_parent(&mut self, parent: Option<NonNull<InternalNode<W>>>) {
-        self.parent
-            .set_ptr(parent.map_or(ptr::null_mut(), NonNull::as_ptr));
-    }
-
-    fn parent_node(&self) -> Option<NonNull<Node<W>>> {
-        self.parent().map(NonNull::cast)
-    }
-
-    fn grandparent(&self) -> Option<NonNull<InternalNode<W>>> {
-        self.parent()
-            .and_then(|p| unsafe { p.as_ref().node.parent() })
-    }
-
-    fn ggp(&self) -> Option<NonNull<InternalNode<W>>> {
-        self.parent()
-            .and_then(|p| unsafe { p.as_ref().node.parent() })
-            .and_then(|gp| unsafe { gp.as_ref().node.parent() })
-    }
-
-    /// # Safety
-    /// Creates a reference to the parent of this node.
-    unsafe fn sibling(&self) -> Option<NonNull<Node<W>>> {
-        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
-            let self_ptr = NonNull::from(self);
-            if p.children.left == self_ptr {
-                p.children.right
-            } else {
-                p.children.left
-            }
-        })
-    }
-
-    unsafe fn is_left_child(&self) -> Option<bool> {
-        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
-            let self_ptr = NonNull::from(self);
-            p.children.left == self_ptr
-        })
-    }
-
-    fn force_ptr(
-        this: NonNull<Self>,
-    ) -> LeafOrInternal<NonNull<LeafNode<W>>, NonNull<LabelNode<W>>, NonNull<InternalNode<W>>> {
-        match unsafe { (&*this.as_ptr()).flags().kind() } {
-            NodeKind::EdgeLeaf => LeafOrInternal::Edge(this.cast()),
-            NodeKind::Cluster => LeafOrInternal::Internal(this.cast()),
-            NodeKind::LabelLeaf => LeafOrInternal::Label(this.cast()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -495,18 +453,6 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { self.node.as_ref().num_boundary() }
     }
 
-    fn set_num_boundary(&mut self, num: usize) {
-        unsafe { self.node.as_mut().set_num_boundary(num) }
-    }
-
-    fn inc_num_boundary(&mut self) {
-        unsafe { self.node.as_mut().inc_num_boundary() }
-    }
-
-    fn dec_num_boundary(&mut self) {
-        unsafe { self.node.as_mut().dec_num_boundary() }
-    }
-
     fn has_middle_boundary(&self) -> bool {
         use LeafOrInternal::*;
         if self.num_boundary() == 0 {
@@ -515,6 +461,53 @@ impl<W, NodeType> Handle<W, NodeType> {
         match self.force() {
             Label(_) | Edge(_) => false,
             Internal(internal) => internal.num_boundary() != internal.num_path_children(),
+        }
+    }
+
+    fn boundary(&self) -> BoundaryVertices {
+        unsafe { self.node.as_ref().boundary }
+    }
+
+    fn set_boundary(&mut self, boundary: BoundaryVertices) {
+        unsafe { self.node.as_mut().boundary = boundary }
+    }
+
+    fn remove_from_boundary(&mut self, v: tree::VertexId) {
+        unsafe {
+            self.node.as_mut().boundary.remove(v);
+        }
+    }
+
+    fn add_boundary_vertex(&mut self, tree: &TopTree<W>, v: tree::VertexId) {
+        match self.force() {
+            LeafOrInternal::Edge(edge) => {
+                let Endpoints([left, right]) = tree.tree.edge_endpoints(edge.edge());
+
+                if left == v {
+                    unsafe { self.node.as_mut().boundary.add(v, true) }
+                } else if right == v {
+                    unsafe { self.node.as_mut().boundary.add(v, false) }
+                } else {
+                    panic!("vertex not found in edge endpoints")
+                }
+            }
+            LeafOrInternal::Label(_) => unsafe { self.node.as_mut().boundary.add(v, true) },
+            LeafOrInternal::Internal(internal) => {
+                let [left, right] = internal.children();
+                let in_left = left.boundary().contains(v);
+                let in_right = right.boundary().contains(v);
+
+                if in_left && in_right {
+                    let is_left = !left.is_path();
+                    unsafe { self.node.as_mut().boundary.add(v, is_left) }
+                } else if in_left {
+                    unsafe { self.node.as_mut().boundary.add(v, true) }
+                } else if in_right {
+                    unsafe { self.node.as_mut().boundary.add(v, false) }
+                } else {
+                    panic!("vertex not found in either child")
+                }
+            }
         }
     }
 
@@ -558,13 +551,39 @@ impl<W, NodeType> Handle<W, NodeType> {
         let uncle_is_path = uncle.is_path();
         let gp_is_path = gp.is_path();
 
-        let new_parent_is_path: bool;
+        // the new parent made up of the sibling and uncle will be a path
+        // consider the star case:
+        // the middle boundary of gp is shared by `node`, `sibling`, and `uncle`.
+        // the new parent `sibling` \cup `uncle` will have the same middle boundary; if either `sibling` or `uncle` is a path, then the new parent will be a path.
+        // both `sibling` and `uncle` cannot be paths.
+        // consider the path case:
+        // the shared vertex of gp is shared by `parent` and `uncle`, and must be the outward boundary of `sibling`, which is a path.
+        // if gp has a middle boundary, then it must be this vertex, and it must be a boundary of the new parent.
+        // if gp has no middle boundary but uncle is a path, then the boundary of the new parent will be the two non-shared boundaries of `sibling` and `uncle`.
+        let new_parent_boundary: BoundaryVertices;
         let flip_new_parent: bool;
         let flip_gp: bool;
+
+        // The new parent's physical left child is `uncle` when `uncle_is_left`,
+        // otherwise `sibling`. Merge the children's logical boundaries (the
+        // orientation in which a child contributes to the merge) in that
+        // physical order.
+        let sibling_boundary = sibling.boundary();
+        let uncle_boundary = uncle.boundary();
+        let (left_boundary, right_boundary) = if uncle_is_left {
+            (uncle_boundary, sibling_boundary)
+        } else {
+            (sibling_boundary, uncle_boundary)
+        };
         if same_sides && sibling_is_path {
             // path
             let gp_has_middle = gp.has_middle_boundary();
-            new_parent_is_path = gp_has_middle || uncle_is_path;
+            new_parent_boundary = BoundaryVertices::from_children(
+                left_boundary,
+                right_boundary,
+                gp_has_middle || uncle_is_path,
+            );
+
             flip_new_parent = false;
             if gp_has_middle
                 && !gp_is_path
@@ -577,22 +596,29 @@ impl<W, NodeType> Handle<W, NodeType> {
         } else {
             // star
             if !same_sides {
-                new_parent_is_path = sibling_is_path || uncle_is_path;
                 flip_new_parent = sibling_is_path;
                 flip_gp = sibling_is_path;
                 self.toggle_flipped();
+
+                new_parent_boundary = BoundaryVertices::from_children(
+                    left_boundary,
+                    right_boundary,
+                    sibling_is_path || uncle_is_path,
+                );
             } else {
-                new_parent_is_path = uncle_is_path;
                 flip_new_parent = false;
                 flip_gp = false;
                 sibling.toggle_flipped();
+
+                new_parent_boundary =
+                    BoundaryVertices::from_children(left_boundary, right_boundary, uncle_is_path);
             }
         }
 
         parent.set_child(sibling.node, !uncle_is_left);
         parent.set_child(uncle.node, uncle_is_left);
         parent.set_flipped(flip_new_parent);
-        parent.set_num_boundary(if new_parent_is_path { 2 } else { 1 });
+        parent.set_boundary(new_parent_boundary);
 
         gp.set_child(self.node, !uncle_is_left);
         gp.set_child(parent.node, uncle_is_left);
@@ -927,7 +953,11 @@ pub(crate) fn expose<W>(
 where
     W: Reduce,
 {
-    fn expose_prepared<W>(mut node: Handle<W, marker::Either>) -> Handle<W, marker::Either>
+    fn expose_prepared<W>(
+        mut node: Handle<W, marker::Either>,
+        tree: &mut TopTree<W>,
+        v: tree::VertexId,
+    ) -> Handle<W, marker::Either>
     where
         W: Reduce,
     {
@@ -935,7 +965,7 @@ where
         let mut right = false;
 
         loop {
-            node.inc_num_boundary();
+            node.add_boundary_vertex(tree, v);
 
             let Some(parent) = node.parent() else {
                 return node;
@@ -1004,7 +1034,7 @@ where
         Some(consuming_node) => {
             let consuming_node = prepare_expose(consuming_node);
 
-            let node = expose_prepared(consuming_node);
+            let node = expose_prepared(consuming_node, root, v);
             root.exposed.set(v.index(), true);
 
             Some(node)
@@ -1027,7 +1057,7 @@ where
     let mut root = None;
 
     while let Some(mut some_node) = node {
-        some_node.dec_num_boundary();
+        some_node.remove_from_boundary(v);
         node = some_node.parent().map(Handle::forget_type);
         root = Some(some_node);
     }
@@ -1068,7 +1098,7 @@ where
         leaf,
         weight,
         edge,
-        ru.is_some() as usize + rv.is_some() as usize,
+        BoundaryVertices::from_left_and_right(ru.as_ref().map(|_| u), rv.as_ref().map(|_| v)),
     );
 
     let mut node = leaf.cast::<Node<W>>();
@@ -1080,7 +1110,13 @@ where
             let wr = &right.as_ref().weight;
             W::reduce(wl, wr)
         };
-        node = InternalNode::alloc(weight, left.node, right, rv.is_some() as usize).cast();
+        node = InternalNode::alloc(
+            weight,
+            left.node,
+            right,
+            BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
+        )
+        .cast();
     }
 
     if let Some(rv) = rv {
@@ -1091,7 +1127,12 @@ where
             let wr = &right.node.as_ref().weight;
             W::reduce(wl, wr)
         };
-        InternalNode::alloc(weight, left, right.node, 0);
+        InternalNode::alloc(
+            weight,
+            left,
+            right.node,
+            BoundaryVertices::from_option((node.cast() != leaf).then_some(u)),
+        );
     }
 
     leaf.cast()

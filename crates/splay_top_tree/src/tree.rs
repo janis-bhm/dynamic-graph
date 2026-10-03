@@ -387,7 +387,7 @@ impl<V, E, L> Tree<V, E, L> {
                     self.vertices[endpoint.index()].next_edge = replacement;
                 } else {
                     for edge in EdgeWalkerMut::new(&mut self.edges, first, endpoint) {
-                        if edge.next[direction].index() == id {
+                        if edge.next[direction].map(|e| e.index()) == Some(id) {
                             edge.next[direction] = replacement;
                             break;
                         }
@@ -519,7 +519,7 @@ impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
                     }
                 }
 
-                let (weight, swap) = self.tree.remove_vertex_unchecked(self.vertex.index());
+                let (weight, swap) = self.tree.remove_vertex_unchecked(vertex.index());
                 self.vertex = Either::Right(weight);
                 Some(EdgeOrLabelId::Vertex(swap))
             }
@@ -530,7 +530,7 @@ impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
     fn into_weight(self) -> V {
         let this = ManuallyDrop::new(self);
 
-        match unsafe { ptr::read(&self.vertex) } {
+        match unsafe { ptr::read(&this.vertex) } {
             Either::Left(_) => panic!("Vertex removal not complete"),
             Either::Right(weight) => weight,
         }

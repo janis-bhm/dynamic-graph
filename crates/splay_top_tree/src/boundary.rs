@@ -1,14 +1,14 @@
-use crate::VertexId;
+use crate::tree::VertexId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BoundaryVertices {
+pub enum BoundaryVertices {
     None,
     One(VertexId),
     Two { left: VertexId, right: VertexId },
 }
 
 impl BoundaryVertices {
-    fn from_left_and_right(left: Option<VertexId>, right: Option<VertexId>) -> Self {
+    pub fn from_left_and_right(left: Option<VertexId>, right: Option<VertexId>) -> Self {
         match (left, right) {
             (None, None) => Self::None,
             (Some(v), None) | (None, Some(v)) => Self::One(v),
@@ -22,14 +22,14 @@ impl BoundaryVertices {
         }
     }
 
-    fn from_option(v: Option<VertexId>) -> Self {
+    pub fn from_option(v: Option<VertexId>) -> Self {
         match v {
             None => Self::None,
             Some(v) => Self::One(v),
         }
     }
 
-    fn from_children(left: Self, right: Self, is_path: bool) -> Self {
+    pub fn from_children(left: Self, right: Self, is_path: bool) -> Self {
         match (left, right) {
             (Self::None, Self::None) => Self::None,
             (Self::None, _) | (_, Self::None) => {
@@ -91,7 +91,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn remove(&mut self, v: VertexId) -> Option<VertexId> {
+    pub fn remove(&mut self, v: VertexId) -> Option<VertexId> {
         match self {
             Self::None => {}
             Self::One(w) => {
@@ -114,7 +114,7 @@ impl BoundaryVertices {
         None
     }
 
-    fn add(&mut self, v: VertexId, left: bool) {
+    pub fn add(&mut self, v: VertexId, left: bool) {
         if self.contains(v) {
             return;
         }
@@ -136,7 +136,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn contains(&self, v: VertexId) -> bool {
+    pub fn contains(&self, v: VertexId) -> bool {
         match self {
             Self::None => false,
             Self::One(w) => *w == v,
@@ -144,7 +144,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn remap(&mut self, old: VertexId, new: VertexId) {
+    pub fn remap(&mut self, old: VertexId, new: VertexId) {
         match self {
             Self::None => {}
             Self::One(vertex) => {
@@ -163,7 +163,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn left(&self) -> Option<VertexId> {
+    pub fn left(&self) -> Option<VertexId> {
         match self {
             Self::None => None,
             Self::One(v) => Some(*v),
@@ -171,7 +171,7 @@ impl BoundaryVertices {
         }
     }
 
-    fn right(&self) -> Option<VertexId> {
+    pub fn right(&self) -> Option<VertexId> {
         match self {
             Self::None => None,
             Self::One(v) => Some(*v),
@@ -179,15 +179,15 @@ impl BoundaryVertices {
         }
     }
 
-    fn is_path(&self) -> bool {
+    pub fn is_path(&self) -> bool {
         matches!(self, Self::Two { .. })
     }
 
-    fn is_point(&self) -> bool {
+    pub fn is_point(&self) -> bool {
         !self.is_path()
     }
 
-    fn count(&self) -> u8 {
+    pub fn count(&self) -> u8 {
         match self {
             Self::None => 0,
             Self::One(_) => 1,
@@ -195,13 +195,13 @@ impl BoundaryVertices {
         }
     }
 
-    fn flip(&mut self) {
+    pub fn flip(&mut self) {
         if let Self::Two { left, right } = self {
             std::mem::swap(left, right);
         }
     }
 
-    fn flipped(self) -> Self {
+    pub fn flipped(self) -> Self {
         match self {
             Self::None => Self::None,
             Self::One(v) => Self::One(v),
