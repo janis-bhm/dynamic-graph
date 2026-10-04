@@ -94,7 +94,7 @@ impl BoundaryVertices {
             (Self::Two { left, right }, Self::One(v)) => {
                 assert_eq!(
                     v, right,
-                    "two clusters can only be merged if they share a boundary vertex"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
                 );
 
                 if is_path {
@@ -110,9 +110,9 @@ impl BoundaryVertices {
                     right: r2,
                 },
             ) => {
-                debug_assert_eq!(
+                assert_eq!(
                     right, l2,
-                    "two clusters can only be merged if they share a boundary vertex"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
                 );
                 assert!(
                     is_path,

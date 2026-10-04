@@ -1326,12 +1326,7 @@ where
             let wr = &right.node.as_ref().weight;
             W::reduce(wl, wr)
         };
-        InternalNode::alloc(
-            weight,
-            left,
-            right.node,
-            BoundaryVertices::from_option((node.cast() != leaf).then_some(u)),
-        );
+        InternalNode::alloc(weight, left, right.node, BoundaryVertices::None);
     }
 
     edge

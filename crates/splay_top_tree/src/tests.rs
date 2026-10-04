@@ -690,7 +690,7 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
     let mut rng = Rng(seed);
     let mut h = Harness::new(num_vertices);
 
-    for _ in 0..num_ops {
+    for step in 0..num_ops {
         let verts: Vec<_> = h.vertices().collect();
         let comps = h.components();
         let clean: Vec<Vec<VertexId>> = comps
@@ -720,6 +720,7 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
         let mut acted = false;
         if r == 0 && can_deexpose {
             let v = *h.exposed.iter().next().unwrap();
+            eprintln!("seed={seed} step={step} deexpose {v:?}");
             h.deexpose(v);
             acted = true;
         } else if r == 1 && can_link {
@@ -730,15 +731,18 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
             let b = &clean[ib];
             let u = a[(rng.next() as usize) % a.len()];
             let v = b[(rng.next() as usize) % b.len()];
+            eprintln!("seed={seed} step={step} link {u:?} {v:?}");
             h.link(u, v, rng.next() | 1);
             acted = true;
         } else if r == 2 && !clean_edges.is_empty() {
             let (u, v) = clean_edges[(rng.next() as usize) % clean_edges.len()];
+            eprintln!("seed={seed} step={step} cut {u:?} {v:?}");
             h.cut(u, v);
             acted = true;
         } else if can_expose {
             let v = verts[(rng.next() as usize) % verts.len()];
             if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
+                eprintln!("seed={seed} step={step} expose {v:?}");
                 h.expose(v);
                 acted = true;
             }
