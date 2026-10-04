@@ -61,8 +61,8 @@ impl BoundaryVertices {
         }
     }
 
-    pub fn from_children(left: Self, right: Self, is_path: bool) -> Self {
-        match (left, right) {
+    pub fn from_children(left_boundary: Self, right_boundary: Self, is_path: bool) -> Self {
+        match (left_boundary, right_boundary) {
             (Self::None, Self::None) => Self::None,
             (Self::None, _) | (_, Self::None) => {
                 panic!("call expose on a vertex before linking or attaching an edge/label to it")
@@ -82,7 +82,7 @@ impl BoundaryVertices {
             (Self::One(v), Self::Two { left, right }) => {
                 assert_eq!(
                     v, left,
-                    "two clusters can only be merged if they share a boundary vertex"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
                 );
 
                 if is_path {

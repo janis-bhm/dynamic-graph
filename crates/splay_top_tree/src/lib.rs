@@ -560,6 +560,15 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { self.node.as_ref().boundary }
     }
 
+    fn flipped_boundary(&self) -> BoundaryVertices {
+        let boundary = self.boundary();
+        if self.is_flipped() {
+            boundary.flipped()
+        } else {
+            boundary
+        }
+    }
+
     fn set_boundary(&mut self, boundary: BoundaryVertices) {
         unsafe { self.node.as_mut().boundary = boundary }
     }
@@ -662,8 +671,8 @@ impl<W, NodeType> Handle<W, NodeType> {
         // otherwise `sibling`. Merge the children's logical boundaries (the
         // orientation in which a child contributes to the merge) in that
         // physical order.
-        let sibling_boundary = sibling.boundary();
-        let uncle_boundary = uncle.boundary();
+        let sibling_boundary = sibling.flipped_boundary();
+        let uncle_boundary = uncle.flipped_boundary();
         let (left_boundary, right_boundary) = if uncle_is_left {
             (uncle_boundary, sibling_boundary)
         } else {
