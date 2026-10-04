@@ -7,12 +7,6 @@ name = "augmented_tree"
 version = "0.1.0"
 
 [[package]]
-name = "bit_field"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e4b40c7323adcfc0a41c4b88143ed58346ff65a288fc144329c5c45e05d70c6"
-
-[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,7 +50,6 @@ version = "0.1.0"
 name = "splay_top_tree"
 version = "0.1.0"
 dependencies = [
- "bit_field",
  "bitflags",
  "slotvec",
 ]

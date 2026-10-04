@@ -8,7 +8,11 @@
 )]
 #![allow(dead_code)]
 
-use std::ptr::{self, NonNull};
+use core::fmt;
+use std::{
+    collections::BTreeSet,
+    ptr::{self, NonNull},
+};
 
 use crate::{
     boundary::BoundaryVertices,
@@ -22,6 +26,7 @@ use slotvec::SlotVec;
 
 mod boundary;
 mod index;
+mod iter;
 mod non_max;
 mod summary;
 #[cfg(test)]
@@ -41,7 +46,7 @@ enum NodeKind {
 }
 
 bitflags::bitflags! {
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct NodeFlags: u8 {
         const LEAF = 1 << 0;
         const FLIPPED = 1 << 1;
@@ -90,6 +95,15 @@ struct Node<W> {
     parent: TaggedPtr<InternalNode<W>, NodeFlags>,
     boundary: BoundaryVertices,
     weight: W,
+}
+
+impl<W> fmt::Debug for Node<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Node")
+            .field("parent", &self.parent)
+            .field("boundary", &self.boundary)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<W> Node<W> {
@@ -203,10 +217,28 @@ struct LabelNode<W> {
     label: tree::LabelId,
 }
 
+impl<W> fmt::Debug for LabelNode<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LabelNode")
+            .field("node", &self.node)
+            .field("label", &self.label)
+            .finish()
+    }
+}
+
 #[repr(C)]
 struct LeafNode<W> {
     node: Node<W>,
     edge: tree::EdgeId,
+}
+
+impl<W> fmt::Debug for LeafNode<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafNode")
+            .field("node", &self.node)
+            .field("edge", &self.edge)
+            .finish()
+    }
 }
 
 impl<W> LabelNode<W> {
@@ -251,6 +283,15 @@ struct Children<W> {
     right: NonNull<Node<W>>,
 }
 
+impl<W> fmt::Debug for Children<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Children")
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .finish()
+    }
+}
+
 impl<W> IntoIterator for &Children<W> {
     type Item = NonNull<Node<W>>;
     type IntoIter = std::array::IntoIter<Self::Item, 2>;
@@ -281,6 +322,15 @@ impl<W> Children<W> {
 struct InternalNode<W> {
     node: Node<W>,
     children: Children<W>,
+}
+
+impl<W> fmt::Debug for InternalNode<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalNode")
+            .field("node", &self.node)
+            .field("children", &self.children)
+            .finish()
+    }
 }
 
 impl<W> InternalNode<W> {
@@ -371,10 +421,31 @@ mod marker {
     pub struct Either;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct Handle<W, NodeType> {
     node: NonNull<Node<W>>,
     _marker: core::marker::PhantomData<NodeType>,
+}
+
+impl<W, NodeType: std::fmt::Debug> std::fmt::Debug for Handle<W, NodeType> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe {
+            match self.force() {
+                LeafOrInternal::Edge(n) => f
+                    .debug_struct("Edge")
+                    .field("node", &n.node.cast::<LeafNode<W>>().as_ref())
+                    .finish(),
+                LeafOrInternal::Label(n) => f
+                    .debug_struct("Label")
+                    .field("node", &n.node.cast::<LabelNode<W>>().as_ref())
+                    .finish(),
+                LeafOrInternal::Internal(n) => f
+                    .debug_struct("Internal")
+                    .field("node", &n.node.cast::<InternalNode<W>>().as_ref())
+                    .finish(),
+            }
+        }
+    }
 }
 
 impl<W, NodeType> PartialEq for Handle<W, NodeType> {
@@ -474,6 +545,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         if self.num_boundary() == 0 {
             return false;
         }
+
         match self.force() {
             Label(_) | Edge(_) => false,
             Internal(internal) => internal.num_boundary() != internal.num_path_children(),
@@ -513,7 +585,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                     panic!("vertex not found in edge endpoints")
                 }
             }
-            LeafOrInternal::Label(_) => unsafe { self.node.as_mut().boundary.add(v, true) },
+            LeafOrInternal::Label(_) => unsafe { self.node.as_mut().boundary.add(v, false) },
             LeafOrInternal::Internal(internal) => {
                 let [left, right] = internal.children();
                 let in_left = left.boundary().contains(v);
@@ -842,7 +914,7 @@ impl<W> Handle<W, marker::Internal> {
             .count()
     }
 
-    fn children(&self) -> [Handle<W, marker::Internal>; 2] {
+    fn children(&self) -> [Handle<W, marker::Either>; 2] {
         unsafe {
             let internal = self.node.cast::<InternalNode<W>>().as_ref();
             [
@@ -852,7 +924,7 @@ impl<W> Handle<W, marker::Internal> {
         }
     }
 
-    fn flipped_children(&self) -> [Handle<W, marker::Internal>; 2] {
+    fn flipped_children(&self) -> [Handle<W, marker::Either>; 2] {
         unsafe {
             let internal = self.node.cast::<InternalNode<W>>().as_ref();
             if self.is_flipped() {
@@ -962,6 +1034,7 @@ where
 
         if is_middle {
             if !node.has_middle_boundary() {
+                assert!(!root.is_exposed_internal(v));
                 return Some(node);
             }
             last_middle_node = Some(unsafe { ptr::read(&node) });
@@ -1014,11 +1087,28 @@ where
         W: Summary,
     {
         let mut node = unsafe { ptr::read(&consuming_node) };
+
+        // we want each cluster from the consuming node up to the root to hold
+        // the following invariant:
+        // the cluster should either be a point cluster, or a path cluster with
+        // the exposed vertex as one of its boundary vertices.
         while let Some(parent) = node.parent() {
             if node.is_point() {
                 node = parent.forget_type();
             } else {
-                assert!(node.is_internal(), "node must be internal");
+                // This iterations goal is to either raise the consuming node,
+                // or a point cluster ancestor of the consuming node, up one
+                // level.
+
+                // we know that `node` is an internal node at this point:
+                // let `node` be a leaf edge cluster with end points `v` and
+                // `w`, where `v` is degree 1 and `w` is degree >= 2 and `v` is
+                // the to-be-exposed vertex.
+                // for `(v,w)` to have a parent, `w` must have degree >= 2.
+                // it follows that `v` is not yet exposed, and the consuming
+                // node of `v` is the leaf `(v,w)`.
+                // because `v` is not exposed, `(v,w)` must be a point cluster.
+                assert!(node.is_internal(), "{node:?} must be an internal node");
                 let internal = unsafe { ptr::read(&node).into_internal() };
                 parent.push_flip();
                 internal.push_flip();
@@ -1028,7 +1118,45 @@ where
                 let sibling_is_left = sibling.is_left_child().expect("sibling must have a parent");
                 let same_side_child = internal.child(sibling_is_left);
 
+                // recall that the conditions for rotating up are that the
+                // sibling and uncle must form a valid cluster.
+                //
+                // because of the orientational invariant, we know that
+                // same_side_child and sibling share the sibling-ward most
+                // boundary vertex of `node`.
+                //
+                // We want to produce a root-level cluster that is either a point cluster.
+                // Alternatively, a path cluster with the to-be-exposed
+                // vertex as one of its boundary vertices means the vertex
+                // is already exposed.
+                // The middle vertex of `parent` is not the to-be-exposed
+                // vertex, or else it would have been the consuming node.
+                // `node` is a path cluster, of which the to-be-exposed vertex.
+                // Because there can be at most one exposed vertex in the
+                // current tree, there must above `node` be a point cluster.
                 if same_side_child.is_path() || sibling.is_point() {
+                    // Rotating up the other-sided child of the consuming node
+                    // will make `parent` the new consuming node and we don't
+                    // care whether any of its children are point clusters.
+
+                    // If both children of `node` are path clusters, then `node`
+                    // is the consuming node.
+
+                    // If `sibling` is a point cluster and `node` is not the
+                    // consuming node, then `node` must have a point child which
+                    // is an ancestor of the to-be-exposed vertex.
+                    //
+                    // If `same_side_child` is that ancestor, merging it with
+                    // `sibling` will produce a point cluster, and we have
+                    // achieved our goal.
+                    //
+                    // If `other_side_child` is that ancestor, then merging
+                    // `same_side_child` with `sibling` will produce a cluster
+                    // that does not contain the to-be-exposed vertex, and
+                    // `other_side_child` is the ancestor of the to-be-exposed
+                    // vertex and a point cluster, and we have achieved our
+                    // goal.
+
                     let mut other_side_child = internal.child(!sibling_is_left);
                     other_side_child
                         .rotate_up()
@@ -1039,6 +1167,7 @@ where
                     }
                     node = parent.forget_type();
                 } else {
+                    // we pull down the uncle of `node` into the sibling position and try again.
                     let uncle = parent.sibling().expect("parent must have a sibling");
                     let uncle_is_left = uncle.is_left_child().expect("uncle must have a parent");
 
@@ -1055,6 +1184,14 @@ where
     }
 
     let resolved = root.resolve_vertex(v);
+    assert!(
+        !root.is_exposed_internal(resolved),
+        "vertex must not be exposed"
+    );
+    eprintln!(
+        "exposing vertex {v:?} (resolved {resolved:?}), degree {}",
+        root.tree.degree(resolved)
+    );
 
     match find_consuming_node(root, resolved) {
         Some(consuming_node) => {
@@ -1078,12 +1215,19 @@ where
 {
     let resolved = tree.resolve_vertex(v);
 
-    let mut node = find_consuming_node(tree, resolved);
+    let consuming = find_consuming_node(tree, resolved);
     let mut root = None;
 
+    let mut node = consuming;
     while let Some(mut some_node) = node {
         some_node.remove_from_boundary(v);
         node = some_node.parent().map(Handle::forget_type);
+
+        if some_node.is_internal() {
+            let mut internal = unsafe { ptr::read(&some_node).into_internal() };
+            internal.recompute_weight();
+        }
+
         root = Some(some_node);
     }
 
@@ -1205,11 +1349,14 @@ where
     unsafe { ptr::read(&edge_handle) }.full_splay();
     edge_handle.delete_all_ancestors();
 
-    let (_weight, swap) = tree.tree.remove_edge(id);
+    let (weight, swap) = tree.tree.remove_edge(id);
+    tree.edge_ids.remove(weight.id);
+
     if let SwapResult::Swapped { prev, next } = swap {
         _ = (prev, next);
         let id = tree.tree.edge_weight(next).id;
         tree.edge_ids[id].tree_id = next;
+        unsafe { tree.tree.edge_weight_mut(next).node.as_mut().edge = next };
         // translate tree::EdgeId -> index::EdgeId
         // swap in self.edge_ids
     }
@@ -1305,16 +1452,20 @@ where
         }
     }
 
-    let (_l, swap) = tree.tree.remove_label(resolved);
+    let (l, swap) = tree.tree.remove_label(resolved);
+    tree.label_ids.remove(l.id);
+
     if let SwapResult::Swapped { prev, next } = swap {
         _ = (prev, next);
         let id = tree.tree.label_weight(next).id;
         tree.label_ids[id].tree_id = next;
+        unsafe { tree.tree.label_weight_mut(next).node.as_mut().label = next };
     }
 
     let _ = deexpose(v, tree);
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum LeafOrInternal<T, V, U> {
     Edge(T),
     Label(V),
@@ -1434,6 +1585,7 @@ impl<W> TopTree<W> {
     }
 
     fn set_exposed(&mut self, v: tree::VertexId, exposed: bool) {
+        eprintln!("set_exposed({v:?}, {exposed})");
         self.exposed.set(v.index(), exposed);
     }
 
@@ -1442,7 +1594,41 @@ impl<W> TopTree<W> {
     }
 
     fn is_boundary_vertex_internal(&self, v: tree::VertexId) -> bool {
+        // eprintln!(
+        //     "{v:?} => exposed = {}, degree = {}",
+        //     self.is_exposed_internal(v),
+        //     self.tree.degree(v)
+        // );
         self.is_exposed_internal(v) || self.tree.is_at_least_degree_n(v, 2)
+    }
+
+    pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
+        let leaves = if let Some(root) = incident_leaves(self, self.resolve_vertex(v))
+            .next()
+            .map(Handle::root)
+        {
+            iter::TreeRange::new(root)
+        } else {
+            iter::TreeRange::empty()
+        };
+
+        let mut vertices = BTreeSet::new();
+        for leaf in leaves {
+            match leaf.force() {
+                LeafOrInternal::Edge(edge) => {
+                    let Endpoints([left, right]) = self.tree.edge_endpoints(edge.edge());
+                    vertices.insert(*self.tree.vertex_weight(left));
+                    vertices.insert(*self.tree.vertex_weight(right));
+                }
+                LeafOrInternal::Label(label) => {
+                    let vertex = self.tree.label_weight(label.label()).vertex;
+                    vertices.insert(vertex);
+                }
+                LeafOrInternal::Internal(_) => unreachable!("leaf cannot be internal"),
+            }
+        }
+
+        vertices
     }
 
     pub fn is_boundary_vertex(&self, v: VertexId) -> bool {
@@ -1504,6 +1690,20 @@ impl<W> TopTree<W> {
     pub fn incident_edges(&self, v: VertexId) -> impl Iterator<Item = EdgeId> + '_ {
         let vv = self.resolve_vertex(v);
         self.tree.incident_edge_weights(vv).map(|e| e.id)
+    }
+
+    pub fn expose_vertex(&mut self, v: VertexId)
+    where
+        W: Summary,
+    {
+        expose(v, self);
+    }
+
+    pub fn deexpose_vertex(&mut self, v: VertexId)
+    where
+        W: Summary,
+    {
+        deexpose(v, self);
     }
 
     pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
@@ -1586,6 +1786,7 @@ impl<W> TopTree<W> {
             WithGeneration::new(vertex.unwrap(), self.generation)
         });
 
+        self.exposed.grow_to(vertex.unwrap().index() + 1);
         self.set_exposed(vertex.unwrap(), false);
 
         id
@@ -1615,7 +1816,6 @@ impl<W> TopTree<W> {
         W: Summary,
     {
         cut(v, w, self);
-        todo!()
     }
 
     pub fn attach(&mut self, v: VertexId) -> LabelId
@@ -1653,7 +1853,6 @@ impl<W> Drop for TopTree<W> {
         self.tree.edges.retain(|edge| {
             Handle::new_edge(edge.weight.node.cast::<Node<W>>()).delete_all_ancestors();
 
-            unsafe { Node::<W>::dealloc(edge.weight.node.cast()) };
             true
         });
     }

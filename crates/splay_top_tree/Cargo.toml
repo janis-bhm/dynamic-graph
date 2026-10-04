@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bit_field = "0.10.3"
 bitflags = "2.13.1"
 slotvec = { version = "0.1.0", path = "../slotvec" }

@@ -250,7 +250,7 @@ impl<V, E, L> Tree<V, E, L> {
             debug_assertions => self
                 .vertices
                 .get(id.index())
-                .map_or(false, |v| v.generation == id.generation()),
+                .is_some_and(|v| v.generation == id.generation()),
             _ => self.vertices.get(id.index()).is_some(),
         }
     }
@@ -260,7 +260,7 @@ impl<V, E, L> Tree<V, E, L> {
             debug_assertions => self
                 .edges
                 .get(id.index())
-                .map_or(false, |e| e.generation == id.generation()),
+                .is_some_and(|e| e.generation == id.generation()),
             _ => self.edges.get(id.index()).is_some(),
         }
     }
@@ -270,7 +270,7 @@ impl<V, E, L> Tree<V, E, L> {
             debug_assertions => self
                 .labels
                 .get(id.index())
-                .map_or(false, |l| l.generation == id.generation()),
+                .is_some_and(|l| l.generation == id.generation()),
             _ => self.labels.get(id.index()).is_some(),
         }
     }
@@ -351,7 +351,7 @@ impl<V, E, L> Tree<V, E, L> {
             Some(swapped) => {
                 let generation = mem::replace(&mut swapped.generation, self.generation);
                 let prev = VertexId::new_from_usize(self.vertices.len(), generation);
-                let next = VertexId::new_from_usize(id, generation);
+                let next = VertexId::new_from_usize(id, self.generation);
 
                 (vertex.weight, SwapResult::Swapped { prev, next })
             }
@@ -387,8 +387,9 @@ impl<V, E, L> Tree<V, E, L> {
                     self.vertices[endpoint.index()].next_edge = replacement;
                 } else {
                     for edge in EdgeWalkerMut::new(&mut self.edges, first, endpoint) {
-                        if edge.next[direction].map(|e| e.index()) == Some(id) {
-                            edge.next[direction] = replacement;
+                        let dir = edge.endpoints.direction_of(endpoint).unwrap();
+                        if edge.next[dir].map(|e| e.index()) == Some(id) {
+                            edge.next[dir] = replacement;
                             break;
                         }
                     }
@@ -402,12 +403,18 @@ impl<V, E, L> Tree<V, E, L> {
 
         match self.edges.get_mut(id) {
             None => (edge.weight, SwapResult::None),
+            // the edge `swapped` was previously at the end of the vector and
+            // has now moved to index `id`.
             Some(swapped) => {
                 let endpoints = swapped.endpoints;
+                // the generation of the edge `swapped` is updated to the
+                // current generation. The caller of this function must ensure
+                // that the generation was incremented before calling this
+                // function.
                 let generation = mem::replace(&mut swapped.generation, self.generation);
 
                 let prev = EdgeId::new_from_usize(self.edges.len(), generation);
-                let next = EdgeId::new_from_usize(id, generation);
+                let next = EdgeId::new_from_usize(id, self.generation);
 
                 self.fix_edge_links(
                     endpoints,
@@ -463,7 +470,7 @@ impl<V, E, L> Tree<V, E, L> {
                 let generation = mem::replace(&mut swapped.generation, self.generation);
 
                 let prev = LabelId::new_from_usize(self.labels.len(), generation);
-                let next = LabelId::new_from_usize(id, generation);
+                let next = LabelId::new_from_usize(id, self.generation);
 
                 self.fix_label_links(vertex, self.labels.len(), Some(next));
 

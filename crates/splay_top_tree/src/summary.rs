@@ -1,4 +1,4 @@
-use crate::{ClusterId, VertexId, index};
+use crate::{VertexId, index};
 
 /// The boundary vertices of a cluster, in its logical frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -244,9 +244,3 @@ impl BoundaryVertices {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-}

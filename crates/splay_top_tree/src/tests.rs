@@ -41,15 +41,16 @@ impl Harness {
         self.adj.keys().copied()
     }
 
-    fn link(&mut self, u: VertexId, v: VertexId, w: u64) {
+    fn link(&mut self, u: VertexId, v: VertexId, w: u64) -> EdgeId {
         debug_assert_ne!(u, v);
-        self.tree.link_with(u, v, |_| Xor(w));
+        let e = self.tree.link_with(u, v, |_| Xor(w));
         self.adj.get_mut(&u).unwrap().insert(v, w);
         self.adj.get_mut(&v).unwrap().insert(u, w);
+        e
     }
 
     fn cut(&mut self, u: VertexId, v: VertexId) {
-        cut(u, v, &mut self.tree);
+        self.tree.cut(u, v);
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
@@ -80,9 +81,11 @@ impl Harness {
     }
 
     fn edge_leaves_of<'a>(&'a self, v: VertexId) -> impl Iterator<Item = NN> + 'a {
-        self.tree
-            .incident_edges(v)
-            .map(|e| e.edge_node.cast::<Node<Xor>>())
+        self.tree.incident_edges(v).map(|e| {
+            let edge = self.tree.edge_ids[e].tree_id;
+            let leaf = self.tree.tree.edge_weight(edge).node;
+            leaf.cast()
+        })
     }
 
     fn components(&self) -> Vec<Vec<VertexId>> {
@@ -153,17 +156,43 @@ impl Cii {
             + usize::from(self.mid.is_some())
             + usize::from(self.right.is_some())
     }
+
+    fn leftmost(&self) -> Option<VertexId> {
+        self.left.or(self.mid)
+    }
+
+    fn rightmost(&self) -> Option<VertexId> {
+        self.right.or(self.mid)
+    }
+
+    fn flipped(&self) -> Self {
+        Self {
+            left: self.right,
+            mid: self.mid,
+            right: self.left,
+        }
+    }
+
+    fn set(&mut self) -> BTreeSet<VertexId> {
+        [self.left, self.mid, self.right]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClusterKey {
-    Edge(tree::EdgeId),
+    Edge(tree::EdgeId, [tree::VertexId; 2]),
     Label(tree::LabelId),
 }
 
 fn cluster_keys(h: &TopTree<Xor>, node: NN) -> Vec<ClusterKey> {
     match Node::force_ptr(node) {
-        LeafOrInternal::Edge(leaf) => unsafe { vec![ClusterKey::Edge(leaf.as_ref().edge)] },
+        LeafOrInternal::Edge(leaf) => unsafe {
+            let endpoints = h.tree.edge_endpoints(leaf.as_ref().edge);
+            vec![ClusterKey::Edge(leaf.as_ref().edge, endpoints.0)]
+        },
         LeafOrInternal::Label(label) => vec![ClusterKey::Label(unsafe { label.as_ref().label })],
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
@@ -195,16 +224,18 @@ fn count_leaves_with(h: &TopTree<Xor>, node: NN, v: VertexId) -> usize {
     }
 }
 
-fn check_node(h: &TopTree<Xor>, node: NN) -> Cii {
+fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
+    let flip = parity ^ node_ref.is_flipped();
 
     let cii = match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
             let node = unsafe { leaf.as_ref() };
             let edge = h.tree.edge_weight(node.edge).id;
             let [left, right] = h.edge_endpoints(edge);
-            let flip = node_ref.is_flipped();
+
             let (ep_left, ep_right) = if flip { (right, left) } else { (left, right) };
+
             let mut c = Cii::default();
             if is_boundary_vertex(h, ep_left) {
                 c.left = Some(ep_left);
@@ -227,43 +258,38 @@ fn check_node(h: &TopTree<Xor>, node: NN) -> Cii {
         }
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            let bl = check_node(h, internal.children.left);
-            let br = check_node(h, internal.children.right);
-
-            let bl_rightmost = bl.right.or(bl.mid);
-            let bl_leftmost = bl.left.or(bl.mid);
-            let br_rightmost = br.right.or(br.mid);
-            let br_leftmost = br.left.or(br.mid);
+            let Children { left, right } = internal.children;
+            let (left, right) = if flip { (right, left) } else { (left, right) };
+            let bl = check_node(h, left, flip);
+            let br = check_node(h, right, flip);
 
             assert!(
-                bl_rightmost.is_some() && br_leftmost.is_some(),
+                bl.rightmost().is_some() && br.leftmost().is_some(),
                 "children of an internal node must have a shared boundary vertex; \
              node cluster = {:?}",
                 cluster_keys(h, node)
             );
             assert_eq!(
-                bl_rightmost,
-                br_leftmost,
+                bl.rightmost(),
+                br.leftmost(),
                 "orientation invariant: rightmost boundary of left child must equal \
              leftmost boundary of right child (the central vertex); node cluster = {:?}",
                 cluster_keys(h, node)
             );
-            let central = bl_rightmost.unwrap();
+            let central = bl.rightmost().unwrap();
 
             let mut c = Cii::default();
             let inside = count_leaves_with(h, node, central);
             if h.is_exposed(central) || inside < degree(h, central) {
                 c.mid = Some(central);
             }
-            if bl_leftmost != bl_rightmost {
-                c.left = bl_leftmost;
+            if bl.leftmost() != bl.rightmost() {
+                c.left = bl.leftmost();
             }
-            if br_leftmost != br_rightmost {
-                c.right = br_rightmost;
+            if br.leftmost() != br.rightmost() {
+                c.right = br.rightmost();
             }
-            if node_ref.is_flipped() {
-                std::mem::swap(&mut c.left, &mut c.right);
-            }
+
             c
         }
     };
@@ -271,7 +297,8 @@ fn check_node(h: &TopTree<Xor>, node: NN) -> Cii {
     assert_eq!(
         cii.count(),
         node_ref.num_boundary(),
-        "num_boundary mismatch at node (leaf={}, cluster={:?})",
+        "num_boundary ({:?}) mismatch at node (leaf={}, cluster={:?})",
+        node_ref.boundary,
         node_ref.is_edge(),
         cluster_keys(h, node)
     );
@@ -373,7 +400,7 @@ fn assert_invariants(h: &Harness) {
             "a top tree with k leaves must have 2k-1 nodes"
         );
 
-        let cii = check_node(tree, root);
+        let cii = check_node(tree, root, false);
         for (slot, label) in [
             (&cii.left, "left"),
             (&cii.mid, "middle"),
@@ -416,13 +443,13 @@ fn assert_invariants(h: &Harness) {
             .collect();
 
         let expected: BTreeSet<EdgeId> = tree
-            .edges
-            .keys()
-            .filter(|k| {
-                let [a, b] = k.0;
+            .edge_ids
+            .iter()
+            .filter(|(e, _)| {
+                let [a, b] = tree.edge_endpoints(*e);
                 comp.contains(&a) || comp.contains(&b)
             })
-            .map(|k| k.downcast())
+            .map(|(e, _)| e)
             .collect();
         assert_eq!(
             comp_leaves, expected,
@@ -472,7 +499,7 @@ fn expose_isolated_vertex() {
     assert_invariants(&h);
 }
 
-fn build_path(h: &mut Harness) -> Vec<Index> {
+fn build_path(h: &mut Harness) -> Vec<VertexId> {
     let verts: Vec<_> = h.vertices().collect();
     for i in 1..verts.len() {
         h.link(verts[i - 1], verts[i], i as u64 * 31 + 7);
@@ -588,12 +615,12 @@ fn grow_a_small_tree_with_exposes() {
     for _ in 0..n {
         let r = rng.next() % 3;
         let comps = h.components();
-        let clean: Vec<Vec<Index>> = comps
+        let clean: Vec<Vec<VertexId>> = comps
             .iter()
             .filter(|c| !h.has_exposed(c))
             .cloned()
             .collect();
-        let edges: Vec<(Index, Index)> = clean
+        let edges: Vec<(VertexId, VertexId)> = clean
             .iter()
             .flat_map(|c| {
                 c.iter().flat_map(|v| {
@@ -612,10 +639,23 @@ fn grow_a_small_tree_with_exposes() {
             let ib = if ib >= ia { ib + 1 } else { ib };
             let u = clean[ia][(rng.next() as usize) % clean[ia].len()];
             let v = clean[ib][(rng.next() as usize) % clean[ib].len()];
-            h.link(u, v, rng.next() | 1);
+            let e = h.link(u, v, rng.next() | 1);
+            eprintln!(
+                "linking {u:?} and {v:?} = {e:?} with boundary: {:?}",
+                unsafe {
+                    h.tree
+                        .tree
+                        .edge(h.tree.edge_ids[e].tree_id)
+                        .weight
+                        .node
+                        .as_ref()
+                        .boundary
+                },
+            );
             acted = true;
         } else if r == 1 && !edges.is_empty() {
             let (u, v) = edges[(rng.next() as usize) % edges.len()];
+            eprintln!("cutting {:?} = {u:?} and {v:?}", h.tree.find_edge(u, v));
             h.cut(u, v);
             acted = true;
         } else if h.exposed.len() < 2 {
@@ -623,6 +663,7 @@ fn grow_a_small_tree_with_exposes() {
             for _ in 0..verts.len() {
                 let v = verts[(rng.next() as usize) % verts.len()];
                 if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
+                    eprintln!("exposing {v:?}");
                     h.expose(v);
                     acted = true;
                     break;
@@ -631,6 +672,7 @@ fn grow_a_small_tree_with_exposes() {
         }
         if !acted && !h.exposed.is_empty() {
             let v = *h.exposed.iter().next().unwrap();
+            eprintln!("deexposing {v:?}");
             h.deexpose(v);
             acted = true;
         }
@@ -639,6 +681,7 @@ fn grow_a_small_tree_with_exposes() {
         }
         assert_invariants(&h);
     }
+
     h.deexpose_all();
     assert_invariants(&h);
 }
@@ -650,12 +693,12 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
     for _ in 0..num_ops {
         let verts: Vec<_> = h.vertices().collect();
         let comps = h.components();
-        let clean: Vec<Vec<Index>> = comps
+        let clean: Vec<Vec<VertexId>> = comps
             .iter()
             .filter(|c| !h.has_exposed(c))
             .cloned()
             .collect();
-        let clean_edges: Vec<(Index, Index)> = clean
+        let clean_edges: Vec<(VertexId, VertexId)> = clean
             .iter()
             .flat_map(|c| {
                 c.iter().flat_map(|v| {
