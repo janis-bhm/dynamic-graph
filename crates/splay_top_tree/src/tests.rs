@@ -17,17 +17,17 @@ impl Summary for Xor {
 type NN = std::ptr::NonNull<Node<Xor>>;
 
 struct Harness {
-    tree: tree::Tree<(), Xor, Xor>,
-    adj: BTreeMap<tree::VertexId, BTreeMap<usize, u64>>,
-    exposed: BTreeSet<usize>,
+    tree: TopTree<Xor>,
+    adj: BTreeMap<VertexId, BTreeMap<VertexId, u64>>,
+    exposed: BTreeSet<VertexId>,
 }
 
 impl Harness {
     fn new(num_vertices: usize) -> Self {
-        let mut tree = tree::Tree::new();
+        let mut tree = TopTree::new();
         let mut adj = BTreeMap::new();
         for _ in 0..num_vertices {
-            let v = tree.add_vertex(());
+            let v = tree.add_vertex();
             adj.insert(v, BTreeMap::new());
         }
         Self {
@@ -37,24 +37,24 @@ impl Harness {
         }
     }
 
-    fn vertices(&self) -> impl Iterator<Item = tree::VertexId> + '_ {
+    fn vertices(&self) -> impl Iterator<Item = VertexId> + '_ {
         self.adj.keys().copied()
     }
 
-    fn link(&mut self, u: tree::VertexId, v: tree::VertexId, w: u64) {
+    fn link(&mut self, u: VertexId, v: VertexId, w: u64) {
         debug_assert_ne!(u, v);
-        link(u, v, Xor(w), &mut self.tree);
+        self.tree.link_with(u, v, |_| Xor(w));
         self.adj.get_mut(&u).unwrap().insert(v, w);
         self.adj.get_mut(&v).unwrap().insert(u, w);
     }
 
-    fn cut(&mut self, u: Index, v: Index) {
+    fn cut(&mut self, u: VertexId, v: VertexId) {
         cut(u, v, &mut self.tree);
         self.adj.get_mut(&u).unwrap().remove(&v);
         self.adj.get_mut(&v).unwrap().remove(&u);
     }
 
-    fn expose(&mut self, v: Index) {
+    fn expose(&mut self, v: VertexId) {
         let returned = expose(v, &mut self.tree);
         if let Some(root) = returned {
             let root_of_component = self.edge_leaves_of(v).next().map(climb).unwrap();
@@ -63,7 +63,7 @@ impl Harness {
         self.exposed.insert(v);
     }
 
-    fn deexpose(&mut self, v: Index) {
+    fn deexpose(&mut self, v: VertexId) {
         deexpose(v, &mut self.tree);
         self.exposed.remove(&v);
     }
@@ -75,17 +75,17 @@ impl Harness {
         }
     }
 
-    fn incident(&self, v: Index) -> Vec<Index> {
+    fn incident(&self, v: VertexId) -> Vec<VertexId> {
         self.adj.get(&v).unwrap().keys().copied().collect()
     }
 
-    fn edge_leaves_of<'a>(&'a self, v: Index) -> impl Iterator<Item = NN> + 'a {
+    fn edge_leaves_of<'a>(&'a self, v: VertexId) -> impl Iterator<Item = NN> + 'a {
         self.tree
             .incident_edges(v)
             .map(|e| e.edge_node.cast::<Node<Xor>>())
     }
 
-    fn components(&self) -> Vec<Vec<Index>> {
+    fn components(&self) -> Vec<Vec<VertexId>> {
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
         for start in self.vertices() {
@@ -108,18 +108,18 @@ impl Harness {
         out
     }
 
-    fn comp_of(&self, v: Index) -> Vec<Index> {
+    fn comp_of(&self, v: VertexId) -> Vec<VertexId> {
         self.components()
             .into_iter()
             .find(|c| c.contains(&v))
             .unwrap()
     }
 
-    fn has_exposed(&self, comp: &[Index]) -> bool {
+    fn has_exposed(&self, comp: &[VertexId]) -> bool {
         comp.iter().any(|v| self.exposed.contains(v))
     }
 
-    fn exposed_count(&self, comp: &[Index]) -> usize {
+    fn exposed_count(&self, comp: &[VertexId]) -> usize {
         comp.iter().filter(|v| self.exposed.contains(v)).count()
     }
 }
@@ -132,20 +132,19 @@ fn climb(mut node: NN) -> NN {
     }
 }
 
-fn degree(h: &tree::Tree<Xor>, v: Index) -> usize {
-    h.degree(v).unwrap_or(0)
+fn degree(h: &TopTree<Xor>, v: VertexId) -> usize {
+    h.degree(v)
 }
 
-fn is_boundary_vertex(h: &tree::Tree<Xor>, v: Index) -> bool {
-    let exposed = h.vertices.get(&v).is_some_and(|v| v.exposed);
-    exposed || degree(h, v) >= 2
+fn is_boundary_vertex(h: &TopTree<Xor>, v: VertexId) -> bool {
+    h.is_boundary_vertex(v)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Cii {
-    left: Option<Index>,
-    mid: Option<Index>,
-    right: Option<Index>,
+    left: Option<VertexId>,
+    mid: Option<VertexId>,
+    right: Option<VertexId>,
 }
 
 impl Cii {
@@ -158,54 +157,54 @@ impl Cii {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClusterKey {
-    Edge(EdgeKey),
-    Label(Index),
+    Edge(tree::EdgeId),
+    Label(tree::LabelId),
 }
 
-fn cluster_keys(h: &tree::Tree<Xor>, node: NN) -> Vec<ClusterKey> {
+fn cluster_keys(h: &TopTree<Xor>, node: NN) -> Vec<ClusterKey> {
     match Node::force_ptr(node) {
-        LeafOrInternal::Edge(leaf) => unsafe {
-            vec![ClusterKey::Edge(leaf.as_ref().edge.downcast())]
-        },
-        LeafOrInternal::Label(label) => vec![ClusterKey::Label(unsafe { label.as_ref().vertex })],
+        LeafOrInternal::Edge(leaf) => unsafe { vec![ClusterKey::Edge(leaf.as_ref().edge)] },
+        LeafOrInternal::Label(label) => vec![ClusterKey::Label(unsafe { label.as_ref().label })],
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            let mut out = cluster_keys(h, internal.children[0]);
-            out.extend(cluster_keys(h, internal.children[1]));
+            let mut out = cluster_keys(h, internal.children.left);
+            out.extend(cluster_keys(h, internal.children.right));
             out
         }
     }
 }
 
-fn count_leaves_with(h: &tree::Tree<Xor>, node: NN, v: Index) -> usize {
+fn count_leaves_with(h: &TopTree<Xor>, node: NN, v: VertexId) -> usize {
     match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
             let leaf = unsafe { leaf.as_ref() };
-            let endpoints = h.endpoints(&leaf.edge);
-            usize::from(endpoints.left == v || endpoints.right == v)
+            let edge = h.tree.edge_weight(leaf.edge).id;
+            let [left, right] = h.edge_endpoints(edge);
+            usize::from(left == v || right == v)
         }
-        LeafOrInternal::Label(label) => usize::from(unsafe { label.as_ref().vertex } == v),
+        LeafOrInternal::Label(label) => {
+            let label = unsafe { label.as_ref().label };
+            let label = h.tree.label_weight(label).vertex;
+            usize::from(label == v)
+        }
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            count_leaves_with(h, internal.children[0], v)
-                + count_leaves_with(h, internal.children[1], v)
+            count_leaves_with(h, internal.children.left, v)
+                + count_leaves_with(h, internal.children.right, v)
         }
     }
 }
 
-fn check_node(h: &tree::Tree<Xor>, node: NN) -> Cii {
+fn check_node(h: &TopTree<Xor>, node: NN) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
 
     let cii = match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
             let node = unsafe { leaf.as_ref() };
-            let endpoints = h.endpoints(&node.edge);
+            let edge = h.tree.edge_weight(node.edge).id;
+            let [left, right] = h.edge_endpoints(edge);
             let flip = node_ref.is_flipped();
-            let (ep_left, ep_right) = if flip {
-                (endpoints.right, endpoints.left)
-            } else {
-                (endpoints.left, endpoints.right)
-            };
+            let (ep_left, ep_right) = if flip { (right, left) } else { (left, right) };
             let mut c = Cii::default();
             if is_boundary_vertex(h, ep_left) {
                 c.left = Some(ep_left);
@@ -217,18 +216,19 @@ fn check_node(h: &tree::Tree<Xor>, node: NN) -> Cii {
         }
         LeafOrInternal::Label(label) => {
             let node = unsafe { label.as_ref() };
+            let label = h.tree.label_weight(node.label).vertex;
 
             let mut c = Cii::default();
-            if is_boundary_vertex(h, node.vertex) {
-                c.mid = Some(node.vertex);
+            if is_boundary_vertex(h, label) {
+                c.mid = Some(label);
             }
 
             c
         }
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            let bl = check_node(h, internal.children[0]);
-            let br = check_node(h, internal.children[1]);
+            let bl = check_node(h, internal.children.left);
+            let br = check_node(h, internal.children.right);
 
             let bl_rightmost = bl.right.or(bl.mid);
             let bl_leftmost = bl.left.or(bl.mid);
@@ -252,7 +252,7 @@ fn check_node(h: &tree::Tree<Xor>, node: NN) -> Cii {
 
             let mut c = Cii::default();
             let inside = count_leaves_with(h, node, central);
-            if h.vertices.get(&central).is_some_and(|v| v.exposed) || inside < degree(h, central) {
+            if h.is_exposed(central) || inside < degree(h, central) {
                 c.mid = Some(central);
             }
             if bl_leftmost != bl_rightmost {
@@ -284,13 +284,13 @@ fn fold_weight(node: NN) -> u64 {
         LeafOrInternal::Label(label) => unsafe { label.as_ref().weight.0 },
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            fold_weight(internal.children[0]) ^ fold_weight(internal.children[1])
+            fold_weight(internal.children.left) ^ fold_weight(internal.children.right)
         }
     }
 }
 
 fn check_node_weights_and_edges(
-    h: &tree::Tree<Xor>,
+    h: &TopTree<Xor>,
     node: NN,
     leaves: &mut Vec<NN>,
     nodes: &mut Vec<NN>,
@@ -304,7 +304,7 @@ fn check_node_weights_and_edges(
         }
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
-            for child in internal.children {
+            for child in &internal.children {
                 let child_ref = unsafe { &*child.as_ptr() };
                 assert_eq!(
                     child_ref.parent(),
@@ -326,9 +326,12 @@ fn check_node_weights_and_edges(
 fn all_roots(h: &Harness) -> Vec<NN> {
     let mut roots: Vec<NN> = h
         .tree
-        .edges
-        .values()
-        .map(|e| climb(e.edge_node.cast()))
+        .edge_ids
+        .iter()
+        .map(|(_, WithGeneration { tree_id, .. })| {
+            let node = h.tree.tree.edge_weight(*tree_id).node;
+            climb(node.cast())
+        })
         .collect();
     roots.sort_by_key(|r| r.as_ptr() as usize);
     roots.dedup();
@@ -339,13 +342,17 @@ fn assert_invariants(h: &Harness) {
     let tree = &h.tree;
     let mut total_leaves = 0usize;
 
-    for (key, edge) in tree.edges.iter() {
-        let leaf_nn: NN = edge.edge_node.cast();
+    for (key, edge) in tree.edge_ids.iter() {
+        let leaf_nn = tree.tree.edge_weight(edge.tree_id).node;
         let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
         assert!(node.is_edge(), "edge must map to a leaf node");
-        assert_eq!(node.edge, *key, "leaf edge key must match its map entry");
+        assert_eq!(
+            node.edge, edge.tree_id,
+            "leaf edge key must match its map entry"
+        );
         let stored = node.weight.0;
-        let expected = h.adj[&edge.endpoints[0]].get(&edge.endpoints[1]).copied();
+        let [v, w] = h.tree.edge_endpoints(key);
+        let expected = h.adj[&v].get(&w).copied();
         match expected {
             Some(w) => assert_eq!(stored, w, "leaf weight must match user supplied weight"),
             None => panic!("underlying tree and mirror disagree about edge existence"),
@@ -353,7 +360,7 @@ fn assert_invariants(h: &Harness) {
         total_leaves += 1;
     }
 
-    let mut covered: BTreeSet<EdgeKey> = BTreeSet::new();
+    let mut covered: BTreeSet<EdgeId> = BTreeSet::new();
     for root in all_roots(h) {
         assert!(unsafe { &*root.as_ptr() }.parent().is_none());
 
@@ -373,7 +380,7 @@ fn assert_invariants(h: &Harness) {
             (&cii.right, "right"),
         ] {
             if let Some(v) = slot {
-                let exposed = tree.vertices.get(v).is_some_and(|v| v.exposed);
+                let exposed = tree.is_exposed(*v);
                 assert!(exposed, "root boundary vertex ({label}) must be exposed");
             }
         }
@@ -381,9 +388,8 @@ fn assert_invariants(h: &Harness) {
 
         let mut comp_leaves = BTreeSet::new();
         for leaf in leaves {
-            let key = unsafe { &*leaf.cast::<LeafNode<Xor>>().as_ptr() }
-                .edge
-                .downcast();
+            let key = unsafe { &*leaf.cast::<LeafNode<Xor>>().as_ptr() }.edge;
+            let key = tree.tree.edge_weight(key).id;
             assert!(
                 covered.insert(key),
                 "leaf appears in more than one top tree component"
@@ -391,22 +397,25 @@ fn assert_invariants(h: &Harness) {
             comp_leaves.insert(key);
         }
 
-        let sample = comp_leaves
+        let sample = *comp_leaves
             .iter()
             .next()
             .expect("component must contain an edge");
-        let comp: BTreeSet<Index> = h
+        let comp: BTreeSet<VertexId> = h
             .components()
             .into_iter()
             .find(|c| {
-                c.iter()
-                    .any(|&v| h.adj[&v].keys().any(|&w| EdgeKey::new(v, w) == *sample))
+                c.iter().any(|&v| {
+                    h.adj[&v]
+                        .keys()
+                        .any(|&w| tree.find_edge(v, w) == Some(sample))
+                })
             })
             .unwrap()
             .into_iter()
             .collect();
 
-        let expected: BTreeSet<EdgeKey> = tree
+        let expected: BTreeSet<EdgeId> = tree
             .edges
             .keys()
             .filter(|k| {
