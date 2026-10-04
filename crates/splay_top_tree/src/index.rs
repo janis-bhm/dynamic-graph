@@ -1,10 +1,14 @@
-use crate::non_max::NonMaxUsize;
+use slotvec::Indexing;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Default, Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(u32);
 
 impl Generation {
+    pub fn new() -> Self {
+        Self(0)
+    }
+
     pub fn increment(&mut self) {
         self.0 = self.0.wrapping_add(1);
     }
@@ -66,4 +70,28 @@ impl_id! {
     pub struct VertexId,
     pub struct EdgeId,
     pub struct LabelId,
+}
+
+impl Indexing for VertexId {
+    type Optional = Option<VertexId>;
+
+    fn get(&self) -> usize {
+        self.index.get()
+    }
+
+    fn new(value: usize) -> Self {
+        Self::new_from_usize(value, Generation(0))
+    }
+}
+
+impl Indexing for EdgeId {
+    type Optional = Option<EdgeId>;
+
+    fn get(&self) -> usize {
+        self.index.get()
+    }
+
+    fn new(value: usize) -> Self {
+        Self::new_from_usize(value, Generation(0))
+    }
 }

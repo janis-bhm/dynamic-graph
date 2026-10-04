@@ -13,12 +13,12 @@ impl_id! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SwapResult<T> {
+pub enum SwapResult<T> {
     None,
     Swapped { prev: T, next: T },
 }
 
-trait Swappable: Sized {
+pub trait Swappable: Sized {
     fn try_swap(&mut self, other: SwapResult<Self>);
 }
 
@@ -48,7 +48,7 @@ pub struct Tree<V, E, L> {
     generation: Generation,
 }
 
-struct Vertex<V> {
+pub(crate) struct Vertex<V> {
     next_edge: Option<EdgeId>,
     next_label: Option<LabelId>,
     #[cfg(debug_assertions)]
@@ -56,7 +56,7 @@ struct Vertex<V> {
     pub weight: V,
 }
 
-struct Edge<E> {
+pub(crate) struct Edge<E> {
     endpoints: Endpoints,
     next: EdgeLinks,
     #[cfg(debug_assertions)]
@@ -64,7 +64,7 @@ struct Edge<E> {
     pub weight: E,
 }
 
-struct Label<L> {
+pub(crate) struct Label<L> {
     vertex: VertexId,
     next: Option<LabelId>,
     #[cfg(debug_assertions)]
@@ -444,7 +444,7 @@ impl<V, E, L> Tree<V, E, L> {
                 self.vertices[vertex.index()].next_label = next;
             } else {
                 for label in LabelWalkerMut::new(&mut self.labels, first) {
-                    if label.next.index() == id {
+                    if label.next.map(|l| l.index()) == Some(id) {
                         label.next = next;
                         break;
                     }
@@ -569,7 +569,11 @@ impl<'a, E> Iterator for EdgeWalkerMut<'a, E> {
             let edge = &mut self.edges[eid.index()];
             let direction = edge.endpoints.direction_of(self.incident_vertex).unwrap();
             self.current = edge.next[direction];
-            Some(edge)
+
+            unsafe {
+                let edge_ptr: *mut Edge<E> = edge;
+                Some(&mut *edge_ptr)
+            }
         } else {
             None
         }
@@ -597,14 +601,18 @@ impl<'a, L> Iterator for LabelWalkerMut<'a, L> {
         if let Some(lid) = self.current {
             let label = &mut self.labels[lid.index()];
             self.current = label.next;
-            Some(label)
+
+            unsafe {
+                let label_ptr: *mut Label<L> = label;
+                Some(&mut *label_ptr)
+            }
         } else {
             None
         }
     }
 }
 
-struct LabelWeights<'a, L> {
+pub struct LabelWeights<'a, L> {
     labels: &'a [Label<L>],
     current: Option<LabelId>,
 }
@@ -633,7 +641,7 @@ impl<'a, L> Iterator for LabelWeights<'a, L> {
     }
 }
 
-struct EdgeWeights<'a, E> {
+pub struct EdgeWeights<'a, E> {
     edges: &'a [Edge<E>],
     current: Option<EdgeId>,
     incident_vertex: VertexId,
@@ -687,7 +695,11 @@ impl<'a, L> Iterator for LabelWeightsMut<'a, L> {
         if let Some(lid) = self.current {
             let label = &mut self.labels[lid.index()];
             self.current = label.next;
-            Some(&mut label.weight)
+
+            unsafe {
+                let label_ptr: *mut Label<L> = label;
+                Some(&mut (*label_ptr).weight)
+            }
         } else {
             None
         }
@@ -719,7 +731,11 @@ impl<'a, E> Iterator for EdgeWeightsMut<'a, E> {
             let edge = &mut self.edges[eid.index()];
             let direction = edge.endpoints.direction_of(self.incident_vertex).unwrap();
             self.current = edge.next[direction];
-            Some(&mut edge.weight)
+
+            unsafe {
+                let edge_ptr: *mut Edge<E> = edge;
+                Some(&mut (*edge_ptr).weight)
+            }
         } else {
             None
         }

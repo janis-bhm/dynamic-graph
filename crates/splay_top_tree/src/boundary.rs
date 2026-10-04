@@ -1,4 +1,4 @@
-use crate::tree::VertexId;
+use crate::index::VertexId;
 
 pub struct PackedBoundaryVertices {
     pub left: Option<VertexId>,
