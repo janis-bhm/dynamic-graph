@@ -509,20 +509,18 @@ impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
         match self.vertex {
             Either::Left(vertex) => {
                 while let Some(label) = self.tree.vertices[vertex.index()].next_label {
-                    match self.tree.remove_label_unchecked(label.index()) {
-                        (_, swap @ SwapResult::Swapped { .. }) => {
-                            return Some(EdgeOrLabelId::Label(swap));
-                        }
-                        _ => {}
+                    if let (_, swap @ SwapResult::Swapped { .. }) =
+                        self.tree.remove_label_unchecked(label.index())
+                    {
+                        return Some(EdgeOrLabelId::Label(swap));
                     }
                 }
 
                 while let Some(edge) = self.tree.vertices[vertex.index()].next_edge {
-                    match self.tree.remove_edge_unchecked(edge.index()) {
-                        (_, swap @ SwapResult::Swapped { .. }) => {
-                            return Some(EdgeOrLabelId::Edge(swap));
-                        }
-                        _ => {}
+                    if let (_, swap @ SwapResult::Swapped { .. }) =
+                        self.tree.remove_edge_unchecked(edge.index())
+                    {
+                        return Some(EdgeOrLabelId::Edge(swap));
                     }
                 }
 
