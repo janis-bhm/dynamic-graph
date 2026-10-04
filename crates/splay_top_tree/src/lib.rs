@@ -1012,18 +1012,25 @@ where
         return Some(node.forget_type());
     }
 
-    let endpoints = match node.force() {
-        LeafOrInternal::Edge(edge) => root.tree.edge_endpoints(edge.edge()),
+    let (mut is_left, mut is_right) = match node.force() {
+        LeafOrInternal::Edge(edge) => {
+            let endpoints = root.tree.edge_endpoints(edge.edge());
+            let flip = node.is_flipped();
+            (
+                (endpoints.left() == v) != flip,
+                (endpoints.right() == v) != flip,
+            )
+        }
+        // A label is a point leaf: reversing it cannot move its vertex from
+        // one end to the other. In particular, a flipped label still has the
+        // vertex at both logical borders (unlike an edge leaf, whose endpoints
+        // are exchanged by the flip).
         LeafOrInternal::Label(label) => {
             let vertex = root.tree.label_vertex(label.label());
-            tree::Endpoints([vertex, vertex])
+            (vertex == v, vertex == v)
         }
         LeafOrInternal::Internal(_) => unreachable!("node must be a leaf"),
     };
-
-    let flip = node.is_flipped();
-    let mut is_left = (endpoints.left() == v) != flip;
-    let mut is_right = (endpoints.right() == v) != flip;
     let mut is_middle = false;
 
     let mut last_middle_node = None;
