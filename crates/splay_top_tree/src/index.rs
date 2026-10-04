@@ -95,3 +95,15 @@ impl Indexing for EdgeId {
         Self::new_from_usize(value, Generation(0))
     }
 }
+
+impl Indexing for LabelId {
+    type Optional = Option<LabelId>;
+
+    fn get(&self) -> usize {
+        self.index.get()
+    }
+
+    fn new(value: usize) -> Self {
+        Self::new_from_usize(value, Generation(0))
+    }
+}

@@ -8,7 +8,7 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Xor(u64);
 
-impl Reduce for Xor {
+impl Summary for Xor {
     fn reduce(&self, other: &Self) -> Self {
         Xor(self.0 ^ other.0)
     }
@@ -17,9 +17,9 @@ impl Reduce for Xor {
 type NN = std::ptr::NonNull<Node<Xor>>;
 
 struct Harness {
-    tree: tree::Tree<Xor>,
-    adj: BTreeMap<Index, BTreeMap<Index, u64>>,
-    exposed: BTreeSet<Index>,
+    tree: tree::Tree<(), Xor, Xor>,
+    adj: BTreeMap<tree::VertexId, BTreeMap<usize, u64>>,
+    exposed: BTreeSet<usize>,
 }
 
 impl Harness {
@@ -27,7 +27,7 @@ impl Harness {
         let mut tree = tree::Tree::new();
         let mut adj = BTreeMap::new();
         for _ in 0..num_vertices {
-            let v = tree.add_vertex();
+            let v = tree.add_vertex(());
             adj.insert(v, BTreeMap::new());
         }
         Self {
@@ -37,11 +37,11 @@ impl Harness {
         }
     }
 
-    fn vertices(&self) -> impl Iterator<Item = Index> + '_ {
+    fn vertices(&self) -> impl Iterator<Item = tree::VertexId> + '_ {
         self.adj.keys().copied()
     }
 
-    fn link(&mut self, u: Index, v: Index, w: u64) {
+    fn link(&mut self, u: tree::VertexId, v: tree::VertexId, w: u64) {
         debug_assert_ne!(u, v);
         link(u, v, Xor(w), &mut self.tree);
         self.adj.get_mut(&u).unwrap().insert(v, w);

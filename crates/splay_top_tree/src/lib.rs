@@ -12,7 +12,7 @@ use std::ptr::{self, NonNull};
 
 use crate::{
     boundary::BoundaryVertices,
-    index::Generation,
+    index::{Generation, LabelId},
     tree::{Endpoints, SwapResult},
     util::TaggedPtr,
 };
@@ -394,6 +394,15 @@ impl<W> Handle<W, marker::Either> {
     }
 }
 
+impl<W> Handle<W, marker::Label> {
+    fn new_label(node: NonNull<Node<W>>) -> Handle<W, marker::Label> {
+        Handle {
+            node,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+
 impl<W> Handle<W, marker::Edge> {
     fn new_edge(node: NonNull<Node<W>>) -> Handle<W, marker::Edge> {
         Handle {
@@ -547,7 +556,7 @@ impl<W, NodeType> Handle<W, NodeType> {
     /// returns `None` if the node has no grandparent (i.e. is a child of/or the root)
     fn rotate_up(&mut self) -> Option<()>
     where
-        W: Reduce,
+        W: Summary,
     {
         let mut sibling = self.sibling()?;
         let mut parent = self.parent()?;
@@ -653,7 +662,7 @@ impl<W, NodeType> Handle<W, NodeType> {
 
     fn splay_step(self) -> Option<Handle<W, marker::Either>>
     where
-        W: Reduce,
+        W: Summary,
     {
         let mut node = self.forget_type();
         loop {
@@ -698,7 +707,7 @@ impl<W, NodeType> Handle<W, NodeType> {
 
     fn semi_splay(self)
     where
-        W: Reduce,
+        W: Summary,
     {
         let mut node = self.forget_type();
         while let Some(next_node) = node.splay_step() {
@@ -708,7 +717,7 @@ impl<W, NodeType> Handle<W, NodeType> {
 
     fn full_splay(self)
     where
-        W: Reduce,
+        W: Summary,
     {
         while let Some(next_node) = unsafe { ptr::read(&self) }.splay_step() {
             next_node.splay_step();
@@ -879,7 +888,7 @@ impl<W> Handle<W, marker::Internal> {
 
     fn recompute_weight(&mut self)
     where
-        W: Reduce,
+        W: Summary,
     {
         let [left, right] = self.flipped_children();
         unsafe {
@@ -912,7 +921,7 @@ pub(crate) fn find_consuming_node<W>(
     v: tree::VertexId,
 ) -> Option<Handle<W, marker::Either>>
 where
-    W: Reduce,
+    W: Summary,
 {
     let node = incident_leaves(root, v).next()?;
     unsafe { ptr::read(&node) }.semi_splay();
@@ -966,7 +975,7 @@ where
 /// If `v` has no incident edges, then `None` is returned.
 pub(crate) fn expose<W>(v: VertexId, root: &mut TopTree<W>) -> Option<Handle<W, marker::Either>>
 where
-    W: Reduce,
+    W: Summary,
 {
     fn expose_prepared<W>(
         mut node: Handle<W, marker::Either>,
@@ -974,7 +983,7 @@ where
         v: VertexId,
     ) -> Handle<W, marker::Either>
     where
-        W: Reduce,
+        W: Summary,
     {
         let mut left = false;
         let mut right = false;
@@ -1002,7 +1011,7 @@ where
     /// precondition: root of the tree containing the to-be-exposed vertex is a point.
     fn prepare_expose<W>(mut consuming_node: Handle<W, marker::Either>) -> Handle<W, marker::Either>
     where
-        W: Reduce,
+        W: Summary,
     {
         let mut node = unsafe { ptr::read(&consuming_node) };
         while let Some(parent) = node.parent() {
@@ -1065,7 +1074,7 @@ where
 
 pub(crate) fn deexpose<W>(v: VertexId, tree: &mut TopTree<W>) -> Option<Handle<W, marker::Either>>
 where
-    W: Reduce,
+    W: Summary,
 {
     let resolved = tree.resolve_vertex(v);
 
@@ -1085,7 +1094,7 @@ where
 
 pub(crate) fn link<W>(u: VertexId, v: VertexId, weight: W, tree: &mut TopTree<W>) -> EdgeId
 where
-    W: Reduce,
+    W: Summary,
 {
     let uu = tree.resolve_vertex(u);
     let vv = tree.resolve_vertex(v);
@@ -1123,7 +1132,7 @@ where
             BoundaryVertices::from_left_and_right(ru.as_ref().map(|_| u), rv.as_ref().map(|_| v)),
         );
 
-        IdSlot::new(edge, tree.generation)
+        WithGeneration::new(edge, tree.generation)
     });
 
     let mut node = leaf.cast::<Node<W>>();
@@ -1173,7 +1182,7 @@ pub(crate) fn cut<W>(
     Option<Handle<W, marker::Either>>,
 )
 where
-    W: Reduce,
+    W: Summary,
 {
     let uu = tree.resolve_vertex(u);
     let vv = tree.resolve_vertex(v);
@@ -1209,75 +1218,97 @@ where
     (ru, rv)
 }
 
-// pub(crate) fn attach<W>(
-//     v: tree::VertexId,
-//     weight: W,
-//     tree: &mut TopTree<W>,
-// ) -> (tree::LabelId, NonNull<Node<W>>)
-// where
-//     W: Reduce,
-// {
-//     let mut rv = expose(v, tree);
-//     if let Some(ref mut tv) = rv
-//         && Handle::has_left_boundary(tv, tree)
-//     {
-//         tv.toggle_flipped();
-//     }
-//     tree.exposed.set(v.index(), false);
+pub(crate) fn attach<W>(
+    v: VertexId,
+    weight: W,
+    tree: &mut TopTree<W>,
+) -> (LabelId, NonNull<Node<W>>)
+where
+    W: Summary,
+{
+    let mut rv = expose(v, tree);
+    if let Some(ref mut tv) = rv
+        && Handle::has_left_boundary(tv, tree)
+    {
+        tv.toggle_flipped();
+    }
+    let resolved = tree.resolve_vertex(v);
+    tree.set_exposed(resolved, false);
 
-//     let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
-//     let label = tree.tree.add_label(v, node.cast());
-//     LabelNode::init(node, weight, label, usize::from(rv.is_some()));
+    let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
 
-//     let root: NonNull<Node<W>> = match rv {
-//         Some(rv) => {
-//             let left = rv;
-//             let right = node.cast::<Node<W>>();
-//             let weight = unsafe {
-//                 let wl = &left.node.as_ref().weight;
-//                 let wr = &right.as_ref().weight;
-//                 W::reduce(wl, wr)
-//             };
-//             InternalNode::alloc(weight, left.node, right, 0).cast()
-//         }
-//         None => node.cast(),
-//     };
+    let label = tree.label_ids.push_with(|id| {
+        let label = tree.tree.add_label(
+            resolved,
+            LabelInfo {
+                node,
+                vertex: v,
+                id,
+            },
+        );
+        LabelNode::init(
+            node,
+            weight,
+            label,
+            BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
+        );
 
-//     (label, root)
-// }
+        WithGeneration::new(label, tree.generation)
+    });
 
-// pub(crate) fn detach<W>(v: tree::LabelId, tree: &mut Tree<W>) {
-//     // labels are never path components, so removing them can never disconnect the tree.
-//     // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
-//     let (label, swap) = tree.remove_label(v);
-//     let label_handle = Handle::<W, marker::Label>::new(label.cast());
-//     if let Some(parent) = label_handle.parent() {
-//         let mut sibling = label_handle.sibling().expect("label must have a sibling");
+    let root: NonNull<Node<W>> = match rv {
+        Some(rv) => {
+            let left = rv;
+            let right = node.cast::<Node<W>>();
+            let weight = unsafe {
+                let wl = &left.node.as_ref().weight;
+                let wr = &right.as_ref().weight;
+                W::reduce(wl, wr)
+            };
+            InternalNode::alloc(weight, left.node, right, BoundaryVertices::None).cast()
+        }
+        None => node.cast(),
+    };
 
-//         if let Some(mut gp) = parent.parent() {
-//             let parent_is_left = parent.is_left_child().expect("parent has parent");
-//             // we need to flip the sibling if it is on the opposite side of the parent.
-//             // if the parent was flipped, then flip the sibling (again).
-//             let flip_sibling = (sibling.is_left_child().expect("sibling has parent")
-//                 != parent_is_left)
-//                 ^ parent.is_flipped();
+    (label, root)
+}
 
-//             if flip_sibling {
-//                 sibling.toggle_flipped();
-//             }
+pub(crate) fn detach<W>(l: LabelId, tree: &mut TopTree<W>)
+where
+    W: Summary,
+{
+    // labels are never path components, so removing them can never disconnect the tree.
+    // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
+    let resolved = tree.resolve_label(l);
+    let &LabelInfo {
+        node, vertex: v, ..
+    } = tree.tree.label_weight(resolved);
+    let label = Handle::<W, _>::new_label(node.cast());
 
-//             gp.set_child(sibling.node, parent_is_left);
-//         } else {
-//             // parent is root, so we just make the sibling the new root.
-//             sibling.set_parent(None);
-//         }
+    let _ = expose(v, tree);
+    unsafe { ptr::read(&label) }.full_splay();
 
-//         unsafe {
-//             Node::<W>::dealloc(parent.node);
-//             Node::<W>::dealloc(label_handle.node);
-//         }
-//     }
-// }
+    if let Some(parent) = label.parent() {
+        parent.push_flip();
+        let mut sibling = label.sibling().expect("has parent; must have sibling");
+        assert!(parent.parent().is_none(), "parent must be root");
+        sibling.set_parent(None);
+
+        unsafe {
+            Node::dealloc(label.node);
+            Node::dealloc(parent.node);
+        }
+    }
+
+    let (_l, swap) = tree.tree.remove_label(resolved);
+    if let SwapResult::Swapped { prev, next } = swap {
+        _ = (prev, next);
+        let id = tree.tree.label_weight(next).id;
+        tree.label_ids[id].tree_id = next;
+    }
+
+    let _ = deexpose(v, tree);
+}
 
 enum LeafOrInternal<T, V, U> {
     Edge(T),
@@ -1314,17 +1345,21 @@ struct EdgeInfo<W> {
 struct LabelInfo<W> {
     /// The leaf node in the top tree structure corresponding to this label
     node: NonNull<LabelNode<W>>,
-    // /// The label id in the top tree structure
-    // id: index::LabelId,
+    // TODO: this is redundant with the vertex's weight.
+    /// the attached-at vertex
+    vertex: index::VertexId,
+    /// The label id in the top tree structure
+    id: index::LabelId,
 }
 
-struct IdSlot<Id> {
+// Instead of just storing the `tree::VertexId` or `tree::EdgeId` in the slot vec, we also store a generation in debug builds to ensure that ABA-style usage bug of TopTree indices are caught.
+struct WithGeneration<Id> {
     tree_id: Id,
     #[cfg(debug_assertions)]
     generation: Generation,
 }
 
-impl<Id> IdSlot<Id> {
+impl<Id> WithGeneration<Id> {
     fn new(tree_id: Id, generation: Generation) -> Self {
         Self {
             tree_id,
@@ -1335,11 +1370,16 @@ impl<Id> IdSlot<Id> {
 }
 
 pub struct TopTree<W> {
-    tree: tree::Tree<(), EdgeInfo<W>, LabelInfo<W>>,
+    // the underlying forest stores the edges and per-edge/per-label information.
+    // we keep the top-tree node pointers here, as well as the TopTree edge id for edges so that there is a O(1) mapping from tree::EdgeId -> index::EdgeId and vice versa.
+    tree: tree::Tree<index::VertexId, EdgeInfo<W>, LabelInfo<W>>,
     // indexed by tree vertex index, true if the vertex is exposed in the top tree.
     exposed: slotvec::BitVec,
-    vertex_ids: SlotVec<IdSlot<tree::VertexId>, VertexId>,
-    edge_ids: SlotVec<IdSlot<tree::EdgeId>, EdgeId>,
+    // stable mapping of `tree::VertexId`s
+    // the `tree::VertexId` is the index in the `tree::Tree` structure, which change when edges are removed.
+    vertex_ids: SlotVec<WithGeneration<tree::VertexId>, VertexId>,
+    edge_ids: SlotVec<WithGeneration<tree::EdgeId>, EdgeId>,
+    label_ids: SlotVec<WithGeneration<tree::LabelId>, LabelId>,
     generation: Generation,
 }
 
@@ -1350,6 +1390,7 @@ impl<W> TopTree<W> {
             exposed: slotvec::BitVec::new(),
             vertex_ids: SlotVec::new(),
             edge_ids: SlotVec::new(),
+            label_ids: SlotVec::new(),
             generation: Generation::new(),
         }
     }
@@ -1377,6 +1418,16 @@ impl<W> TopTree<W> {
         slot.tree_id
     }
 
+    fn resolve_label(&self, l: LabelId) -> tree::LabelId {
+        let slot = self.label_ids.get(l).expect("label must exist in the tree");
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            slot.generation, self.generation,
+            "label id is from a different generation"
+        );
+        slot.tree_id
+    }
+
     fn set_exposed(&mut self, v: tree::VertexId, exposed: bool) {
         self.exposed.set(v.index(), exposed);
     }
@@ -1389,7 +1440,7 @@ impl<W> TopTree<W> {
         self.is_exposed(v) || self.tree.is_at_least_degree_n(v, 2)
     }
 
-    fn is_connected(&self, v: VertexId, w: VertexId) -> bool {
+    pub fn is_connected(&self, v: VertexId, w: VertexId) -> bool {
         let vv = self.resolve_vertex(v);
         let ww = self.resolve_vertex(w);
 
@@ -1399,9 +1450,31 @@ impl<W> TopTree<W> {
         rv == rw
     }
 
-    fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
+    pub fn edge_endpoints(&self, e: EdgeId) -> [VertexId; 2] {
+        let ee = self.resolve_edge(e);
+        let Endpoints([left, right]) = self.tree.edge_endpoints(ee);
+
+        [
+            *self.tree.vertex_weight(left),
+            *self.tree.vertex_weight(right),
+        ]
+    }
+
+    pub fn label_vertex(&self, l: LabelId) -> VertexId {
+        let ll = self.resolve_label(l);
+        self.tree.label_weight(ll).vertex
+    }
+
+    pub fn first_label(&self, v: VertexId) -> Option<LabelId> {
+        let vv = self.resolve_vertex(v);
+        let label = self.tree.incident_label_weights(vv).next()?;
+
+        Some(label.id)
+    }
+
+    pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
     where
-        W: Reduce + Clone,
+        W: Summary + Clone,
         F: FnOnce(&mut Self, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
@@ -1418,9 +1491,9 @@ impl<W> TopTree<W> {
         result
     }
 
-    fn try_with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> Option<R>
+    pub fn try_with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> Option<R>
     where
-        W: Reduce + Clone,
+        W: Summary + Clone,
         F: FnOnce(&mut Self, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
@@ -1439,9 +1512,9 @@ impl<W> TopTree<W> {
         result
     }
 
-    fn with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> R
+    pub fn with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> R
     where
-        W: Reduce + Clone,
+        W: Summary + Clone,
         F: FnOnce(&mut Self, W) -> R,
     {
         let handle = expose(v, self).expect("vertex must have a consuming node");
@@ -1454,9 +1527,9 @@ impl<W> TopTree<W> {
         result
     }
 
-    fn try_with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> Option<R>
+    pub fn try_with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> Option<R>
     where
-        W: Reduce + Clone,
+        W: Summary + Clone,
         F: FnOnce(&mut Self, W) -> R,
     {
         let result = if let Some(handle) = expose(v, self) {
@@ -1469,6 +1542,49 @@ impl<W> TopTree<W> {
         deexpose(v, self);
 
         result
+    }
+
+    pub fn add_vertex(&mut self) -> VertexId {
+        let mut vertex = None;
+        let id = self.vertex_ids.push_with(|id| {
+            _ = vertex.insert(self.tree.add_vertex(id));
+
+            WithGeneration::new(vertex.unwrap(), self.generation)
+        });
+
+        self.set_exposed(vertex.unwrap(), false);
+
+        id
+    }
+
+    pub fn link(&mut self, v: VertexId, w: VertexId) -> EdgeId
+    where
+        W: Default + Summary,
+    {
+        link(v, w, W::default(), self)
+    }
+
+    pub fn cut(&mut self, v: VertexId, w: VertexId)
+    where
+        W: Summary,
+    {
+        cut(v, w, self);
+        todo!()
+    }
+
+    pub fn attach(&mut self, v: VertexId) -> LabelId
+    where
+        W: Default + Summary,
+    {
+        let (label, _root) = attach(v, W::default(), self);
+        label
+    }
+
+    pub fn detach(&mut self, l: LabelId)
+    where
+        W: Summary,
+    {
+        detach(l, self);
     }
 }
 
@@ -1489,6 +1605,6 @@ impl<W> Drop for TopTree<W> {
     }
 }
 
-pub trait Reduce {
+pub trait Summary {
     fn reduce(&self, other: &Self) -> Self;
 }
