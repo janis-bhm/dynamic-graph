@@ -300,7 +300,7 @@ impl<V, E, L> Tree<V, E, L> {
             .chain(self.incident_edge_weights(vertex).map(|_| ()))
             .take(n)
             .count()
-            == n
+            >= n
     }
 
     pub fn is_exactly_degree_n(&self, vertex: VertexId, n: usize) -> bool {
@@ -308,7 +308,7 @@ impl<V, E, L> Tree<V, E, L> {
         self.incident_label_weights(vertex)
             .map(|_| ())
             .chain(self.incident_edge_weights(vertex).map(|_| ()))
-            .take(n)
+            .take(n + 1)
             .count()
             == n
     }
