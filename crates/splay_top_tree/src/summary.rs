@@ -1,4 +1,4 @@
-use crate::{ClusterId, VertexId};
+use crate::{ClusterId, VertexId, index};
 
 /// The boundary vertices of a cluster, in its logical frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,8 +84,8 @@ impl MergeContext {
 }
 
 pub trait Summary: Sized {
-    fn edge(e: ClusterId) -> Self;
-    fn label(l: ClusterId) -> Self;
+    fn edge(e: index::EdgeId) -> Self;
+    fn label(l: index::LabelId) -> Self;
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
     fn flip(&mut self) {}
 }

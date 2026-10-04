@@ -730,9 +730,9 @@ impl<W, NodeType> Handle<W, NodeType> {
             Edge(leaf) => {
                 let v = root.tree.edge_endpoints(leaf.edge())[self.is_flipped()];
 
-                root.is_boundary_vertex(v)
+                root.is_boundary_vertex_internal(v)
             }
-            Label(label) => root.is_boundary_vertex(root.tree.label_vertex(label.label())),
+            Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
             Internal(internal) => internal.child(!self.is_flipped()).is_path(),
         }
     }
@@ -743,9 +743,9 @@ impl<W, NodeType> Handle<W, NodeType> {
             Edge(leaf) => {
                 let v = root.tree.edge_endpoints(leaf.edge())[!self.is_flipped()];
 
-                root.is_boundary_vertex(v)
+                root.is_boundary_vertex_internal(v)
             }
-            Label(label) => root.is_boundary_vertex(root.tree.label_vertex(label.label())),
+            Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
             Internal(internal) => internal.child(self.is_flipped()).is_path(),
         }
     }
@@ -1092,7 +1092,12 @@ where
     root
 }
 
-pub(crate) fn link<W>(u: VertexId, v: VertexId, weight: W, tree: &mut TopTree<W>) -> EdgeId
+pub(crate) fn link<W>(
+    u: VertexId,
+    v: VertexId,
+    weight: impl FnOnce(EdgeId) -> W,
+    tree: &mut TopTree<W>,
+) -> EdgeId
 where
     W: Summary,
 {
@@ -1127,7 +1132,7 @@ where
         );
         LeafNode::init(
             leaf,
-            weight,
+            weight(id),
             edge,
             BoundaryVertices::from_left_and_right(ru.as_ref().map(|_| u), rv.as_ref().map(|_| v)),
         );
@@ -1220,7 +1225,7 @@ where
 
 pub(crate) fn attach<W>(
     v: VertexId,
-    weight: W,
+    weight: impl FnOnce(LabelId) -> W,
     tree: &mut TopTree<W>,
 ) -> (LabelId, NonNull<Node<W>>)
 where
@@ -1248,7 +1253,7 @@ where
         );
         LabelNode::init(
             node,
-            weight,
+            weight(id),
             label,
             BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
         );
@@ -1432,12 +1437,17 @@ impl<W> TopTree<W> {
         self.exposed.set(v.index(), exposed);
     }
 
-    fn is_exposed(&self, v: tree::VertexId) -> bool {
+    fn is_exposed_internal(&self, v: tree::VertexId) -> bool {
         self.exposed.get(v.index())
     }
 
-    fn is_boundary_vertex(&self, v: tree::VertexId) -> bool {
-        self.is_exposed(v) || self.tree.is_at_least_degree_n(v, 2)
+    fn is_boundary_vertex_internal(&self, v: tree::VertexId) -> bool {
+        self.is_exposed_internal(v) || self.tree.is_at_least_degree_n(v, 2)
+    }
+
+    pub fn is_boundary_vertex(&self, v: VertexId) -> bool {
+        let vv = self.resolve_vertex(v);
+        self.is_boundary_vertex_internal(vv)
     }
 
     pub fn is_connected(&self, v: VertexId, w: VertexId) -> bool {
@@ -1450,6 +1460,16 @@ impl<W> TopTree<W> {
         rv == rw
     }
 
+    pub fn is_exposed(&self, v: VertexId) -> bool {
+        let vv = self.resolve_vertex(v);
+        self.is_exposed_internal(vv)
+    }
+
+    pub fn degree(&self, v: VertexId) -> usize {
+        let vv = self.resolve_vertex(v);
+        self.tree.degree(vv)
+    }
+
     pub fn edge_endpoints(&self, e: EdgeId) -> [VertexId; 2] {
         let ee = self.resolve_edge(e);
         let Endpoints([left, right]) = self.tree.edge_endpoints(ee);
@@ -1458,6 +1478,15 @@ impl<W> TopTree<W> {
             *self.tree.vertex_weight(left),
             *self.tree.vertex_weight(right),
         ]
+    }
+
+    pub fn find_edge(&self, v: VertexId, w: VertexId) -> Option<EdgeId> {
+        let vv = self.resolve_vertex(v);
+        let ww = self.resolve_vertex(w);
+
+        self.tree
+            .find_edge_with_endpoints(vv, ww)
+            .map(|e| self.tree.edge_weight(e).id)
     }
 
     pub fn label_vertex(&self, l: LabelId) -> VertexId {
@@ -1470,6 +1499,11 @@ impl<W> TopTree<W> {
         let label = self.tree.incident_label_weights(vv).next()?;
 
         Some(label.id)
+    }
+
+    pub fn incident_edges(&self, v: VertexId) -> impl Iterator<Item = EdgeId> + '_ {
+        let vv = self.resolve_vertex(v);
+        self.tree.incident_edge_weights(vv).map(|e| e.id)
     }
 
     pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
@@ -1561,7 +1595,19 @@ impl<W> TopTree<W> {
     where
         W: Default + Summary,
     {
-        link(v, w, W::default(), self)
+        link(v, w, |_| W::default(), self)
+    }
+
+    pub fn link_with(
+        &mut self,
+        v: VertexId,
+        w: VertexId,
+        weight: impl FnOnce(EdgeId) -> W,
+    ) -> EdgeId
+    where
+        W: Summary,
+    {
+        link(v, w, weight, self)
     }
 
     pub fn cut(&mut self, v: VertexId, w: VertexId)
@@ -1576,7 +1622,15 @@ impl<W> TopTree<W> {
     where
         W: Default + Summary,
     {
-        let (label, _root) = attach(v, W::default(), self);
+        let (label, _root) = attach(v, |_| W::default(), self);
+        label
+    }
+
+    pub fn attach_with(&mut self, v: VertexId, weight: impl FnOnce(LabelId) -> W) -> LabelId
+    where
+        W: Summary,
+    {
+        let (label, _root) = attach(v, weight, self);
         label
     }
 
