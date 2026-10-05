@@ -150,6 +150,22 @@ struct Cii {
     right: Option<VertexId>,
 }
 
+impl fmt::Display for Cii {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_struct("Cii");
+        if let Some(v) = self.left {
+            f.field("left", &v);
+        }
+        if let Some(v) = self.mid {
+            f.field("mid", &v);
+        }
+        if let Some(v) = self.right {
+            f.field("right", &v);
+        }
+        f.finish()
+    }
+}
+
 impl Cii {
     fn count(&self) -> usize {
         usize::from(self.left.is_some())
@@ -187,8 +203,31 @@ enum ClusterKey {
     Label(tree::LabelId),
 }
 
-fn cluster_keys(h: &TopTree<Xor>, node: NN) -> Vec<ClusterKey> {
-    match Node::force_ptr(node) {
+impl fmt::Display for ClusterKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClusterKey::Edge(e, [v, w]) => write!(f, "{{{}, {} <-> {}}}", e, v, w),
+            ClusterKey::Label(l) => write!(f, "{}", l),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClusterKeys(Vec<ClusterKey>);
+
+impl fmt::Display for ClusterKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_list();
+        for key in &self.0 {
+            f.entry_with(|f| key.fmt(f));
+        }
+
+        f.finish()
+    }
+}
+
+fn cluster_keys(h: &TopTree<Xor>, node: NN) -> ClusterKeys {
+    let keys = match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => unsafe {
             let endpoints = h.tree.edge_endpoints(leaf.as_ref().edge);
             vec![ClusterKey::Edge(leaf.as_ref().edge, endpoints.0)]
@@ -197,10 +236,12 @@ fn cluster_keys(h: &TopTree<Xor>, node: NN) -> Vec<ClusterKey> {
         LeafOrInternal::Internal(internal) => {
             let internal = unsafe { internal.as_ref() };
             let mut out = cluster_keys(h, internal.children.left);
-            out.extend(cluster_keys(h, internal.children.right));
-            out
+            out.0.extend(cluster_keys(h, internal.children.right).0);
+            return out;
         }
-    }
+    };
+
+    ClusterKeys(keys)
 }
 
 fn count_leaves_with(h: &TopTree<Xor>, node: NN, v: VertexId) -> usize {
@@ -639,23 +680,10 @@ fn grow_a_small_tree_with_exposes() {
             let ib = if ib >= ia { ib + 1 } else { ib };
             let u = clean[ia][(rng.next() as usize) % clean[ia].len()];
             let v = clean[ib][(rng.next() as usize) % clean[ib].len()];
-            let e = h.link(u, v, rng.next() | 1);
-            eprintln!(
-                "linking {u:?} and {v:?} = {e:?} with boundary: {:?}",
-                unsafe {
-                    h.tree
-                        .tree
-                        .edge(h.tree.edge_ids[e].tree_id)
-                        .weight
-                        .node
-                        .as_ref()
-                        .boundary
-                },
-            );
+            let _e = h.link(u, v, rng.next() | 1);
             acted = true;
         } else if r == 1 && !edges.is_empty() {
             let (u, v) = edges[(rng.next() as usize) % edges.len()];
-            eprintln!("cutting {:?} = {u:?} and {v:?}", h.tree.find_edge(u, v));
             h.cut(u, v);
             acted = true;
         } else if h.exposed.len() < 2 {
@@ -663,7 +691,6 @@ fn grow_a_small_tree_with_exposes() {
             for _ in 0..verts.len() {
                 let v = verts[(rng.next() as usize) % verts.len()];
                 if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
-                    eprintln!("exposing {v:?}");
                     h.expose(v);
                     acted = true;
                     break;
@@ -672,7 +699,6 @@ fn grow_a_small_tree_with_exposes() {
         }
         if !acted && !h.exposed.is_empty() {
             let v = *h.exposed.iter().next().unwrap();
-            eprintln!("deexposing {v:?}");
             h.deexpose(v);
             acted = true;
         }
@@ -690,7 +716,7 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
     let mut rng = Rng(seed);
     let mut h = Harness::new(num_vertices);
 
-    for step in 0..num_ops {
+    for _step in 0..num_ops {
         let verts: Vec<_> = h.vertices().collect();
         let comps = h.components();
         let clean: Vec<Vec<VertexId>> = comps
@@ -720,7 +746,6 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
         let mut acted = false;
         if r == 0 && can_deexpose {
             let v = *h.exposed.iter().next().unwrap();
-            eprintln!("seed={seed} step={step} deexpose {v:?}");
             h.deexpose(v);
             acted = true;
         } else if r == 1 && can_link {
@@ -731,18 +756,15 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
             let b = &clean[ib];
             let u = a[(rng.next() as usize) % a.len()];
             let v = b[(rng.next() as usize) % b.len()];
-            eprintln!("seed={seed} step={step} link {u:?} {v:?}");
             h.link(u, v, rng.next() | 1);
             acted = true;
         } else if r == 2 && !clean_edges.is_empty() {
             let (u, v) = clean_edges[(rng.next() as usize) % clean_edges.len()];
-            eprintln!("seed={seed} step={step} cut {u:?} {v:?}");
             h.cut(u, v);
             acted = true;
         } else if can_expose {
             let v = verts[(rng.next() as usize) % verts.len()];
             if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
-                eprintln!("seed={seed} step={step} expose {v:?}");
                 h.expose(v);
                 acted = true;
             }
@@ -771,4 +793,72 @@ fn randomized_medium_forest() {
     for seed in 0..10 {
         run_random_ops(seed, 14, 500);
     }
+}
+
+#[test]
+fn link_simple_path() {
+    // create a simple a-b-c path
+    let mut h = Harness::new(5);
+    let vs: Vec<_> = h.vertices().collect();
+    h.link(vs[0], vs[1], 1);
+    assert_invariants(&h);
+    h.link(vs[1], vs[2], 2);
+    assert_invariants(&h);
+    h.link(vs[2], vs[3], 2);
+
+    assert_invariants(&h);
+}
+
+#[test]
+fn link_simple_star() {
+    // create a simple star with center 0 and leaves 1,2,3
+    let mut h = Harness::new(4);
+    let vs: Vec<_> = h.vertices().collect();
+    h.link(vs[0], vs[1], 1);
+    h.link(vs[2], vs[0], 2);
+    h.link(vs[0], vs[3], 3);
+
+    assert_invariants(&h);
+}
+
+#[test]
+fn link_two_stars() {
+    // create two stars with centers 0 and 4, then link them
+    let mut h = Harness::new(8);
+    let vs: Vec<_> = h.vertices().collect();
+    h.link(vs[0], vs[1], 1);
+    h.link(vs[0], vs[2], 2);
+    h.link(vs[0], vs[3], 3);
+
+    h.link(vs[4], vs[5], 4);
+    h.link(vs[4], vs[6], 5);
+    h.link(vs[4], vs[7], 6);
+
+    assert_invariants(&h);
+
+    // link the two stars together
+    h.link(vs[0], vs[4], 7);
+
+    assert_invariants(&h);
+}
+
+#[test]
+fn link_to_path() {
+    // create a path 0-1-2-3 and a star with center 4 and leaves 5,6,7
+    let mut h = Harness::new(8);
+    let vs: Vec<_> = h.vertices().collect();
+    h.link(vs[0], vs[1], 1);
+    h.link(vs[1], vs[2], 2);
+    h.link(vs[2], vs[3], 3);
+
+    h.link(vs[4], vs[5], 4);
+    h.link(vs[4], vs[6], 5);
+    h.link(vs[4], vs[7], 6);
+
+    assert_invariants(&h);
+
+    // link the star to the path at vertex 2
+    h.link(vs[2], vs[4], 7);
+
+    //assert_invariants(&h);
 }

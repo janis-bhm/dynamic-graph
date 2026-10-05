@@ -6,6 +6,7 @@
     pattern_type_macro,
     structural_match
 )]
+#![cfg_attr(test, feature(debug_closure_helpers))]
 #![allow(dead_code)]
 
 use core::fmt;
@@ -189,13 +190,6 @@ impl<W> Node<W> {
             } else {
                 p.children.left
             }
-        })
-    }
-
-    unsafe fn is_left_child(&self) -> Option<bool> {
-        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
-            let self_ptr = NonNull::from(self);
-            p.children.left == self_ptr
         })
     }
 
@@ -523,7 +517,8 @@ impl<W, NodeType> Handle<W, NodeType> {
     }
 
     fn is_left_child(&self) -> Option<bool> {
-        unsafe { self.node.as_ref().is_left_child() }
+        let parent = self.parent()?;
+        Some(parent.children()[0].node == self.node)
     }
 
     fn sibling(&self) -> Option<Handle<W, NodeType>> {
@@ -601,6 +596,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                 let in_right = right.boundary().contains(v);
 
                 if in_left && in_right {
+                    assert!(!left.is_path() || !right.is_path(),);
                     let is_left = !left.is_path();
                     unsafe { self.node.as_mut().boundary.add(v, is_left) }
                 } else if in_left {
@@ -814,7 +810,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                 root.is_boundary_vertex_internal(v)
             }
             Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
-            Internal(internal) => internal.child(!self.is_flipped()).is_path(),
+            Internal(internal) => internal.child(self.is_flipped()).is_path(),
         }
     }
 
@@ -827,7 +823,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                 root.is_boundary_vertex_internal(v)
             }
             Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
-            Internal(internal) => internal.child(self.is_flipped()).is_path(),
+            Internal(internal) => internal.child(!self.is_flipped()).is_path(),
         }
     }
 
@@ -1204,10 +1200,6 @@ where
         !root.is_exposed_internal(resolved),
         "vertex must not be exposed"
     );
-    eprintln!(
-        "exposing vertex {v:?} (resolved {resolved:?}), degree {}",
-        root.tree.degree(resolved)
-    );
 
     match find_consuming_node(root, resolved) {
         Some(consuming_node) => {
@@ -1265,18 +1257,22 @@ where
     let vv = tree.resolve_vertex(v);
 
     let mut ru = expose(u, tree);
-    if let Some(ref mut tu) = ru
-        && Handle::has_left_boundary(tu, tree)
-    {
-        tu.toggle_flipped();
+    if let Some(ref mut tu) = ru {
+        if tu.has_left_boundary(tree) {
+            tu.toggle_flipped();
+        }
+
+        assert_eq!(tu.flipped_boundary().right(), Some(u));
     }
     tree.set_exposed(uu, false);
 
     let mut rv = expose(v, tree);
-    if let Some(ref mut tv) = rv
-        && Handle::has_right_boundary(tv, tree)
-    {
-        tv.toggle_flipped();
+    if let Some(ref mut tv) = rv {
+        if tv.has_right_boundary(tree) {
+            tv.toggle_flipped();
+        }
+
+        assert_eq!(tv.flipped_boundary().left(), Some(v));
     }
     tree.set_exposed(vv, false);
 
@@ -1302,31 +1298,27 @@ where
 
     let mut node = leaf.cast::<Node<W>>();
     if let Some(ru) = ru {
-        let left = ru;
+        let left = ru.node;
         let right = node.cast::<Node<W>>();
         let weight = unsafe {
-            let wl = &left.node.as_ref().weight;
+            let wl = &left.as_ref().weight;
             let wr = &right.as_ref().weight;
             W::reduce(wl, wr)
         };
-        node = InternalNode::alloc(
-            weight,
-            left.node,
-            right,
-            BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
-        )
-        .cast();
+
+        let rv_boundary = BoundaryVertices::from_option(rv.as_ref().map(|_| v));
+        node = InternalNode::alloc(weight, left, right, rv_boundary).cast();
     }
 
     if let Some(rv) = rv {
         let left = node.cast::<Node<W>>();
-        let right = rv;
+        let right = rv.node;
         let weight = unsafe {
             let wl = &left.as_ref().weight;
-            let wr = &right.node.as_ref().weight;
+            let wr = &right.as_ref().weight;
             W::reduce(wl, wr)
         };
-        InternalNode::alloc(weight, left, right.node, BoundaryVertices::None);
+        InternalNode::alloc(weight, left, right, BoundaryVertices::None);
     }
 
     edge
@@ -1596,7 +1588,6 @@ impl<W> TopTree<W> {
     }
 
     fn set_exposed(&mut self, v: tree::VertexId, exposed: bool) {
-        eprintln!("set_exposed({v:?}, {exposed})");
         self.exposed.set(v.index(), exposed);
     }
 
@@ -1605,11 +1596,6 @@ impl<W> TopTree<W> {
     }
 
     fn is_boundary_vertex_internal(&self, v: tree::VertexId) -> bool {
-        // eprintln!(
-        //     "{v:?} => exposed = {}, degree = {}",
-        //     self.is_exposed_internal(v),
-        //     self.tree.degree(v)
-        // );
         self.is_exposed_internal(v) || self.tree.is_at_least_degree_n(v, 2)
     }
 

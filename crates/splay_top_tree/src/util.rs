@@ -264,3 +264,28 @@ macro_rules! impl_assert_num {
 impl_assert_num!(
     i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
 );
+
+// debug
+pub(crate) struct DisplayOpt<T>(Option<T>);
+
+impl<T> core::fmt::Display for DisplayOpt<T>
+where
+    T: core::fmt::Display,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(f),
+            None => write!(f, "None"),
+        }
+    }
+}
+
+pub(crate) trait DisplayOptExt<T> {
+    fn display(&self) -> DisplayOpt<&T>;
+}
+
+impl<T: core::fmt::Display> DisplayOptExt<T> for Option<T> {
+    fn display(&self) -> DisplayOpt<&T> {
+        DisplayOpt(self.as_ref())
+    }
+}

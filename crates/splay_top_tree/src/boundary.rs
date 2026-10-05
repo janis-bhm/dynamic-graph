@@ -1,4 +1,6 @@
-use crate::index::VertexId;
+use core::fmt;
+
+use crate::{index::VertexId, util::DisplayOptExt};
 
 pub struct PackedBoundaryVertices {
     pub left: Option<VertexId>,
@@ -37,6 +39,16 @@ pub enum BoundaryVertices {
     None,
     One(VertexId),
     Two { left: VertexId, right: VertexId },
+}
+
+impl fmt::Display for BoundaryVertices {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::One(v) => write!(f, "One({})", v),
+            Self::Two { left, right } => write!(f, "Two {{ left: {}, right: {} }}", left, right),
+        }
+    }
 }
 
 impl BoundaryVertices {

@@ -7,9 +7,9 @@ use std::{
 use crate::{impl_id, index::Generation};
 
 impl_id! {
-    pub struct VertexId,
-    pub struct EdgeId,
-    pub struct LabelId,
+    pub struct VertexId #v,
+    pub struct EdgeId #e,
+    pub struct LabelId #l,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

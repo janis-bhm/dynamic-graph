@@ -22,14 +22,28 @@ impl Generation {
     pub fn current(&self) -> Self {
         *self
     }
+
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+#[macro_export]
+macro_rules! name_or_short {
+    ($name:ident, $short:ident) => {
+        stringify!($short)
+    };
+    ($name:ident,) => {
+        stringify!($name)
+    };
 }
 
 #[macro_export]
 macro_rules! impl_id {
-    ($($vis:vis struct $name:ident),* $(,)?) => {
-        $(impl_id!(@impl $vis struct $name);)*
+    ($($vis:vis struct $name:ident $(#$short:ident)?),* $(,)?) => {
+        $(impl_id!(@impl $vis struct $name $(#$short)*);)*
     };
-    (@impl $vis:vis struct $name:ident) => {
+    (@impl $vis:vis struct $name:ident $(#$short:ident)?) => {
         #[derive(Clone, Copy, Hash, Debug, PartialEq, Eq, PartialOrd, Ord)]
         $vis struct $name {
             index: $crate::non_max::NonMaxUsize,
@@ -63,13 +77,23 @@ macro_rules! impl_id {
                 self.generation
             }
         }
+
+        impl core::fmt::Display for $name {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                if cfg!(debug_assertions) {
+                    write!(f, "{}{}.{}", $crate::name_or_short!($name, $($short)*), self.index.get(), self.generation.get())
+                } else {
+                    write!(f, "{}{}", $crate::name_or_short!($name, $($short)*), self.index.get())
+                }
+            }
+        }
     };
 }
 
 impl_id! {
-    pub struct VertexId,
-    pub struct EdgeId,
-    pub struct LabelId,
+    pub struct VertexId #v,
+    pub struct EdgeId #e,
+    pub struct LabelId #l,
 }
 
 impl Indexing for VertexId {
