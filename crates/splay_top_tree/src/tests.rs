@@ -347,7 +347,7 @@ pub(crate) fn check_node<W>(at: At, h: &TopTree<W>, node: NonNull<Node<W>>, pari
         cii.count(),
         node_ref.num_boundary(),
         "{at} num_boundary ({}) mismatch at node (leaf={}, cluster={})",
-        node_ref.boundary,
+        node_ref.boundary.unpack(),
         node_ref.is_edge(),
         cluster_keys(h, node)
     );

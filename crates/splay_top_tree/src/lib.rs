@@ -12,11 +12,11 @@ use std::{
 };
 
 use crate::{
-    boundary::BoundaryVertices,
+    boundary::{BoundaryVertices, PackedBoundaryVertices},
     index::{Generation, LabelId},
     summary::Summary,
     tree::{Endpoints, SwapResult},
-    util::TaggedPtr,
+    util::{Packable, TaggedPtr},
 };
 
 pub use index::{EdgeId, VertexId};
@@ -87,7 +87,7 @@ unsafe impl util::Tag for NodeFlags {
 #[repr(C, align(16))]
 struct Node<W> {
     parent: TaggedPtr<InternalNode<W>, NodeFlags>,
-    boundary: BoundaryVertices,
+    boundary: PackedBoundaryVertices,
     weight: W,
 }
 
@@ -280,7 +280,7 @@ impl<W> InternalNode<W> {
         let node = Box::new(InternalNode {
             node: Node {
                 parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
-                boundary,
+                boundary: boundary.pack(),
                 weight,
             },
             children: Children { left, right },
@@ -423,7 +423,7 @@ impl<W> Handle<W, marker::Either> {
             node.as_mut().write(LeafNode {
                 node: Node {
                     parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
-                    boundary,
+                    boundary: boundary.pack(),
                     weight,
                 },
                 edge,
@@ -445,7 +445,7 @@ impl<W> Handle<W, marker::Either> {
             node.as_mut().write(LabelNode {
                 node: Node {
                     parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
-                    boundary,
+                    boundary: boundary.pack(),
                     weight,
                 },
                 label,
@@ -562,7 +562,7 @@ impl<W, NodeType> Handle<W, NodeType> {
     }
 
     fn boundary(&self) -> BoundaryVertices {
-        unsafe { self.node.as_ref().boundary }
+        unsafe { self.node.as_ref().boundary.unpack() }
     }
 
     fn flipped_boundary(&self) -> BoundaryVertices {
@@ -575,12 +575,12 @@ impl<W, NodeType> Handle<W, NodeType> {
     }
 
     fn set_boundary(&mut self, boundary: BoundaryVertices) {
-        unsafe { self.node.as_mut().boundary = boundary }
+        unsafe { self.node.as_mut().boundary = boundary.pack() }
     }
 
     fn remove_from_boundary(&mut self, v: VertexId) {
         unsafe {
-            self.node.as_mut().boundary.remove(v);
+            self.node.as_mut().boundary.as_mut().remove(v);
         }
     }
 
@@ -592,14 +592,16 @@ impl<W, NodeType> Handle<W, NodeType> {
                 let Endpoints([left, right]) = tree.tree.edge_endpoints(edge.edge());
 
                 if left == resolved {
-                    unsafe { self.node.as_mut().boundary.add(v, true) }
+                    unsafe { self.node.as_mut().boundary.as_mut().add(v, true) }
                 } else if right == resolved {
-                    unsafe { self.node.as_mut().boundary.add(v, false) }
+                    unsafe { self.node.as_mut().boundary.as_mut().add(v, false) }
                 } else {
                     panic!("vertex not found in edge endpoints")
                 }
             }
-            LeafOrInternal::Label(_) => unsafe { self.node.as_mut().boundary.add(v, false) },
+            LeafOrInternal::Label(_) => unsafe {
+                self.node.as_mut().boundary.as_mut().add(v, false)
+            },
             LeafOrInternal::Internal(internal) => {
                 let [left, right] = internal.children();
                 let in_left = left.boundary().contains(v);
@@ -608,11 +610,11 @@ impl<W, NodeType> Handle<W, NodeType> {
                 if in_left && in_right {
                     assert!(!left.is_path() || !right.is_path(),);
                     let is_left = !left.is_path();
-                    unsafe { self.node.as_mut().boundary.add(v, is_left) }
+                    unsafe { self.node.as_mut().boundary.as_mut().add(v, is_left) }
                 } else if in_left {
-                    unsafe { self.node.as_mut().boundary.add(v, true) }
+                    unsafe { self.node.as_mut().boundary.as_mut().add(v, true) }
                 } else if in_right {
-                    unsafe { self.node.as_mut().boundary.add(v, false) }
+                    unsafe { self.node.as_mut().boundary.as_mut().add(v, false) }
                 } else {
                     panic!("vertex not found in either child")
                 }
@@ -888,7 +890,7 @@ impl<W> Handle<W, marker::Internal> {
                 let node = self.node.cast::<InternalNode<W>>().as_mut();
 
                 node.set_flipped(false);
-                node.boundary.flip();
+                node.boundary.as_mut().flip();
                 node.children.flip();
 
                 for mut child in &node.children {

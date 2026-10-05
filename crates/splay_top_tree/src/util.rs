@@ -255,7 +255,6 @@ where
     }
 }
 
-#[expect(dead_code)]
 pub struct PackedMut<'a, T: Packable> {
     packed: &'a mut T::Packed,
     unpacked: T,
@@ -311,7 +310,6 @@ where
     }
 }
 
-#[expect(dead_code)]
 pub trait Packable: Sized {
     type Packed: Copy;
     fn pack(&self) -> Self::Packed;

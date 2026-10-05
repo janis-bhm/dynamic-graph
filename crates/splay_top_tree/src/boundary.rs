@@ -1,8 +1,11 @@
 use core::fmt;
 
-use crate::{index::VertexId, summary::Boundary, util::Packable};
+use crate::{
+    index::VertexId,
+    summary::Boundary,
+    util::{Packable, PackedMut},
+};
 
-#[expect(dead_code)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PackedBoundaryVertices {
     pub left: Option<VertexId>,
@@ -21,9 +24,8 @@ impl Packable for BoundaryVertices {
     }
 }
 
-#[expect(dead_code)]
 impl PackedBoundaryVertices {
-    fn unpack(&self) -> BoundaryVertices {
+    pub fn unpack(&self) -> BoundaryVertices {
         match (self.left, self.right) {
             (None, None) => BoundaryVertices::None,
             (Some(v), None) | (None, Some(v)) => BoundaryVertices::One(v),
@@ -31,7 +33,11 @@ impl PackedBoundaryVertices {
         }
     }
 
-    fn pack(boundary: BoundaryVertices) -> Self {
+    pub fn as_mut(&mut self) -> PackedMut<'_, BoundaryVertices> {
+        PackedMut::from(self)
+    }
+
+    pub fn pack(boundary: BoundaryVertices) -> Self {
         match boundary {
             BoundaryVertices::None => Self {
                 left: None,
@@ -46,6 +52,22 @@ impl PackedBoundaryVertices {
                 right: Some(right),
             },
         }
+    }
+
+    pub fn count(&self) -> u8 {
+        match (self.left, self.right) {
+            (None, None) => 0,
+            (Some(_), None) | (None, Some(_)) => 1,
+            (Some(_), Some(_)) => 2,
+        }
+    }
+
+    pub fn is_path(&self) -> bool {
+        self.left.is_some() && self.right.is_some()
+    }
+
+    pub fn is_point(&self) -> bool {
+        !self.is_path()
     }
 }
 
@@ -219,14 +241,17 @@ impl BoundaryVertices {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_path(&self) -> bool {
         matches!(self, Self::Two { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_point(&self) -> bool {
         !self.is_path()
     }
 
+    #[allow(dead_code)]
     pub fn count(&self) -> u8 {
         match self {
             Self::None => 0,
