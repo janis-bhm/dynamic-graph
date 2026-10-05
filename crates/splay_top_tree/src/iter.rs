@@ -172,8 +172,16 @@ mod tests {
     struct TestSummary(u64);
 
     impl Summary for TestSummary {
-        fn reduce(&self, other: &Self) -> Self {
-            TestSummary(self.0 + other.0)
+        fn edge(_e: crate::index::EdgeId) -> Self {
+            todo!()
+        }
+
+        fn label(_l: crate::index::LabelId) -> Self {
+            todo!()
+        }
+
+        fn combine(left: &Self, right: &Self, _ctx: &crate::summary::MergeContext) -> Self {
+            Self(left.0 + right.0)
         }
     }
 

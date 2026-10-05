@@ -9,8 +9,16 @@ use super::*;
 struct Xor(u64);
 
 impl Summary for Xor {
-    fn reduce(&self, other: &Self) -> Self {
-        Xor(self.0 ^ other.0)
+    fn edge(_e: index::EdgeId) -> Self {
+        todo!()
+    }
+
+    fn label(_l: index::LabelId) -> Self {
+        todo!()
+    }
+
+    fn combine(left: &Self, right: &Self, _ctx: &summary::MergeContext) -> Self {
+        Self(left.0 ^ right.0)
     }
 }
 
@@ -135,14 +143,6 @@ fn climb(mut node: NN) -> NN {
     }
 }
 
-fn degree(h: &TopTree<Xor>, v: VertexId) -> usize {
-    h.degree(v)
-}
-
-fn is_boundary_vertex(h: &TopTree<Xor>, v: VertexId) -> bool {
-    h.is_boundary_vertex(v)
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Cii {
     left: Option<VertexId>,
@@ -179,21 +179,6 @@ impl Cii {
 
     fn rightmost(&self) -> Option<VertexId> {
         self.right.or(self.mid)
-    }
-
-    fn flipped(&self) -> Self {
-        Self {
-            left: self.right,
-            mid: self.mid,
-            right: self.left,
-        }
-    }
-
-    fn set(&mut self) -> BTreeSet<VertexId> {
-        [self.left, self.mid, self.right]
-            .into_iter()
-            .flatten()
-            .collect()
     }
 }
 

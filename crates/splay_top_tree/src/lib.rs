@@ -1,23 +1,18 @@
 #![expect(internal_features)]
-#![feature(
-    ptr_as_uninit,
-    cast_maybe_uninit,
-    pattern_types,
-    pattern_type_macro,
-    structural_match
-)]
+#![feature(pattern_types, pattern_type_macro, structural_match)]
 #![cfg_attr(test, feature(debug_closure_helpers))]
-#![allow(dead_code)]
 
 use core::fmt;
 use std::{
     collections::BTreeSet,
+    mem,
     ptr::{self, NonNull},
 };
 
 use crate::{
     boundary::BoundaryVertices,
     index::{Generation, LabelId},
+    summary::Summary,
     tree::{Endpoints, SwapResult},
     util::TaggedPtr,
 };
@@ -34,10 +29,6 @@ mod summary;
 mod tests;
 mod tree;
 mod util;
-
-struct ClusterId(NonNull<Node<()>>);
-
-type Tree<W> = tree::Tree<(), NonNull<LeafNode<W>>, NonNull<LabelNode<W>>>;
 
 #[repr(u8)]
 enum NodeKind {
@@ -128,6 +119,15 @@ impl<W> Node<W> {
         self.flags().is_edge()
     }
 
+    #[expect(dead_code)]
+    fn is_label(&self) -> bool {
+        self.flags().is_label()
+    }
+
+    fn is_internal(&self) -> bool {
+        self.flags().is_cluster()
+    }
+
     fn is_flipped(&self) -> bool {
         self.flags().contains(NodeFlags::FLIPPED)
     }
@@ -165,34 +165,12 @@ impl<W> Node<W> {
             .set_ptr(parent.map_or(ptr::null_mut(), NonNull::as_ptr));
     }
 
+    #[cfg_attr(not(test), expect(dead_code))]
     fn parent_node(&self) -> Option<NonNull<Node<W>>> {
         self.parent().map(NonNull::cast)
     }
 
-    fn grandparent(&self) -> Option<NonNull<InternalNode<W>>> {
-        self.parent()
-            .and_then(|p| unsafe { p.as_ref().node.parent() })
-    }
-
-    fn ggp(&self) -> Option<NonNull<InternalNode<W>>> {
-        self.parent()
-            .and_then(|p| unsafe { p.as_ref().node.parent() })
-            .and_then(|gp| unsafe { gp.as_ref().node.parent() })
-    }
-
-    /// # Safety
-    /// Creates a reference to the parent of this node.
-    unsafe fn sibling(&self) -> Option<NonNull<Node<W>>> {
-        self.parent().map(|p| unsafe { p.as_ref() }).map(|p| {
-            let self_ptr = NonNull::from(self);
-            if p.children.left == self_ptr {
-                p.children.right
-            } else {
-                p.children.left
-            }
-        })
-    }
-
+    #[cfg_attr(not(test), expect(dead_code))]
     #[expect(clippy::type_complexity)]
     fn force_ptr(
         this: NonNull<Self>,
@@ -232,43 +210,6 @@ impl<W> fmt::Debug for LeafNode<W> {
             .field("node", &self.node)
             .field("edge", &self.edge)
             .finish()
-    }
-}
-
-impl<W> LabelNode<W> {
-    fn init(
-        node: NonNull<LabelNode<W>>,
-        weight: W,
-        label: tree::LabelId,
-        boundary: BoundaryVertices,
-    ) {
-        unsafe {
-            let uninit = node.as_uninit_mut();
-            uninit.write(LabelNode {
-                node: Node {
-                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
-                    boundary,
-                    weight,
-                },
-                label,
-            });
-        };
-    }
-}
-
-impl<W> LeafNode<W> {
-    fn init(node: NonNull<LeafNode<W>>, weight: W, edge: tree::EdgeId, boundary: BoundaryVertices) {
-        unsafe {
-            let uninit = node.as_uninit_mut();
-            uninit.write(LeafNode {
-                node: Node {
-                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
-                    boundary,
-                    weight,
-                },
-                edge,
-            });
-        };
     }
 }
 
@@ -398,6 +339,7 @@ impl<W> core::ops::DerefMut for InternalNode<W> {
 
 mod marker {
 
+    #[expect(dead_code)]
     pub trait IsLeaf {}
     impl IsLeaf for Edge {}
     impl IsLeaf for Label {}
@@ -450,15 +392,6 @@ impl<W, NodeType> PartialEq for Handle<W, NodeType> {
 
 impl<W, NodeType> Eq for Handle<W, NodeType> {}
 
-impl<W> Handle<W, marker::Either> {
-    fn new_either(node: NonNull<Node<W>>) -> Handle<W, marker::Either> {
-        Handle {
-            node,
-            _marker: core::marker::PhantomData,
-        }
-    }
-}
-
 impl<W> Handle<W, marker::Label> {
     fn new_label(node: NonNull<Node<W>>) -> Handle<W, marker::Label> {
         Handle {
@@ -474,6 +407,81 @@ impl<W> Handle<W, marker::Edge> {
             node,
             _marker: core::marker::PhantomData,
         }
+    }
+}
+
+impl<W> Handle<W, marker::Either> {
+    fn init_edge(
+        mut node: NonNull<mem::MaybeUninit<LeafNode<W>>>,
+        weight: W,
+        edge: tree::EdgeId,
+        boundary: BoundaryVertices,
+    ) -> Handle<W, marker::Leaf> {
+        unsafe {
+            node.as_mut().write(LeafNode {
+                node: Node {
+                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LEAF),
+                    boundary,
+                    weight,
+                },
+                edge,
+            });
+
+            Handle {
+                node: node.cast(),
+                _marker: core::marker::PhantomData::<marker::Leaf>,
+            }
+        }
+    }
+    fn init_label(
+        mut node: NonNull<mem::MaybeUninit<LabelNode<W>>>,
+        weight: W,
+        label: tree::LabelId,
+        boundary: BoundaryVertices,
+    ) -> Handle<W, marker::Leaf> {
+        unsafe {
+            node.as_mut().write(LabelNode {
+                node: Node {
+                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::LABEL),
+                    boundary,
+                    weight,
+                },
+                label,
+            });
+
+            Handle {
+                node: node.cast(),
+                _marker: core::marker::PhantomData::<marker::Leaf>,
+            }
+        }
+    }
+}
+
+impl<W> Handle<W, marker::Internal>
+where
+    W: Summary,
+{
+    fn alloc_internal(
+        left: Handle<W, marker::Either>,
+        right: Handle<W, marker::Either>,
+        boundary: BoundaryVertices,
+    ) -> Handle<W, marker::Internal> {
+        let left_boundary = left.flipped_boundary().into_boundary();
+        let right_boundary = right.flipped_boundary().into_boundary();
+        let parent_boundary = boundary.into_boundary();
+        let central = left_boundary.shared(&right_boundary).unwrap();
+        let ctx = summary::MergeContext {
+            left_boundary,
+            right_boundary,
+            parent_boundary,
+            central,
+        };
+
+        let weight = W::combine(left.weight(), right.weight(), &ctx);
+
+        let node = InternalNode::alloc(weight, left.node, right.node, boundary);
+
+        unsafe { Self::new_internal(node) }
     }
 }
 
@@ -828,17 +836,12 @@ impl<W, NodeType> Handle<W, NodeType> {
     }
 
     fn is_internal(&self) -> bool {
-        !unsafe { self.node.as_ref().is_edge() }
+        unsafe { self.node.as_ref().is_internal() }
     }
 
     unsafe fn into_internal(self) -> Handle<W, marker::Internal> {
         debug_assert!(self.is_internal());
         unsafe { Handle::new_internal(self.node.cast()) }
-    }
-
-    unsafe fn into_leaf(self) -> Handle<W, marker::Edge> {
-        debug_assert!(!self.is_internal());
-        Handle::new_edge(self.node.cast())
     }
 
     fn delete_all_ancestors(self) {
@@ -867,26 +870,6 @@ impl<W, NodeType> Handle<W, NodeType> {
 impl<W> Handle<W, marker::Label> {
     fn label(&self) -> tree::LabelId {
         unsafe { self.node.cast::<LabelNode<W>>().as_ref().label }
-    }
-}
-
-impl<W> Handle<W, marker::Leaf> {
-    fn endpoints(&self, root: &TopTree<W>) -> [tree::VertexId; 2] {
-        match self.force() {
-            LeafOrInternal::Edge(edge) => unsafe {
-                let edge = edge.node.cast::<LeafNode<W>>().as_ref().edge;
-
-                root.tree.edge_endpoints(edge).0
-            },
-            LeafOrInternal::Label(label) => {
-                let label = label.label();
-                let vertex = root.tree.label_vertex(label);
-                [vertex, vertex]
-            }
-            LeafOrInternal::Internal(_) => {
-                unreachable!("Handle<W, marker::Leaf> cannot be Internal")
-            }
-        }
     }
 }
 
@@ -964,15 +947,46 @@ impl<W> Handle<W, marker::Internal> {
         }
     }
 
+    fn recompute_boundary(&mut self)
+    where
+        W: Summary,
+    {
+        let [left, right] = self.flipped_children();
+        let left_boundary = left.flipped_boundary().into_boundary();
+        let right_boundary = right.flipped_boundary().into_boundary();
+        let parent_boundary = self.flipped_boundary().into_boundary();
+        let ctx = summary::MergeContext {
+            left_boundary,
+            right_boundary,
+            parent_boundary,
+            central: left_boundary.shared(&right_boundary).unwrap(),
+        };
+        unsafe {
+            self.node
+                .as_mut()
+                .weight
+                .update_boundary(left.weight(), right.weight(), &ctx);
+        }
+    }
+
     fn recompute_weight(&mut self)
     where
         W: Summary,
     {
         let [left, right] = self.flipped_children();
+        let left_boundary = left.flipped_boundary().into_boundary();
+        let right_boundary = right.flipped_boundary().into_boundary();
+        let parent_boundary = self.flipped_boundary().into_boundary();
+        let ctx = summary::MergeContext {
+            left_boundary,
+            right_boundary,
+            parent_boundary,
+            central: left_boundary.shared(&right_boundary).unwrap(),
+        };
         unsafe {
-            let lw = &left.node.as_ref().weight;
-            let rw = &right.node.as_ref().weight;
-            let new_weight = W::reduce(lw, rw);
+            let lw = &left.weight();
+            let rw = &right.weight();
+            let new_weight = W::combine(lw, rw, &ctx);
             self.node.as_mut().weight = new_weight;
         }
     }
@@ -1078,6 +1092,9 @@ where
             node.add_boundary_vertex(tree, v);
 
             let Some(parent) = node.parent() else {
+                if let LeafOrInternal::Internal(mut internal) = node.force() {
+                    internal.recompute_boundary();
+                }
                 return node;
             };
 
@@ -1086,6 +1103,10 @@ where
 
             if (is_left_child && right) || (is_right_child && left) {
                 node.toggle_flipped();
+            }
+
+            if let LeafOrInternal::Internal(mut internal) = node.force() {
+                internal.recompute_boundary();
             }
 
             left = is_left_child != parent.is_flipped();
@@ -1232,9 +1253,8 @@ where
         some_node.remove_from_boundary(v);
         node = some_node.parent().map(Handle::forget_type);
 
-        if some_node.is_internal() {
-            let mut internal = unsafe { ptr::read(&some_node).into_internal() };
-            internal.recompute_weight();
+        if let LeafOrInternal::Internal(mut internal) = some_node.force() {
+            internal.recompute_boundary();
         }
 
         root = Some(some_node);
@@ -1277,8 +1297,8 @@ where
     }
     tree.set_exposed(vv, false);
 
-    let leaf = Box::into_non_null(Box::new_uninit()).cast_init();
-    let edge = tree.edge_ids.push_with(|id| {
+    let leaf = Box::into_non_null(Box::new_uninit());
+    let (edge, mut node) = tree.edge_ids.push_with(|id| {
         let edge = tree.tree.add_edge(
             uu,
             vv,
@@ -1287,40 +1307,34 @@ where
                 id,
             },
         );
-        LeafNode::init(
+        let leaf = Handle::init_edge(
             leaf,
             weight(id),
             edge,
             BoundaryVertices::from_left_and_right(ru.as_ref().map(|_| u), rv.as_ref().map(|_| v)),
         );
 
-        WithGeneration::new(edge, tree.generation)
+        (
+            WithGeneration::new(edge, tree.generation),
+            leaf.forget_type(),
+        )
     });
 
-    let mut node = leaf.cast::<Node<W>>();
     if let Some(ru) = ru {
-        let left = ru.node;
-        let right = node.cast::<Node<W>>();
-        let weight = unsafe {
-            let wl = &left.as_ref().weight;
-            let wr = &right.as_ref().weight;
-            W::reduce(wl, wr)
-        };
-
+        let left = ru;
+        let right = node;
         let rv_boundary = BoundaryVertices::from_option(rv.as_ref().map(|_| v));
-        node = InternalNode::alloc(weight, left, right, rv_boundary).cast();
+        node = Handle::alloc_internal(left, right, rv_boundary).forget_type();
     }
 
     if let Some(rv) = rv {
-        let left = node.cast::<Node<W>>();
-        let right = rv.node;
-        let weight = unsafe {
-            let wl = &left.as_ref().weight;
-            let wr = &right.as_ref().weight;
-            W::reduce(wl, wr)
-        };
-        InternalNode::alloc(weight, left, right, BoundaryVertices::None);
+        let left = node;
+        let right = rv;
+
+        node = Handle::alloc_internal(left, right, BoundaryVertices::None).forget_type();
     }
+
+    _ = node;
 
     edge
 }
@@ -1391,42 +1405,37 @@ where
     let resolved = tree.resolve_vertex(v);
     tree.set_exposed(resolved, false);
 
-    let node: NonNull<LabelNode<W>> = Box::into_non_null(Box::new_uninit()).cast_init();
-
-    let label = tree.label_ids.push_with(|id| {
+    let (label, mut node) = tree.label_ids.push_with(|id| {
+        let leaf = Box::into_non_null(Box::new_uninit());
         let label = tree.tree.add_label(
             resolved,
             LabelInfo {
-                node,
+                node: leaf.cast(),
                 vertex: v,
                 id,
             },
         );
-        LabelNode::init(
-            node,
+        let leaf = Handle::init_label(
+            leaf,
             weight(id),
             label,
             BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
         );
 
-        WithGeneration::new(label, tree.generation)
+        (
+            WithGeneration::new(label, tree.generation),
+            leaf.forget_type(),
+        )
     });
 
-    let root: NonNull<Node<W>> = match rv {
-        Some(rv) => {
-            let left = rv;
-            let right = node.cast::<Node<W>>();
-            let weight = unsafe {
-                let wl = &left.node.as_ref().weight;
-                let wr = &right.as_ref().weight;
-                W::reduce(wl, wr)
-            };
-            InternalNode::alloc(weight, left.node, right, BoundaryVertices::None).cast()
-        }
-        None => node.cast(),
-    };
+    if let Some(rv) = rv {
+        let left = rv;
+        let right = node;
 
-    (label, root)
+        node = Handle::alloc_internal(left, right, BoundaryVertices::None).forget_type();
+    }
+
+    (label, node.node)
 }
 
 pub(crate) fn detach<W>(l: LabelId, tree: &mut TopTree<W>)
@@ -1777,15 +1786,14 @@ impl<W> TopTree<W> {
     }
 
     pub fn add_vertex(&mut self) -> VertexId {
-        let mut vertex = None;
-        let id = self.vertex_ids.push_with(|id| {
-            _ = vertex.insert(self.tree.add_vertex(id));
+        let (id, vertex) = self.vertex_ids.push_with(|id| {
+            let vertex = self.tree.add_vertex(id);
 
-            WithGeneration::new(vertex.unwrap(), self.generation)
+            (WithGeneration::new(vertex, self.generation), vertex)
         });
 
-        self.exposed.grow_to(vertex.unwrap().index() + 1);
-        self.set_exposed(vertex.unwrap(), false);
+        self.exposed.grow_to(vertex.index() + 1);
+        self.set_exposed(vertex, false);
 
         id
     }
@@ -1854,8 +1862,4 @@ impl<W> Drop for TopTree<W> {
             true
         });
     }
-}
-
-pub trait Summary {
-    fn reduce(&self, other: &Self) -> Self;
 }

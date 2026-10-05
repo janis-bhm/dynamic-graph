@@ -1,60 +1,4 @@
-use std::{mem::ManuallyDrop, ptr::NonNull};
-
-pub struct WithDrop<F: FnOnce(&mut T), T> {
-    t: T,
-    f: ManuallyDrop<F>,
-}
-
-impl<F: FnOnce(&mut T), T> Iterator for WithDrop<F, T>
-where
-    T: Iterator,
-{
-    type Item = T::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.t.next()
-    }
-}
-
-impl<F: FnOnce(&mut T), T> std::ops::Deref for WithDrop<F, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.t
-    }
-}
-
-impl<F: FnOnce(&mut T), T> std::ops::DerefMut for WithDrop<F, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.t
-    }
-}
-
-impl<F: FnOnce(&mut T), T> WithDrop<F, T> {
-    fn new(t: T, f: F) -> Self {
-        Self {
-            t,
-            f: ManuallyDrop::new(f),
-        }
-    }
-}
-
-pub trait WithDropExt<T> {
-    fn with_drop<F: FnOnce(&mut T)>(self, f: F) -> WithDrop<F, T>;
-}
-
-impl<T> WithDropExt<T> for T {
-    fn with_drop<F: FnOnce(&mut T)>(self, f: F) -> WithDrop<F, T> {
-        WithDrop::new(self, f)
-    }
-}
-
-impl<F: FnOnce(&mut T), T> Drop for WithDrop<F, T> {
-    fn drop(&mut self) {
-        let f = unsafe { ManuallyDrop::take(&mut self.f) };
-        f(&mut self.t);
-    }
-}
+use std::ptr::NonNull;
 
 /// # Safety
 /// `BITS` must not be less than the number of bits required to store the tag.
@@ -89,6 +33,7 @@ const fn bits_for<T: ?Sized + Aligned>() -> u32 {
     align.trailing_zeros() + (64 - 56)
 }
 
+#[expect(dead_code)]
 const fn bits_for_tags(mut tags: &[usize]) -> u32 {
     let mut bits = 0;
     while let &[tag, ref rest @ ..] = tags {
@@ -214,6 +159,7 @@ mod tests {
     }
 }
 
+#[expect(dead_code)]
 pub trait AssertNumeric {
     fn assert_eq(self, other: Self) -> Self;
     fn assert_ne(self, other: Self) -> Self;
@@ -266,6 +212,7 @@ impl_assert_num!(
 );
 
 // debug
+#[allow(dead_code)]
 pub(crate) struct DisplayOpt<T>(Option<T>);
 
 impl<T> core::fmt::Display for DisplayOpt<T>
@@ -280,6 +227,7 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub(crate) trait DisplayOptExt<T> {
     fn display(&self) -> DisplayOpt<&T>;
 }

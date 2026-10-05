@@ -1,12 +1,14 @@
 use core::fmt;
 
-use crate::{index::VertexId, util::DisplayOptExt};
+use crate::{index::VertexId, summary::Boundary};
 
+#[expect(dead_code)]
 pub struct PackedBoundaryVertices {
     pub left: Option<VertexId>,
     pub right: Option<VertexId>,
 }
 
+#[expect(dead_code)]
 impl PackedBoundaryVertices {
     fn unpack(&self) -> BoundaryVertices {
         match (self.left, self.right) {
@@ -188,25 +190,6 @@ impl BoundaryVertices {
         }
     }
 
-    pub fn remap(&mut self, old: VertexId, new: VertexId) {
-        match self {
-            Self::None => {}
-            Self::One(vertex) => {
-                if *vertex == old {
-                    *vertex = new;
-                }
-            }
-            Self::Two { left, right } => {
-                if *left == old {
-                    *left = new;
-                }
-                if *right == old {
-                    *right = new;
-                }
-            }
-        }
-    }
-
     pub fn left(&self) -> Option<VertexId> {
         match self {
             Self::None => None,
@@ -253,6 +236,14 @@ impl BoundaryVertices {
                 left: right,
                 right: left,
             },
+        }
+    }
+
+    pub fn into_boundary(self) -> Boundary {
+        match self {
+            Self::None => Boundary::None,
+            Self::One(v) => Boundary::One(v),
+            Self::Two { left, right } => Boundary::Two { left, right },
         }
     }
 }

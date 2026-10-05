@@ -12,6 +12,7 @@ macro_rules! impl_nonmax_type {
             assert!(core::mem::size_of::<Option<$name>>() == core::mem::size_of::<$int>());
         };
 
+        #[allow(dead_code, reason = "Macro-generated code")]
         impl $name {
             pub const fn new(value: $int) -> Option<Self> {
                 if let $pat = value {

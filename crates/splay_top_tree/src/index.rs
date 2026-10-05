@@ -13,12 +13,6 @@ impl Generation {
         self.0 = self.0.wrapping_add(1);
     }
 
-    pub fn increment_and_get(&mut self) -> Self {
-        let current = *self;
-        self.increment();
-        current
-    }
-
     pub fn current(&self) -> Self {
         *self
     }
@@ -51,8 +45,9 @@ macro_rules! impl_id {
             generation: $crate::index::Generation,
         }
 
+        #[allow(dead_code, reason = "Macro-generated code")]
         impl $name {
-            fn new(index: $crate::non_max::NonMaxUsize, #[cfg(debug_assertions)] generation: $crate::index::Generation) -> Self {
+            pub(crate) fn new(index: $crate::non_max::NonMaxUsize, #[cfg(debug_assertions)] generation: $crate::index::Generation) -> Self {
                 Self {
                     index,
                     #[cfg(debug_assertions)]

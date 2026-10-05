@@ -12,6 +12,45 @@ pub enum Boundary {
 }
 
 impl Boundary {
+    pub(crate) fn shared(&self, other: &Self) -> Option<VertexId> {
+        match (self, other) {
+            (Boundary::None, _) | (_, Boundary::None) => None,
+            (Boundary::One(v1), Boundary::One(v2)) => {
+                if v1 == v2 {
+                    Some(*v1)
+                } else {
+                    None
+                }
+            }
+            (Boundary::One(v), Boundary::Two { left, right })
+            | (Boundary::Two { left, right }, Boundary::One(v)) => {
+                if v == left || v == right {
+                    Some(*v)
+                } else {
+                    None
+                }
+            }
+            (
+                Boundary::Two {
+                    left: l1,
+                    right: r1,
+                },
+                Boundary::Two {
+                    left: l2,
+                    right: r2,
+                },
+            ) => {
+                if l1 == l2 || l1 == r2 {
+                    Some(*l1)
+                } else if r1 == l2 || r1 == r2 {
+                    Some(*r1)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Returns the number of boundary vertices.
     pub fn count(self) -> u8 {
         match self {
@@ -51,7 +90,7 @@ pub struct MergeContext {
     /// Right child's boundary vertices, in the logical frame of `right.sum`.
     pub right_boundary: Boundary,
     /// Merged cluster's boundary vertices, in the logical frame of the new sum.
-    pub boundary: Boundary,
+    pub parent_boundary: Boundary,
     /// The vertex shared by the two children (their central vertex).
     pub central: VertexId,
 }
@@ -60,26 +99,28 @@ impl MergeContext {
     /// The merged cluster is a path cluster and both children are path
     /// children: this is a *compress*.
     pub fn is_compress(&self) -> bool {
-        self.boundary.is_path() && self.left_boundary.is_path() && self.right_boundary.is_path()
+        self.parent_boundary.is_path()
+            && self.left_boundary.is_path()
+            && self.right_boundary.is_path()
     }
 
     /// The merged cluster is a path cluster and exactly one child is a path
     /// child: this is a *rake*.
     pub fn is_rake(&self) -> bool {
-        self.boundary.is_path()
+        self.parent_boundary.is_path()
             && ((self.left_boundary.is_path()) ^ (self.right_boundary.is_path()))
     }
 
     /// Whether the left child's cluster path is a sub-path of the merged
     /// cluster's path.
     pub fn left_is_path_child(&self) -> bool {
-        self.boundary.is_path() && self.left_boundary.is_path()
+        self.parent_boundary.is_path() && self.left_boundary.is_path()
     }
 
     /// Whether the right child's cluster path is a sub-path of the merged
     /// cluster's path.
     pub fn right_is_path_child(&self) -> bool {
-        self.boundary.is_path() && self.right_boundary.is_path()
+        self.parent_boundary.is_path() && self.right_boundary.is_path()
     }
 }
 
@@ -87,5 +128,8 @@ pub trait Summary: Sized {
     fn edge(e: index::EdgeId) -> Self;
     fn label(l: index::LabelId) -> Self;
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
+    fn update_boundary(&mut self, left: &Self, right: &Self, ctx: &MergeContext) {
+        *self = Self::combine(left, right, ctx);
+    }
     fn flip(&mut self) {}
 }
