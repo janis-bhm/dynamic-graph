@@ -144,7 +144,7 @@ fn is_boundary_vertex(h: &TopTree<Xor>, v: VertexId) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Cii {
+pub(crate) struct Cii {
     left: Option<VertexId>,
     mid: Option<VertexId>,
     right: Option<VertexId>,
@@ -154,13 +154,13 @@ impl fmt::Display for Cii {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_struct("Cii");
         if let Some(v) = self.left {
-            f.field("left", &v);
+            f.field_with("left", |f| v.fmt(f));
         }
         if let Some(v) = self.mid {
-            f.field("mid", &v);
+            f.field_with("mid", |f| v.fmt(f));
         }
         if let Some(v) = self.right {
-            f.field("right", &v);
+            f.field_with("right", |f| v.fmt(f));
         }
         f.finish()
     }
@@ -213,7 +213,7 @@ impl fmt::Display for ClusterKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ClusterKeys(Vec<ClusterKey>);
+pub(crate) struct ClusterKeys(Vec<ClusterKey>);
 
 impl fmt::Display for ClusterKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -226,7 +226,7 @@ impl fmt::Display for ClusterKeys {
     }
 }
 
-fn cluster_keys(h: &TopTree<Xor>, node: NN) -> ClusterKeys {
+pub(crate) fn cluster_keys<W>(h: &TopTree<W>, node: NonNull<Node<W>>) -> ClusterKeys {
     let keys = match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => unsafe {
             let endpoints = h.tree.edge_endpoints(leaf.as_ref().edge);
@@ -244,7 +244,7 @@ fn cluster_keys(h: &TopTree<Xor>, node: NN) -> ClusterKeys {
     ClusterKeys(keys)
 }
 
-fn count_leaves_with(h: &TopTree<Xor>, node: NN, v: VertexId) -> usize {
+fn count_leaves_with<W>(h: &TopTree<W>, node: NonNull<Node<W>>, v: VertexId) -> usize {
     match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
             let leaf = unsafe { leaf.as_ref() };
@@ -265,9 +265,13 @@ fn count_leaves_with(h: &TopTree<Xor>, node: NN, v: VertexId) -> usize {
     }
 }
 
-fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
+pub(crate) fn check_node<W>(at: At, h: &TopTree<W>, node: NonNull<Node<W>>, parity: bool) -> Cii {
     let node_ref = unsafe { &*node.as_ptr() };
     let flip = parity ^ node_ref.is_flipped();
+    eprintln!(
+        "flip {node:?}: {flip} = {parity} ^ {}",
+        node_ref.is_flipped()
+    );
 
     let cii = match Node::force_ptr(node) {
         LeafOrInternal::Edge(leaf) => {
@@ -275,14 +279,14 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
             let edge = h.tree.edge_weight(node.edge).id;
             let [left, right] = h.edge_endpoints(edge);
 
-            let (ep_left, ep_right) = if flip { (right, left) } else { (left, right) };
+            let (left, right) = if flip { (right, left) } else { (left, right) };
 
             let mut c = Cii::default();
-            if is_boundary_vertex(h, ep_left) {
-                c.left = Some(ep_left);
+            if h.is_boundary_vertex(left) {
+                c.left = Some(left);
             }
-            if is_boundary_vertex(h, ep_right) {
-                c.right = Some(ep_right);
+            if h.is_boundary_vertex(right) {
+                c.right = Some(right);
             }
             c
         }
@@ -291,7 +295,7 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
             let label = h.tree.label_weight(node.label).vertex;
 
             let mut c = Cii::default();
-            if is_boundary_vertex(h, label) {
+            if h.is_boundary_vertex(label) {
                 c.mid = Some(label);
             }
 
@@ -301,21 +305,23 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
             let internal = unsafe { internal.as_ref() };
             let Children { left, right } = internal.children;
             let (left, right) = if flip { (right, left) } else { (left, right) };
-            let bl = check_node(h, left, flip);
-            let br = check_node(h, right, flip);
+
+            let bl = check_node(at, h, left, flip);
+            let br = check_node(at, h, right, flip);
 
             assert!(
                 bl.rightmost().is_some() && br.leftmost().is_some(),
-                "children of an internal node must have a shared boundary vertex; \
-             node cluster = {}\n\tleft = {}\n\tright = {}",
-                cluster_keys(h, node),
+                "{at} children of an internal node must have a shared boundary vertex; \
+                 node\n\tleft = {}\n{}\n\tright = {}\n{}",
                 bl,
-                br
+                cluster_keys(h, left),
+                br,
+                cluster_keys(h, right),
             );
             assert_eq!(
                 bl.rightmost(),
                 br.leftmost(),
-                "orientation invariant: rightmost boundary of left child must equal \
+                "{at} orientation invariant: rightmost boundary of left child must equal \
              leftmost boundary of right child (the central vertex); node cluster = {}",
                 cluster_keys(h, node)
             );
@@ -323,7 +329,7 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
 
             let mut c = Cii::default();
             let inside = count_leaves_with(h, node, central);
-            if h.is_exposed(central) || inside < degree(h, central) {
+            if h.is_exposed(central) || inside < h.degree(central) {
                 c.mid = Some(central);
             }
             if bl.leftmost() != bl.rightmost() {
@@ -340,7 +346,7 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
     assert_eq!(
         cii.count(),
         node_ref.num_boundary(),
-        "num_boundary ({}) mismatch at node (leaf={}, cluster={})",
+        "{at} num_boundary ({}) mismatch at node (leaf={}, cluster={})",
         node_ref.boundary,
         node_ref.is_edge(),
         cluster_keys(h, node)
@@ -408,24 +414,49 @@ fn all_roots(h: &Harness) -> Vec<NN> {
     roots
 }
 
+#[macro_export]
+macro_rules! caller {
+    () => {
+        $crate::tests::At {
+            caller: std::panic::Location::caller(),
+        }
+    };
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct At {
+    pub(crate) caller: &'static std::panic::Location<'static>,
+}
+
+impl fmt::Display for At {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "@{}", self.caller)
+    }
+}
+
+#[track_caller]
 fn assert_invariants(h: &Harness) {
+    let at = caller!();
     let tree = &h.tree;
     let mut total_leaves = 0usize;
 
     for (key, edge) in tree.edge_ids.iter() {
         let leaf_nn = tree.tree.edge_weight(edge.tree_id).node;
         let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
-        assert!(node.is_edge(), "edge must map to a leaf node");
+        assert!(node.is_edge(), "{at} edge must map to a leaf node");
         assert_eq!(
             node.edge, edge.tree_id,
-            "leaf edge key must match its map entry"
+            "{at} leaf edge key must match its map entry"
         );
         let stored = node.weight.0;
         let [v, w] = h.tree.edge_endpoints(key);
         let expected = h.adj[&v].get(&w).copied();
         match expected {
-            Some(w) => assert_eq!(stored, w, "leaf weight must match user supplied weight"),
-            None => panic!("underlying tree and mirror disagree about edge existence"),
+            Some(w) => assert_eq!(
+                stored, w,
+                "{at} leaf weight must match user supplied weight"
+            ),
+            None => panic!("{at} underlying tree and mirror disagree about edge existence"),
         }
         total_leaves += 1;
     }
@@ -440,10 +471,10 @@ fn assert_invariants(h: &Harness) {
         assert_eq!(
             leaves.len() * 2 - 1,
             nodes.len(),
-            "a top tree with k leaves must have 2k-1 nodes"
+            "{at} a top tree with k leaves must have 2k-1 nodes"
         );
 
-        let cii = check_node(tree, root, false);
+        let cii = check_node(at, tree, root, false);
         for (slot, label) in [
             (&cii.left, "left"),
             (&cii.mid, "middle"),
@@ -451,10 +482,17 @@ fn assert_invariants(h: &Harness) {
         ] {
             if let Some(v) = slot {
                 let exposed = tree.is_exposed(*v);
-                assert!(exposed, "root boundary vertex ({label}) must be exposed");
+                assert!(
+                    exposed,
+                    "{at} root boundary vertex ({label}) must be exposed"
+                );
             }
         }
-        assert_eq!(cii.count(), unsafe { &*root.as_ptr() }.num_boundary());
+        assert_eq!(
+            cii.count(),
+            unsafe { &*root.as_ptr() }.num_boundary(),
+            "{at} root num_boundary must match the number of boundary vertices"
+        );
 
         let mut comp_leaves = BTreeSet::new();
         for leaf in leaves {
@@ -462,7 +500,7 @@ fn assert_invariants(h: &Harness) {
             let key = tree.tree.edge_weight(key).id;
             assert!(
                 covered.insert(key),
-                "leaf appears in more than one top tree component"
+                "{at} leaf appears in more than one top tree component"
             );
             comp_leaves.insert(key);
         }
@@ -496,14 +534,14 @@ fn assert_invariants(h: &Harness) {
             .collect();
         assert_eq!(
             comp_leaves, expected,
-            "top tree leaves must exactly match the underlying component's edges"
+            "{at} top tree leaves must exactly match the underlying component's edges"
         );
     }
 
     assert_eq!(
         covered.len(),
         total_leaves,
-        "all edges covered exactly once"
+        "{at} all edges covered exactly once"
     );
 }
 
@@ -715,7 +753,11 @@ fn grow_a_small_tree_with_exposes() {
 }
 
 fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
-    let mut rng = Rng(seed);
+    let mut rng = Rng(seed
+        + std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64);
     let mut h = Harness::new(num_vertices);
 
     for _step in 0..num_ops {

@@ -787,9 +787,9 @@ impl<W, NodeType> Handle<W, NodeType> {
     where
         W: Summary,
     {
-        let mut node = self.forget_type();
-        while let Some(next_node) = node.splay_step() {
-            node = next_node;
+        let mut node = unsafe { ptr::read(&self) }.forget_type();
+        while let Some(next) = node.splay_step() {
+            node = next;
         }
     }
 
@@ -811,7 +811,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                 root.is_boundary_vertex_internal(v)
             }
             Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
-            Internal(internal) => internal.child(self.is_flipped()).is_path(),
+            Internal(internal) => internal.child(!self.is_flipped()).is_path(),
         }
     }
 
@@ -824,7 +824,7 @@ impl<W, NodeType> Handle<W, NodeType> {
                 root.is_boundary_vertex_internal(v)
             }
             Label(label) => root.is_boundary_vertex_internal(root.tree.label_vertex(label.label())),
-            Internal(internal) => internal.child(!self.is_flipped()).is_path(),
+            Internal(internal) => internal.child(self.is_flipped()).is_path(),
         }
     }
 
@@ -904,6 +904,7 @@ impl<W> Handle<W, marker::Internal> {
                 let node = self.node.cast::<InternalNode<W>>().as_mut();
 
                 node.set_flipped(false);
+                node.boundary.flip();
                 node.children.flip();
 
                 for mut child in &node.children {
@@ -1262,6 +1263,13 @@ where
     let mut ru = expose(u, tree);
     if let Some(ref mut tu) = ru {
         if tu.has_left_boundary(tree) {
+            eprintln!(
+                "link({u}, {v}): flipping r{u} {} -> {}",
+                tu.is_flipped(),
+                !tu.is_flipped()
+            );
+            #[cfg(test)]
+            eprintln!("\t{}", tests::cluster_keys(tree, tu.node));
             tu.toggle_flipped();
         }
 
@@ -1272,6 +1280,13 @@ where
     let mut rv = expose(v, tree);
     if let Some(ref mut tv) = rv {
         if tv.has_right_boundary(tree) {
+            eprintln!(
+                "link({u}, {v}): flipping r{v} {} -> {}",
+                tv.is_flipped(),
+                !tv.is_flipped()
+            );
+            #[cfg(test)]
+            eprintln!("\t{}", tests::cluster_keys(tree, tv.node));
             tv.toggle_flipped();
         }
 
@@ -1312,6 +1327,10 @@ where
 
         let rv_boundary = BoundaryVertices::from_option(rv.as_ref().map(|_| v));
         node = InternalNode::alloc(weight, left, right, rv_boundary).cast();
+        #[cfg(test)]
+        {
+            tests::check_node(caller!(), tree, node, false);
+        }
     }
 
     if let Some(rv) = rv {
@@ -1322,7 +1341,11 @@ where
             let wr = &right.as_ref().weight;
             W::reduce(wl, wr)
         };
-        InternalNode::alloc(weight, left, right, BoundaryVertices::None);
+        let _node = InternalNode::alloc(weight, left, right, BoundaryVertices::None);
+        #[cfg(test)]
+        {
+            tests::check_node(caller!(), tree, _node.cast(), false);
+        }
     }
 
     edge
