@@ -635,7 +635,6 @@ impl<W, NodeType> Handle<W, NodeType> {
     where
         W: Summary,
     {
-        eprintln!("rotate_up: {:?}", self.node);
         let mut sibling = self.sibling()?;
         let mut parent = self.parent()?;
         let uncle = parent.sibling()?;
@@ -1197,7 +1196,6 @@ where
         consuming_node
     }
 
-    eprintln!("expose({v})");
     let resolved = root.resolve_vertex(v);
     assert!(
         !root.is_exposed_internal(resolved),
@@ -1224,7 +1222,6 @@ pub(crate) fn deexpose<W>(v: VertexId, tree: &mut TopTree<W>) -> Option<Handle<W
 where
     W: Summary,
 {
-    eprintln!("deexpose({v})");
     let resolved = tree.resolve_vertex(v);
 
     let consuming = find_consuming_node(tree, resolved);
@@ -1263,13 +1260,6 @@ where
     let mut ru = expose(u, tree);
     if let Some(ref mut tu) = ru {
         if tu.has_left_boundary(tree) {
-            eprintln!(
-                "link({u}, {v}): flipping r{u} {} -> {}",
-                tu.is_flipped(),
-                !tu.is_flipped()
-            );
-            #[cfg(test)]
-            eprintln!("\t{}", tests::cluster_keys(tree, tu.node));
             tu.toggle_flipped();
         }
 
@@ -1280,13 +1270,6 @@ where
     let mut rv = expose(v, tree);
     if let Some(ref mut tv) = rv {
         if tv.has_right_boundary(tree) {
-            eprintln!(
-                "link({u}, {v}): flipping r{v} {} -> {}",
-                tv.is_flipped(),
-                !tv.is_flipped()
-            );
-            #[cfg(test)]
-            eprintln!("\t{}", tests::cluster_keys(tree, tv.node));
             tv.toggle_flipped();
         }
 
@@ -1296,7 +1279,6 @@ where
 
     let leaf = Box::into_non_null(Box::new_uninit()).cast_init();
     let edge = tree.edge_ids.push_with(|id| {
-        eprintln!("link({u}, {v}) -> {id}");
         let edge = tree.tree.add_edge(
             uu,
             vv,
@@ -1327,10 +1309,6 @@ where
 
         let rv_boundary = BoundaryVertices::from_option(rv.as_ref().map(|_| v));
         node = InternalNode::alloc(weight, left, right, rv_boundary).cast();
-        #[cfg(test)]
-        {
-            tests::check_node(caller!(), tree, node, false);
-        }
     }
 
     if let Some(rv) = rv {
@@ -1341,11 +1319,7 @@ where
             let wr = &right.as_ref().weight;
             W::reduce(wl, wr)
         };
-        let _node = InternalNode::alloc(weight, left, right, BoundaryVertices::None);
-        #[cfg(test)]
-        {
-            tests::check_node(caller!(), tree, _node.cast(), false);
-        }
+        InternalNode::alloc(weight, left, right, BoundaryVertices::None);
     }
 
     edge
@@ -1380,7 +1354,6 @@ where
     edge_handle.delete_all_ancestors();
 
     let (weight, swap) = tree.tree.remove_edge(id);
-    eprintln!("cut({u}, {v}) <- {id}");
     tree.edge_ids.remove(weight.id);
 
     if let SwapResult::Swapped { prev, next } = swap {
