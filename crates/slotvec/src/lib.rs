@@ -212,29 +212,33 @@ pub mod slot {
             index
         }
 
-        pub fn push_with(&mut self, f: impl FnOnce(I) -> T) -> I {
-            let index = if let Some(free) = self.first_free.into_option() {
+        pub fn push_with<R>(&mut self, f: impl FnOnce(I) -> (T, R)) -> (I, R) {
+            let (index, r) = if let Some(free) = self.first_free.into_option() {
                 let free_index = free.get();
                 self.first_free = unsafe { self.slots[free_index].next };
+
+                let (value, r) = f(free);
                 self.slots[free_index] = Slot {
-                    value: ManuallyDrop::new(f(free)),
+                    value: ManuallyDrop::new(value),
                 };
 
-                free
+                (free, r)
             } else {
                 // SAFETY: Vec cannot grow beyond isize::MAX elements.
                 let index = I::new(self.slots.len());
+
+                let (value, r) = f(index);
                 self.slots.push(Slot {
-                    value: ManuallyDrop::new(f(index)),
+                    value: ManuallyDrop::new(value),
                 });
 
-                index
+                (index, r)
             };
 
             self.occupancy.grow_to(index.get() + 1);
             self.occupancy.set(index.get(), true);
 
-            index
+            (index, r)
         }
 
         pub fn remove(&mut self, index: I) -> Option<T> {
