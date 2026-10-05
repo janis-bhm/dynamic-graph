@@ -45,8 +45,23 @@ impl Harness {
         }
     }
 
+    fn add_vertex(&mut self) -> VertexId {
+        let v = self.tree.add_vertex();
+        self.adj.insert(v, BTreeMap::new());
+        v
+    }
+
     fn vertices(&self) -> impl Iterator<Item = VertexId> + '_ {
         self.adj.keys().copied()
+    }
+
+    fn remove_vertex(&mut self, v: VertexId) {
+        self.tree.remove_vertex(v);
+        while let Some((w, _)) = self.adj.get_mut(&v).and_then(BTreeMap::pop_first) {
+            self.adj.get_mut(&w).unwrap().remove(&v);
+        }
+        self.exposed.remove(&v);
+        self.adj.remove(&v);
     }
 
     fn link(&mut self, u: VertexId, v: VertexId, w: u64) -> EdgeId {
@@ -771,32 +786,45 @@ fn run_random_ops(seed: u64, num_vertices: usize, num_ops: usize) {
             .iter()
             .any(|&v| !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1);
 
-        let r = rng.next() % 4;
+        let r = rng.next() % 5;
         let mut acted = false;
-        if r == 0 && can_deexpose {
-            let v = *h.exposed.iter().next().unwrap();
-            h.deexpose(v);
-            acted = true;
-        } else if r == 1 && can_link {
-            let ia = (rng.next() as usize) % clean.len();
-            let ib = (rng.next() as usize) % (clean.len() - 1);
-            let ib = if ib >= ia { ib + 1 } else { ib };
-            let a = &clean[ia];
-            let b = &clean[ib];
-            let u = a[(rng.next() as usize) % a.len()];
-            let v = b[(rng.next() as usize) % b.len()];
-            h.link(u, v, rng.next() | 1);
-            acted = true;
-        } else if r == 2 && !clean_edges.is_empty() {
-            let (u, v) = clean_edges[(rng.next() as usize) % clean_edges.len()];
-            h.cut(u, v);
-            acted = true;
-        } else if can_expose {
-            let v = verts[(rng.next() as usize) % verts.len()];
-            if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
-                h.expose(v);
+        match r {
+            0 if can_deexpose => {
+                let v = *h.exposed.iter().next().unwrap();
+                h.deexpose(v);
                 acted = true;
             }
+            1 if can_link => {
+                let ia = (rng.next() as usize) % clean.len();
+                let ib = (rng.next() as usize) % (clean.len() - 1);
+                let ib = if ib >= ia { ib + 1 } else { ib };
+                let a = &clean[ia];
+                let b = &clean[ib];
+                let u = a[(rng.next() as usize) % a.len()];
+                let v = b[(rng.next() as usize) % b.len()];
+                h.link(u, v, rng.next() | 1);
+                acted = true;
+            }
+            2 if !clean_edges.is_empty() => {
+                let (u, v) = clean_edges[(rng.next() as usize) % clean_edges.len()];
+                h.cut(u, v);
+                acted = true;
+            }
+            3 if can_expose => {
+                let v = verts[(rng.next() as usize) % verts.len()];
+                if !h.exposed.contains(&v) && h.exposed_count(&h.comp_of(v)) <= 1 {
+                    h.expose(v);
+                    acted = true;
+                }
+            }
+            4 if !verts.is_empty() => {
+                let v = verts[(rng.next() as usize) % verts.len()];
+                h.deexpose_all();
+                h.remove_vertex(v);
+                h.add_vertex();
+                acted = true;
+            }
+            _ => {}
         }
 
         if !acted {
@@ -890,4 +918,29 @@ fn link_to_path() {
     h.link(vs[2], vs[4], 7);
 
     //assert_invariants(&h);
+}
+
+#[test]
+fn delete_vertex() {
+    let mut h = Harness::new(4);
+    let mut vs: Vec<_> = h.vertices().collect();
+    h.link(vs[0], vs[1], 1);
+    h.link(vs[1], vs[2], 2);
+    h.link(vs[2], vs[3], 3);
+
+    assert_invariants(&h);
+
+    //h.expose(vs[2]);
+    h.expose(vs[3]);
+    h.deexpose(vs[3]);
+
+    h.remove_vertex(vs[1]);
+
+    assert_invariants(&h);
+    h.link(vs[0], vs[2], 4);
+    assert_invariants(&h);
+    vs[1] = h.add_vertex();
+    assert_invariants(&h);
+    h.link(vs[1], vs[2], 4);
+    assert_invariants(&h);
 }

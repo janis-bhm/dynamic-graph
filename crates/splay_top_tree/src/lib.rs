@@ -1,3 +1,5 @@
+//! A Top Tree is a tree data structure representing a forest of trees.
+//!
 #![expect(internal_features)]
 #![feature(pattern_types, pattern_type_macro, structural_match)]
 #![cfg_attr(test, feature(debug_closure_helpers))]
@@ -1552,16 +1554,68 @@ pub struct TopTree<W> {
     generation: Generation,
 }
 
+/// A [`TopTree`] with currently-exposed vertices, which does not allow the
+/// removal of vertices or adding and removing edges or labels.
+#[repr(transparent)]
+pub struct ExposedTopTree<W> {
+    inner: TopTree<W>,
+}
+
+impl<W> ExposedTopTree<W> {
+    /// Returns the set of vertices in the connected component containing `v`.
+    pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
+        self.inner.component_of(v)
+    }
+
+    pub fn is_boundary_vertex(&self, v: VertexId) -> bool {
+        self.inner.is_boundary_vertex(v)
+    }
+
+    pub fn degree(&self, v: VertexId) -> usize {
+        self.inner.degree(v)
+    }
+
+    pub fn edge_endpoints(&self, e: EdgeId) -> [VertexId; 2] {
+        self.inner.edge_endpoints(e)
+    }
+
+    pub fn find_edge(&self, v: VertexId, w: VertexId) -> Option<EdgeId> {
+        self.inner.find_edge(v, w)
+    }
+
+    pub fn label_vertex(&self, l: LabelId) -> VertexId {
+        self.inner.label_vertex(l)
+    }
+
+    pub fn first_label(&self, v: VertexId) -> Option<LabelId> {
+        self.inner.first_label(v)
+    }
+
+    pub fn is_exposed(&self, v: VertexId) -> bool {
+        self.inner.is_exposed(v)
+    }
+
+    pub fn incident_edges(&self, v: VertexId) -> impl Iterator<Item = EdgeId> + '_ {
+        self.inner.incident_edges(v)
+    }
+
+    pub fn is_connected(&self, v: VertexId, w: VertexId) -> bool {
+        self.inner.is_connected(v, w)
+    }
+
+    pub fn add_vertex(&mut self) -> VertexId {
+        self.inner.add_vertex()
+    }
+}
+
 impl<W> TopTree<W> {
-    pub fn new() -> Self {
-        Self {
-            tree: tree::Tree::new(),
-            exposed: slotvec::BitVec::new(),
-            vertex_ids: SlotVec::new(),
-            edge_ids: SlotVec::new(),
-            label_ids: SlotVec::new(),
-            generation: Generation::new(),
-        }
+    #[expect(dead_code)]
+    fn as_exposed(&self) -> &ExposedTopTree<W> {
+        unsafe { mem::transmute::<&Self, &ExposedTopTree<W>>(self) }
+    }
+
+    fn as_exposed_mut(&mut self) -> &mut ExposedTopTree<W> {
+        unsafe { mem::transmute::<&mut Self, &mut ExposedTopTree<W>>(self) }
     }
 
     fn resolve_vertex(&self, v: VertexId) -> tree::VertexId {
@@ -1609,6 +1663,25 @@ impl<W> TopTree<W> {
         self.is_exposed_internal(v) || self.tree.is_at_least_degree_n(v, 2)
     }
 
+    fn is_exposed(&self, v: VertexId) -> bool {
+        let vv = self.resolve_vertex(v);
+        self.is_exposed_internal(vv)
+    }
+}
+
+impl<W> TopTree<W> {
+    pub fn new() -> Self {
+        Self {
+            tree: tree::Tree::new(),
+            exposed: slotvec::BitVec::new(),
+            vertex_ids: SlotVec::new(),
+            edge_ids: SlotVec::new(),
+            label_ids: SlotVec::new(),
+            generation: Generation::new(),
+        }
+    }
+
+    /// Returns the set of vertices in the connected component containing `v`.
     pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
         let leaves = if let Some(root) = incident_leaves(self, self.resolve_vertex(v))
             .next()
@@ -1653,11 +1726,6 @@ impl<W> TopTree<W> {
         rv == rw
     }
 
-    pub fn is_exposed(&self, v: VertexId) -> bool {
-        let vv = self.resolve_vertex(v);
-        self.is_exposed_internal(vv)
-    }
-
     pub fn degree(&self, v: VertexId) -> usize {
         let vv = self.resolve_vertex(v);
         self.tree.degree(vv)
@@ -1699,24 +1767,10 @@ impl<W> TopTree<W> {
         self.tree.incident_edge_weights(vv).map(|e| e.id)
     }
 
-    pub fn expose_vertex(&mut self, v: VertexId)
-    where
-        W: Summary,
-    {
-        expose(v, self);
-    }
-
-    pub fn deexpose_vertex(&mut self, v: VertexId)
-    where
-        W: Summary,
-    {
-        deexpose(v, self);
-    }
-
     pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
     where
         W: Summary + Clone,
-        F: FnOnce(&mut Self, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
@@ -1724,7 +1778,7 @@ impl<W> TopTree<W> {
             expose(w, self).expect("vertices are connected, so w must have a consuming node");
         let aggregate = meet.weight().clone();
 
-        let result = f(self, aggregate);
+        let result = f(self.as_exposed_mut(), aggregate);
 
         deexpose(w, self);
         deexpose(v, self);
@@ -1735,14 +1789,14 @@ impl<W> TopTree<W> {
     pub fn try_with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> Option<R>
     where
         W: Summary + Clone,
-        F: FnOnce(&mut Self, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
         let result = if let Some(meet) = expose(w, self) {
             let aggregate = meet.weight().clone();
 
-            Some(f(self, aggregate))
+            Some(f(self.as_exposed_mut(), aggregate))
         } else {
             None
         };
@@ -1756,12 +1810,12 @@ impl<W> TopTree<W> {
     pub fn with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> R
     where
         W: Summary + Clone,
-        F: FnOnce(&mut Self, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
         let handle = expose(v, self).expect("vertex must have a consuming node");
         let aggregate = handle.weight().clone();
 
-        let result = f(self, aggregate);
+        let result = f(self.as_exposed_mut(), aggregate);
 
         deexpose(v, self);
 
@@ -1771,11 +1825,11 @@ impl<W> TopTree<W> {
     pub fn try_with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> Option<R>
     where
         W: Summary + Clone,
-        F: FnOnce(&mut Self, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
         let result = if let Some(handle) = expose(v, self) {
             let aggregate = handle.weight().clone();
-            Some(f(self, aggregate))
+            Some(f(self.as_exposed_mut(), aggregate))
         } else {
             None
         };
@@ -1785,6 +1839,7 @@ impl<W> TopTree<W> {
         result
     }
 
+    /// Adds a new vertex to the top tree, returning its `VertexId`.
     pub fn add_vertex(&mut self) -> VertexId {
         let (id, vertex) = self.vertex_ids.push_with(|id| {
             let vertex = self.tree.add_vertex(id);
@@ -1796,6 +1851,62 @@ impl<W> TopTree<W> {
         self.set_exposed(vertex, false);
 
         id
+    }
+
+    /// Removes the vertex `v` from the top tree, along with all incident edges and labels.
+    pub fn remove_vertex(&mut self, v: VertexId)
+    where
+        W: Summary,
+    {
+        let vv = self.resolve_vertex(v);
+
+        while let Some(&EdgeInfo { id, .. }) = self.tree.incident_edge_weights(vv).next() {
+            let [v, w] = self.edge_endpoints(id);
+            self.cut(v, w);
+        }
+
+        while let Some(&LabelInfo { id, .. }) = self.tree.incident_label_weights(vv).next() {
+            self.detach(id);
+        }
+
+        let mut removal = self.tree.remove_vertex(vv);
+
+        while let Some(x) = removal.next(&mut self.tree) {
+            use tree::EdgeOrLabelId::*;
+            match x {
+                Edge(SwapResult::Swapped { next, prev }) => {
+                    let id = self.tree.edge_weight(next).id;
+                    let old = mem::replace(&mut self.edge_ids[id].tree_id, next);
+                    assert_eq!(old, prev, "tree::EdgeId should match the previous tree id");
+
+                    unsafe { self.tree.edge_weight_mut(next).node.as_mut().edge = next };
+                }
+                Label(SwapResult::Swapped { prev, next }) => {
+                    let id = self.tree.label_weight(next).id;
+                    let old = mem::replace(&mut self.label_ids[id].tree_id, next);
+                    assert_eq!(old, prev, "tree::LabelId should match the previous tree id");
+
+                    unsafe { self.tree.label_weight_mut(next).node.as_mut().label = next };
+                }
+                Vertex(SwapResult::Swapped { prev, next }) => {
+                    let id = *self.tree.vertex_weight(next);
+                    let old = mem::replace(&mut self.vertex_ids[id].tree_id, next);
+
+                    self.exposed
+                        .set(next.index(), self.exposed.get(prev.index()));
+                    self.exposed.set(prev.index(), false);
+
+                    assert_eq!(
+                        old, prev,
+                        "tree::VertexId should match the previous tree id"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let _ = removal.into_weight();
+        self.vertex_ids.remove(v);
     }
 
     pub fn link(&mut self, v: VertexId, w: VertexId) -> EdgeId

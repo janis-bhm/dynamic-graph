@@ -9,9 +9,9 @@ use std::{
 use crate::{impl_id, index::Generation};
 
 impl_id! {
-    pub struct VertexId #v,
-    pub struct EdgeId #e,
-    pub struct LabelId #l,
+    pub struct VertexId #tv,
+    pub struct EdgeId #te,
+    pub struct LabelId #tl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +50,7 @@ pub struct Tree<V, E, L> {
     generation: Generation,
 }
 
+#[derive(Debug)]
 pub(crate) struct Vertex<V> {
     next_edge: Option<EdgeId>,
     next_label: Option<LabelId>,
@@ -139,12 +140,7 @@ impl<V, E, L> Tree<V, E, L> {
             .get_disjoint_mut([v.index(), w.index()])
             .expect("Vertices must be distinct");
 
-        let [next_v, next_w] = {
-            [
-                mem::replace(&mut nu.next_edge, Some(edge_id)),
-                mem::replace(&mut nv.next_edge, Some(edge_id)),
-            ]
-        };
+        let [next_v, next_w] = { [nu.next_edge.replace(edge_id), nv.next_edge.replace(edge_id)] };
 
         self.edges.push(Edge {
             endpoints: Endpoints([v, w]),
@@ -331,7 +327,7 @@ impl<V, E, L> Tree<V, E, L> {
 
     /// Removes the vertex with the given `VertexId` from the tree, along with
     /// all incident edges and labels.
-    pub fn remove_vertex(&mut self, vertex: VertexId) -> VertexRemoval<'_, V, E, L> {
+    pub fn remove_vertex(&mut self, vertex: VertexId) -> VertexRemoval<V> {
         self.assert_valid_vid(vertex);
         VertexRemoval::new(self, vertex)
     }
@@ -348,12 +344,25 @@ impl<V, E, L> Tree<V, E, L> {
             "Cannot remove vertex with incident labels"
         );
 
+        let last_index = self.vertices.len();
         match self.vertices.get_mut(id) {
             None => (vertex.weight, SwapResult::None),
             Some(swapped) => {
                 let generation = mem::replace(&mut swapped.generation, self.generation);
-                let prev = VertexId::new_from_usize(self.vertices.len(), generation);
+                let prev = VertexId::new_from_usize(last_index, generation);
                 let next = VertexId::new_from_usize(id, self.generation);
+
+                if let Some(first) = swapped.next_edge {
+                    for edge in EdgeWalkerMut::new(&mut self.edges, first, prev) {
+                        edge.endpoints.replace(prev, next);
+                    }
+                }
+
+                if let Some(first) = swapped.next_label {
+                    for label in LabelWalkerMut::new(&mut self.labels, first) {
+                        label.vertex = next;
+                    }
+                }
 
                 (vertex.weight, SwapResult::Swapped { prev, next })
             }
@@ -493,40 +502,38 @@ enum Either<A, B> {
     Right(B),
 }
 
-pub struct VertexRemoval<'a, V, E, L> {
-    tree: &'a mut Tree<V, E, L>,
+pub struct VertexRemoval<V> {
     vertex: Either<VertexId, V>,
 }
 
-impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
-    pub fn new(tree: &'a mut Tree<V, E, L>, vertex: VertexId) -> Self {
+impl<V> VertexRemoval<V> {
+    pub fn new<E, L>(tree: &mut Tree<V, E, L>, vertex: VertexId) -> Self {
         tree.assert_valid_vid(vertex);
         tree.generation.increment();
         Self {
-            tree,
             vertex: Either::Left(vertex),
         }
     }
-    pub fn next(&mut self) -> Option<EdgeOrLabelId> {
+    pub fn next<E, L>(&mut self, tree: &mut Tree<V, E, L>) -> Option<EdgeOrLabelId> {
         match self.vertex {
             Either::Left(vertex) => {
-                while let Some(label) = self.tree.vertices[vertex.index()].next_label {
+                while let Some(label) = tree.vertices[vertex.index()].next_label {
                     if let (_, swap @ SwapResult::Swapped { .. }) =
-                        self.tree.remove_label_unchecked(label.index())
+                        tree.remove_label_unchecked(label.index())
                     {
                         return Some(EdgeOrLabelId::Label(swap));
                     }
                 }
 
-                while let Some(edge) = self.tree.vertices[vertex.index()].next_edge {
+                while let Some(edge) = tree.vertices[vertex.index()].next_edge {
                     if let (_, swap @ SwapResult::Swapped { .. }) =
-                        self.tree.remove_edge_unchecked(edge.index())
+                        tree.remove_edge_unchecked(edge.index())
                     {
                         return Some(EdgeOrLabelId::Edge(swap));
                     }
                 }
 
-                let (weight, swap) = self.tree.remove_vertex_unchecked(vertex.index());
+                let (weight, swap) = tree.remove_vertex_unchecked(vertex.index());
                 self.vertex = Either::Right(weight);
                 Some(EdgeOrLabelId::Vertex(swap))
             }
@@ -534,7 +541,7 @@ impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
         }
     }
 
-    fn into_weight(self) -> V {
+    pub fn into_weight(self) -> V {
         let this = ManuallyDrop::new(self);
 
         match unsafe { ptr::read(&this.vertex) } {
@@ -544,7 +551,7 @@ impl<'a, V, E, L> VertexRemoval<'a, V, E, L> {
     }
 }
 
-impl<'a, V, E, L> Drop for VertexRemoval<'a, V, E, L> {
+impl<V> Drop for VertexRemoval<V> {
     fn drop(&mut self) {
         panic!(
             "VertexRemoval must be fully consumed before dropping. Call `next()` until it returns None, then call `into_weight()` to retrieve the vertex weight."
@@ -916,5 +923,46 @@ impl IntoIterator for Directions {
 
     fn into_iter(self) -> Self::IntoIter {
         [Direction::Left, Direction::Right].into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_and_remove_vertex() {
+        let mut tree: Tree<i32, i32, i32> = Tree::new();
+        let v1 = tree.add_vertex(1);
+        let v2 = tree.add_vertex(2);
+        let mut v3 = tree.add_vertex(3);
+
+        assert_eq!(*tree.vertex_weight(v1), 1);
+        assert_eq!(*tree.vertex_weight(v2), 2);
+        assert_eq!(*tree.vertex_weight(v3), 3);
+        let e23 = tree.add_edge(v2, v3, 0);
+
+        let mut removal = tree.remove_vertex(v1);
+        while let Some(x) = removal.next(&mut tree) {
+            match x {
+                EdgeOrLabelId::Edge(_) => {
+                    panic!("Unexpected edge removal")
+                }
+                EdgeOrLabelId::Label(_) => {
+                    panic!("Unexpected label removal")
+                }
+                EdgeOrLabelId::Vertex(SwapResult::Swapped { prev, next }) => {
+                    assert_eq!(prev, v3);
+                    assert_eq!(next.index(), v1.index());
+                    v3 = next;
+                }
+                _ => {}
+            }
+        }
+
+        let weight = removal.into_weight();
+        assert_eq!(weight, 1);
+        assert!(tree.is_valid_vertex(v3));
+        assert_eq!(tree.edge_endpoints(e23), Endpoints([v2, v3]));
     }
 }
