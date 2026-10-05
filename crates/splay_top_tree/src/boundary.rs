@@ -1,11 +1,24 @@
 use core::fmt;
 
-use crate::{index::VertexId, summary::Boundary};
+use crate::{index::VertexId, summary::Boundary, util::Packable};
 
 #[expect(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PackedBoundaryVertices {
     pub left: Option<VertexId>,
     pub right: Option<VertexId>,
+}
+
+impl Packable for BoundaryVertices {
+    type Packed = PackedBoundaryVertices;
+
+    fn unpack(packed: &Self::Packed) -> Self {
+        packed.unpack()
+    }
+
+    fn pack(&self) -> Self::Packed {
+        PackedBoundaryVertices::pack(*self)
+    }
 }
 
 #[expect(dead_code)]

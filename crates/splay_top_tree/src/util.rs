@@ -237,3 +237,83 @@ impl<T: core::fmt::Display> DisplayOptExt<T> for Option<T> {
         DisplayOpt(self.as_ref())
     }
 }
+
+#[expect(dead_code)]
+pub struct PackedRef<'a, T: Packable> {
+    packed: &'a T::Packed,
+    unpacked: T,
+}
+
+impl<T> core::ops::Deref for PackedRef<'_, T>
+where
+    T: Packable,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.unpacked
+    }
+}
+
+#[expect(dead_code)]
+pub struct PackedMut<'a, T: Packable> {
+    packed: &'a mut T::Packed,
+    unpacked: T,
+}
+
+impl<'a, T> From<&'a T::Packed> for PackedRef<'a, T>
+where
+    T: Packable,
+{
+    fn from(packed: &'a T::Packed) -> Self {
+        let unpacked = T::unpack(packed);
+        Self { packed, unpacked }
+    }
+}
+
+impl<'a, T> From<&'a mut T::Packed> for PackedMut<'a, T>
+where
+    T: Packable,
+{
+    fn from(packed: &'a mut T::Packed) -> Self {
+        let unpacked = T::unpack(packed);
+        Self { packed, unpacked }
+    }
+}
+
+impl<T> core::ops::Deref for PackedMut<'_, T>
+where
+    T: Packable,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.unpacked
+    }
+}
+
+impl<T> core::ops::DerefMut for PackedMut<'_, T>
+where
+    T: Packable,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.unpacked
+    }
+}
+
+impl<T> Drop for PackedMut<'_, T>
+where
+    T: Packable,
+{
+    fn drop(&mut self) {
+        let packed = self.unpacked.pack();
+        *self.packed = packed;
+    }
+}
+
+#[expect(dead_code)]
+pub trait Packable: Sized {
+    type Packed: Copy;
+    fn pack(&self) -> Self::Packed;
+    fn unpack(packed: &Self::Packed) -> Self;
+}
