@@ -1576,11 +1576,7 @@ where
             );
         }
         if let Some(root_v) = root_v.take() {
-            self.new_internal(
-                node,
-                root_v,
-                BoundaryVertices::from_option(root_u.map(|_| u)),
-            );
+            self.new_internal(node, root_v, BoundaryVertices::None);
         }
 
         leaf
