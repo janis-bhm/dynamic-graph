@@ -53,6 +53,11 @@ impl fmt::Display for BoundaryVertices {
 
 impl BoundaryVertices {
     pub fn from_left_and_right(left: Option<VertexId>, right: Option<VertexId>) -> Self {
+        eprintln!(
+            "Boundary(left: {}, right: {})",
+            left.display(),
+            right.display()
+        );
         match (left, right) {
             (None, None) => Self::None,
             (Some(v), None) | (None, Some(v)) => Self::One(v),
@@ -67,6 +72,7 @@ impl BoundaryVertices {
     }
 
     pub fn from_option(v: Option<VertexId>) -> Self {
+        eprintln!("Boundary(from_option: {})", v.display());
         match v {
             None => Self::None,
             Some(v) => Self::One(v),
@@ -74,6 +80,10 @@ impl BoundaryVertices {
     }
 
     pub fn from_children(left_boundary: Self, right_boundary: Self, is_path: bool) -> Self {
+        eprintln!(
+            "Boundary(from_children: left: {}, right: {}, is_path: {})",
+            left_boundary, right_boundary, is_path
+        );
         match (left_boundary, right_boundary) {
             (Self::None, Self::None) => Self::None,
             (Self::None, _) | (_, Self::None) => {
@@ -94,7 +104,7 @@ impl BoundaryVertices {
             (Self::One(v), Self::Two { left, right }) => {
                 assert_eq!(
                     v, left,
-                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary} and {right_boundary}"
                 );
 
                 if is_path {
@@ -106,7 +116,7 @@ impl BoundaryVertices {
             (Self::Two { left, right }, Self::One(v)) => {
                 assert_eq!(
                     v, right,
-                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary} and {right_boundary}"
                 );
 
                 if is_path {
@@ -124,7 +134,7 @@ impl BoundaryVertices {
             ) => {
                 assert_eq!(
                     right, l2,
-                    "two clusters can only be merged if they share a boundary vertex: {left_boundary:?} and {right_boundary:?}"
+                    "two clusters can only be merged if they share a boundary vertex: {left_boundary} and {right_boundary}"
                 );
                 assert!(
                     is_path,
@@ -135,7 +145,7 @@ impl BoundaryVertices {
         }
     }
 
-    pub fn remove(&mut self, v: VertexId) -> Option<VertexId> {
+    fn remove_inner(&mut self, v: VertexId) -> Option<VertexId> {
         match self {
             Self::None => {}
             Self::One(w) => {
@@ -158,7 +168,15 @@ impl BoundaryVertices {
         None
     }
 
+    pub fn remove(&mut self, v: VertexId) -> Option<VertexId> {
+        eprint!("Boundary({self}, remove: {}) -> ", v);
+        let result = self.remove_inner(v);
+        eprintln!("{self}");
+        result
+    }
+
     pub fn add(&mut self, v: VertexId, left: bool) {
+        eprint!("Boundary(add: {}) -> ", v);
         if self.contains(v) {
             return;
         }
@@ -178,6 +196,7 @@ impl BoundaryVertices {
                 panic!("cannot add a third boundary vertex to a cluster");
             }
         }
+        eprintln!("{self}");
     }
 
     pub fn contains(&self, v: VertexId) -> bool {

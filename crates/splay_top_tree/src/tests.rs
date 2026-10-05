@@ -307,14 +307,16 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
             assert!(
                 bl.rightmost().is_some() && br.leftmost().is_some(),
                 "children of an internal node must have a shared boundary vertex; \
-             node cluster = {:?}",
-                cluster_keys(h, node)
+             node cluster = {}\n\tleft = {}\n\tright = {}",
+                cluster_keys(h, node),
+                bl,
+                br
             );
             assert_eq!(
                 bl.rightmost(),
                 br.leftmost(),
                 "orientation invariant: rightmost boundary of left child must equal \
-             leftmost boundary of right child (the central vertex); node cluster = {:?}",
+             leftmost boundary of right child (the central vertex); node cluster = {}",
                 cluster_keys(h, node)
             );
             let central = bl.rightmost().unwrap();
@@ -338,7 +340,7 @@ fn check_node(h: &TopTree<Xor>, node: NN, parity: bool) -> Cii {
     assert_eq!(
         cii.count(),
         node_ref.num_boundary(),
-        "num_boundary ({:?}) mismatch at node (leaf={}, cluster={:?})",
+        "num_boundary ({}) mismatch at node (leaf={}, cluster={})",
         node_ref.boundary,
         node_ref.is_edge(),
         cluster_keys(h, node)

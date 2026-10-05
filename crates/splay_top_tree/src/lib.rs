@@ -635,6 +635,7 @@ impl<W, NodeType> Handle<W, NodeType> {
     where
         W: Summary,
     {
+        eprintln!("rotate_up: {:?}", self.node);
         let mut sibling = self.sibling()?;
         let mut parent = self.parent()?;
         let uncle = parent.sibling()?;
@@ -1195,6 +1196,7 @@ where
         consuming_node
     }
 
+    eprintln!("expose({v})");
     let resolved = root.resolve_vertex(v);
     assert!(
         !root.is_exposed_internal(resolved),
@@ -1221,6 +1223,7 @@ pub(crate) fn deexpose<W>(v: VertexId, tree: &mut TopTree<W>) -> Option<Handle<W
 where
     W: Summary,
 {
+    eprintln!("deexpose({v})");
     let resolved = tree.resolve_vertex(v);
 
     let consuming = find_consuming_node(tree, resolved);
@@ -1278,6 +1281,7 @@ where
 
     let leaf = Box::into_non_null(Box::new_uninit()).cast_init();
     let edge = tree.edge_ids.push_with(|id| {
+        eprintln!("link({u}, {v}) -> {id}");
         let edge = tree.tree.add_edge(
             uu,
             vv,
@@ -1353,6 +1357,7 @@ where
     edge_handle.delete_all_ancestors();
 
     let (weight, swap) = tree.tree.remove_edge(id);
+    eprintln!("cut({u}, {v}) <- {id}");
     tree.edge_ids.remove(weight.id);
 
     if let SwapResult::Swapped { prev, next } = swap {
