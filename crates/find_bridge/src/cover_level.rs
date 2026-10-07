@@ -1733,6 +1733,15 @@ impl FindBridge {
     }
 }
 
+impl core::fmt::Debug for FindBridge {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let edges = self.edges.iter().filter_map(|(id, _)| self.endpoints(id));
+        f.debug_struct("FindBridge")
+            .field("edges", &edges.collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
