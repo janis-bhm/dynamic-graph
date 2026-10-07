@@ -1974,3 +1974,25 @@ impl<W> Drop for TopTree<W> {
         });
     }
 }
+
+impl<W> fmt::Debug for TopTree<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let edges = self
+            .edge_ids
+            .iter()
+            .map(|(id, _)| self.edge_endpoints(id))
+            .map(|[u, v]| (u, v))
+            .collect::<Vec<_>>();
+
+        let labels = self
+            .label_ids
+            .iter()
+            .map(|(id, _)| (id, self.label_vertex(id)))
+            .collect::<Vec<_>>();
+
+        f.debug_struct("TopTree")
+            .field("edges", &edges)
+            .field("labels", &labels)
+            .finish()
+    }
+}
