@@ -1554,6 +1554,9 @@ pub struct TopTree<W> {
     generation: Generation,
 }
 
+unsafe impl<W> Send for TopTree<W> where W: Send {}
+unsafe impl<W> Sync for TopTree<W> where W: Sync {}
+
 /// A [`TopTree`] with currently-exposed vertices, which does not allow the
 /// removal of vertices or adding and removing edges or labels.
 #[repr(transparent)]
