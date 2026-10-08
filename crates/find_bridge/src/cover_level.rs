@@ -1188,7 +1188,9 @@ impl FindBridge {
     /// uncovered and recovered. A non-tree record loses its endpoint
     /// labels and its covered path is uncovered. A self-record is only a label:
     /// it was never a graph edge, so removing it only drops that label.
-    pub fn remove_edge(&mut self, edge_id: EdgeId) {
+    ///
+    /// Returns whether the removed edge was a bridge.
+    pub fn remove_edge(&mut self, edge_id: EdgeId) -> bool {
         let ((u, v), level) = match self.edges[edge_id] {
             Edge::Tree(cluster_id) => {
                 let (u, v) = self
@@ -1197,9 +1199,11 @@ impl FindBridge {
                     .expect("the tree edge must exist");
 
                 if self.cover_level_between_internal(u, v) == -1 {
+                    // The tree edge is a bridge, so it can be cut without finding a replacement.
                     self.top_tree.cut(u, v);
                     self.edges.remove(edge_id);
-                    return;
+
+                    return true;
                 }
 
                 let (endpoints, level) = self.swap_edge_for_delete(cluster_id);
@@ -1225,7 +1229,7 @@ impl FindBridge {
                 if u == v {
                     // A self-record is a label, not a graph edge: it was never
                     // covered, and there is no path to uncover or recover.
-                    return;
+                    return false;
                 }
 
                 ((u, v), level)
@@ -1271,6 +1275,8 @@ impl FindBridge {
         // if swapped {
         //     _ = self.edges.remove(edge_id);
         // }
+
+        false
     }
 
     fn swap_edge_for_delete(
