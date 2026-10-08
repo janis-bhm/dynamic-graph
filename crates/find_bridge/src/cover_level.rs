@@ -999,6 +999,10 @@ impl FindBridge {
         self.top_tree.cluster_vertex(cluster)
     }
 
+    fn cluster_edge(&self, cluster: top_tree::ClusterId) -> Option<EdgeId> {
+        self.top_tree.edge_weight(cluster).cloned()
+    }
+
     /// The two endpoints of a live edge handle, or `None` if `edge_id` names no
     /// live record.
     ///
@@ -1114,6 +1118,18 @@ impl FindBridge {
         self.top_tree.connected_clusters(u.0, v.0)
     }
 
+    pub fn find_edge_by_endpoints(&self, u: VertexId, v: VertexId) -> Option<EdgeId> {
+        let (u, v) = {
+            (
+                self.cluster_vertex(u.0).expect("the u cluster must exist"),
+                self.cluster_vertex(v.0).expect("the v cluster must exist"),
+            )
+        };
+        self.top_tree
+            .find_edge(u, v)
+            .and_then(|edge| self.cluster_edge(edge))
+    }
+
     #[cfg(test)]
     fn debug_root_incident(&mut self, v: top_tree::VertexId, w: top_tree::VertexId) -> u64 {
         let summary = self.top_tree.expose_path(v, w);
@@ -1179,6 +1195,22 @@ impl FindBridge {
                     });
             }
         }
+    }
+
+    pub fn is_bridge(&mut self, edge_id: EdgeId) -> bool {
+        let level = match self.edges[edge_id] {
+            Edge::Tree(cluster_id) => {
+                let (u, v) = self
+                    .top_tree
+                    .edge_endpoints(cluster_id)
+                    .expect("the tree edge must exist");
+
+                self.cover_level_between_internal(u, v)
+            }
+            Edge::NonTree(NonTreeEdge { level, .. }) => level.0,
+        };
+
+        level == -1
     }
 
     /// Applies Appendix A's `Delete` reduction to a live edge record.

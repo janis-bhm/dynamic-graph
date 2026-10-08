@@ -411,6 +411,13 @@ where
     pub fn vertex_count(&self) -> usize {
         self.tree.node_count()
     }
+
+    pub fn find_edge(&self, u: tree::VertexId, v: tree::VertexId) -> Option<ClusterId> {
+        self.tree
+            .edge_index_of(u, v)
+            .and_then(|edge| self.tree.edge_weight(edge))
+            .copied()
+    }
 }
 
 impl<S, N, E> TopTree<S, N, E>
@@ -530,6 +537,14 @@ where
         match self.clusters.get(cluster)?.data {
             ClusterData::Node { tree_id: label, .. } => self.tree.label_vertex(label),
             ClusterData::Edge { .. } | ClusterData::Internal => None,
+        }
+    }
+
+    /// The edge whose edge leaf is `cluster`, or `None` for a freed slot, a label leaf, or an internal cluster.
+    pub fn edge_weight(&self, cluster: ClusterId) -> Option<&E> {
+        match &self.clusters.get(cluster)?.data {
+            ClusterData::Edge { weight, .. } => Some(weight),
+            ClusterData::Node { .. } | ClusterData::Internal => None,
         }
     }
 }
