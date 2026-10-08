@@ -13,14 +13,14 @@ use std::{
 
 use crate::{
     boundary::BoundaryVertices,
-    index::{Generation, LabelId},
-    summary::Summary,
+    index::Generation,
     tree::{Endpoints, SwapResult},
     util::TaggedPtr,
 };
 
-pub use index::{EdgeId, VertexId};
+pub use index::{EdgeId, LabelId, VertexId};
 use slotvec::SlotVec;
+pub use summary::{MergeContext, Summary};
 
 mod boundary;
 mod index;
@@ -1857,10 +1857,11 @@ impl<W> TopTree<W> {
     }
 
     /// Removes the vertex `v` from the top tree, along with all incident edges and labels.
-    pub fn remove_vertex(&mut self, v: VertexId)
+    pub fn remove_vertex(&mut self, v: impl IntoVertexId)
     where
         W: Summary,
     {
+        let v = v.into_vertex_id(self);
         let vv = self.resolve_vertex(v);
 
         while let Some(&EdgeInfo { id, .. }) = self.tree.incident_edge_weights(vv).next() {
@@ -1912,29 +1913,38 @@ impl<W> TopTree<W> {
         self.vertex_ids.remove(v);
     }
 
-    pub fn link(&mut self, v: VertexId, w: VertexId) -> EdgeId
+    pub fn link(&mut self, v: impl IntoVertexId, w: impl IntoVertexId) -> EdgeId
     where
         W: Default + Summary,
     {
+        let v = v.into_vertex_id(self);
+        let w = w.into_vertex_id(self);
+
         link(v, w, |_| W::default(), self)
     }
 
     pub fn link_with(
         &mut self,
-        v: VertexId,
-        w: VertexId,
+        v: impl IntoVertexId,
+        w: impl IntoVertexId,
         weight: impl FnOnce(EdgeId) -> W,
     ) -> EdgeId
     where
         W: Summary,
     {
+        let v = v.into_vertex_id(self);
+        let w = w.into_vertex_id(self);
+
         link(v, w, weight, self)
     }
 
-    pub fn cut(&mut self, v: VertexId, w: VertexId)
+    pub fn cut(&mut self, v: impl IntoVertexId, w: impl IntoVertexId)
     where
         W: Summary,
     {
+        let v = v.into_vertex_id(self);
+        let w = w.into_vertex_id(self);
+
         cut(v, w, self);
     }
 
@@ -1954,11 +1964,45 @@ impl<W> TopTree<W> {
         label
     }
 
+    pub fn attach_new(&mut self) -> (VertexId, LabelId)
+    where
+        W: Default + Summary,
+    {
+        let v = self.add_vertex();
+        let l = self.attach(v);
+        (v, l)
+    }
+
+    pub fn attach_new_with(&mut self, weight: impl FnOnce(LabelId) -> W) -> (VertexId, LabelId)
+    where
+        W: Summary,
+    {
+        let v = self.add_vertex();
+        let l = self.attach_with(v, weight);
+        (v, l)
+    }
+
     pub fn detach(&mut self, l: LabelId)
     where
         W: Summary,
     {
         detach(l, self);
+    }
+}
+
+pub trait IntoVertexId {
+    fn into_vertex_id<W>(self, tree: &TopTree<W>) -> VertexId;
+}
+
+impl IntoVertexId for VertexId {
+    fn into_vertex_id<W>(self, _: &TopTree<W>) -> VertexId {
+        self
+    }
+}
+
+impl IntoVertexId for LabelId {
+    fn into_vertex_id<W>(self, tree: &TopTree<W>) -> VertexId {
+        tree.label_vertex(self)
     }
 }
 
