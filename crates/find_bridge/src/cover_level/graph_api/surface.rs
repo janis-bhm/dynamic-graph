@@ -296,7 +296,10 @@ fn endpoints_survive_an_unrelated_vertex_removal() {
     // `spare` is isolated, so it can be removed, and removing it recycles the
     // last forest slot -- the volatile handle of `s` or `t` moves.
     assert_eq!(spare.index(), 2, "the third vertex added carries cluster 2");
-    assert!(fb.remove_vertex(spare), "an isolated vertex is removable");
+    assert!(
+        fb.remove_isolated_vertex(spare),
+        "an isolated vertex is removable"
+    );
     assert!(
         fb.cluster_vertex(spare.0).is_none(),
         "the removed vertex's cluster no longer resolves"
@@ -1272,14 +1275,17 @@ fn remove_vertex_after_its_only_non_tree_record_was_removed() {
     assert_eq!(fb.component_size(a), 1, "a is now isolated");
     assert_eq!(fb.component_size(b), 1, "b is now isolated");
 
-    assert!(fb.remove_vertex(a), "a has no incident record left");
+    assert!(
+        fb.remove_isolated_vertex(a),
+        "a has no incident record left"
+    );
     assert!(
         fb.cluster_vertex(a.0).is_none(),
         "and its cluster no longer resolves"
     );
     assert_eq!(fb.component_size(b), 1, "b is unaffected");
     assert!(
-        fb.remove_vertex(b),
+        fb.remove_isolated_vertex(b),
         "and b is removable too: the structure is still usable"
     );
     assert_eq!(fb.tree_edge_count(), 0, "an empty forest at the end");
@@ -1329,7 +1335,7 @@ fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     assert!(fb.connected(a, a), "and still a live vertex");
 
     assert!(
-        fb.remove_vertex(a),
+        fb.remove_isolated_vertex(a),
         "the panic is only about forest edges, so a vertex with a live non-tree record is accepted"
     );
     assert_eq!(

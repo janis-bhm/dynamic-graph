@@ -1685,7 +1685,8 @@ impl<W> TopTree<W> {
     }
 
     /// Returns the set of vertices in the connected component containing `v`.
-    pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
+    pub fn component_of(&self, v: impl IntoVertexId) -> BTreeSet<VertexId> {
+        let v = v.into_vertex_id(self);
         let leaves = if let Some(root) = incident_leaves(self, self.resolve_vertex(v))
             .next()
             .map(Handle::root)
@@ -1719,7 +1720,10 @@ impl<W> TopTree<W> {
         self.is_boundary_vertex_internal(vv)
     }
 
-    pub fn is_connected(&self, v: VertexId, w: VertexId) -> bool {
+    pub fn is_connected(&self, v: impl IntoVertexId, w: impl IntoVertexId) -> bool {
+        let v = v.into_vertex_id(self);
+        let w = w.into_vertex_id(self);
+
         let vv = self.resolve_vertex(v);
         let ww = self.resolve_vertex(w);
 
@@ -1810,11 +1814,12 @@ impl<W> TopTree<W> {
         result
     }
 
-    pub fn with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> R
+    pub fn with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> R
     where
         W: Summary + Clone,
         F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
+        let v = v.into_vertex_id(self);
         let handle = expose(v, self).expect("vertex must have a consuming node");
         let aggregate = handle.weight().clone();
 
@@ -1825,11 +1830,12 @@ impl<W> TopTree<W> {
         result
     }
 
-    pub fn try_with_exposed_vertex<R, F>(&mut self, v: VertexId, f: F) -> Option<R>
+    pub fn try_with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> Option<R>
     where
         W: Summary + Clone,
         F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
     {
+        let v = v.into_vertex_id(self);
         let result = if let Some(handle) = expose(v, self) {
             let aggregate = handle.weight().clone();
             Some(f(self.as_exposed_mut(), aggregate))

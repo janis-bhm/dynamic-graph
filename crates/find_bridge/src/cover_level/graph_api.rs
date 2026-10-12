@@ -430,7 +430,7 @@ impl Graph {
             self.naive.remove_vertex(u),
             "the driver and the oracle agree on which vertices are live"
         );
-        let removed = self.fb.remove_vertex(handle);
+        let removed = self.fb.remove_isolated_vertex(handle);
         assert!(removed, "the vertex is isolated after deleting its edges");
         let previous = self.verts.remove(&u);
         assert_eq!(previous, Some(handle), "vertex {u} maps back");

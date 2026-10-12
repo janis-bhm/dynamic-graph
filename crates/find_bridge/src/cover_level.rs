@@ -212,6 +212,7 @@ fn zero_tree() -> PartTree {
     PartTree::new()
 }
 
+/// Create a part tree with a single key/value pair.
 fn single_key_tree(key: i32, value: &SizeVector, inc: u64) -> PartTree {
     let mut tree = zero_tree();
     add_at(&mut tree, key, value, inc);
@@ -314,6 +315,9 @@ fn boundary_contains(boundary: top_tree::Boundary, vertex: top_tree::VertexId) -
 /// Select the child whose path/boundary owns a parent's outer boundary. At a
 /// central endpoint of a rake, prefer the point child; this is the `x = c`
 /// case in FS.Merge.
+///
+/// In an off-path parent where both children are point children, this is the
+/// point child that contains `vertex`.
 fn endpoint_child(
     left: top_tree::Boundary,
     right: top_tree::Boundary,
@@ -322,14 +326,22 @@ fn endpoint_child(
 ) -> usize {
     let in_left = boundary_contains(left, vertex);
     let in_right = boundary_contains(right, vertex);
+
+    // if parent is a rake, then pick the point child that contains the central vertex, if any.
     if vertex == central {
+        // pick left if it contains the central vertex and is a point child as
+        // long as the right child is not also a point child (which necessarily
+        // means it contains the central vertex as well)
         if in_left && left.count() == 1 && !(in_right && right.count() == 1) {
             return 0;
         }
+        // else pick right if it is a point child.
         if in_right && right.count() == 1 {
             return 1;
         }
     }
+
+    // Otherwise, pick the child that contains the vertex, preferring left.
     match (in_left, in_right) {
         (true, false) => 0,
         (false, true) => 1,
@@ -372,6 +384,7 @@ fn boundary_tree(
     &parts[slot]
 }
 
+/// Set the left or right part-tree to `tree` depending on the side of `vertex` in `boundary`
 fn set_boundary_tree(
     parts: &mut [PartTree; 2],
     boundary: top_tree::Boundary,
@@ -508,35 +521,51 @@ fn off_path_find_size(
     right: &CoverLevel,
     ctx: &MergeContext,
 ) -> (SizeVector, u64, [PartTree; 2]) {
-    let mut a = match ctx.boundary {
-        top_tree::Boundary::One(vertex) if vertex != ctx.central => Some(vertex),
-        top_tree::Boundary::Two { left, right } => {
-            // Defensive only: the caller classifies two-boundary parents as
-            // along-path.
-            Some(if left != ctx.central { left } else { right })
+    // left and right make up a point cluster.
+
+    // Lemma:
+    // let C be a point-cluster parent with boundary \partial{C} = {s}, where s
+    // is the central vertex shared by both children.  If either child is a path
+    // cluster with boundary {s,t}, then t remains exposed, so \partial{C} =
+    // {t}, not {s}.
+    // Therefore, where \partial{C} = {s}, both children must be point clusters.
+    // This leaves the case where \partial{C} = {t} and s is the central vertex
+    // shared by both children. In this case, t is the outward vertex of a path
+    // child with boundary {s,t}.
+
+    // a is the boundary vertex that is not the central vertex, if any.
+    let (a, a_child) = match ctx.boundary {
+        top_tree::Boundary::One(vertex) => {
+            // since the parent is a point cluster, the boundary vertex must either be the outward vertex of a path child, or the central vertex.
+            if vertex != ctx.central {
+                // the vertex is the outward vertex of a path child.
+                let child = if ctx.left_boundary.is_path() {
+                    0
+                } else if ctx.right_boundary.is_path() {
+                    1
+                } else {
+                    unreachable!("off-path parent must have one or zero path children")
+                };
+
+                (vertex, child)
+            } else {
+                debug_assert!(
+                    vertex == ctx.central
+                        && !ctx.left_boundary.is_path()
+                        && !ctx.right_boundary.is_path(),
+                    "if the boundary is the central vertex, both children must be point clusters"
+                );
+                // the vertex is the central vertex, and both children are point clusters.
+                let child = 0;
+
+                (vertex, child)
+            }
         }
-        _ => None,
+
+        top_tree::Boundary::None => (ctx.central, 0),
+        _ => unreachable!("off-path parent must have one or zero boundaries"),
     };
 
-    let mut a_child = if let Some(vertex) = a {
-        endpoint_child(ctx.left_boundary, ctx.right_boundary, vertex, ctx.central)
-    } else if ctx.left_boundary.is_path() && !ctx.right_boundary.is_path() {
-        0
-    } else if ctx.right_boundary.is_path() && !ctx.left_boundary.is_path() {
-        1
-    } else {
-        0
-    };
-
-    if a.is_none() {
-        a = Some(ctx.central);
-    }
-    let a = a.expect("off-path merge must have a representative boundary");
-    if !boundary_contains(ctx.left_boundary, a) {
-        a_child = 1;
-    } else if !boundary_contains(ctx.right_boundary, a) {
-        a_child = 0;
-    }
     let b_child = 1 - a_child;
     let summaries = [left, right];
     let boundaries = [ctx.left_boundary, ctx.right_boundary];
@@ -548,10 +577,20 @@ fn off_path_find_size(
             .threshold
             .max(summaries[a_child].pending.constant),
     );
+
+    // size contribution from path-child A:
+    // |> diagsize' if i > l = M(i) * partsize
+    // for each level l in (low+1)..=LEVEL_CAP, we take the partsize from the part-tree at that level and keep the first l slots as the base contribution for those levels.
     let diagonal = diagonal_sum(a_tree, low + 1, LEVEL_CAP);
-    let prefix = range_sum(a_tree, -1, low);
     let mut size = diagonal;
+
+    // |> diagsize' if i == pending.constant = M(pending.constant) * -1..=j prefix of the part-tree.
+    let prefix = range_sum(a_tree, -1, low);
     size.add_assign(&m_apply(summaries[a_child].pending.constant, &prefix));
+
+    // because each path \(t\dots{u}\) must go through the edge \((s,t)\) which has
+    // level \(cover_A\), we take only the levels \(-1..cover_A\) from
+    // \(size_B\) as the contribution to this count from B.
     size.add_assign(&m_apply(summaries[a_child].cover, &summaries[b_child].size));
 
     let diag_inc = range_inc_diag(a_tree, low + 1, LEVEL_CAP);
@@ -1036,6 +1075,74 @@ impl FindBridge {
         }
     }
 
+    pub fn incident_edges(&self, vertex: VertexId) -> impl Iterator<Item = EdgeId> + '_ {
+        let cluster = vertex.0;
+        self.top_tree
+            .leaf_weight(cluster)
+            .into_label()
+            .expect("the vertex must be live")
+            .edges()
+    }
+
+    /// Removes a vertex and all its incident edges from the graph, returning the other endpoints of any bridge edges that were removed.
+    pub fn remove_vertex(&mut self, vertex: VertexId) -> Vec<VertexId> {
+        let cluster = vertex.0;
+        let tree_vertex = self
+            .cluster_vertex(cluster)
+            .expect("the vertex must be live");
+
+        let tree_edges = self
+            .top_tree
+            .forest()
+            .incident_edge_weights(tree_vertex)
+            .copied()
+            .collect::<Vec<_>>();
+
+        let bridge_vertices = tree_edges
+            .into_iter()
+            .filter_map(|edge| {
+                let endpoints = self.remove_tree_edge(edge);
+
+                endpoints
+                    .map(|(a, b)| if a == tree_vertex { b } else { a })
+                    .and_then(|v| self.vertex_cluster(v))
+                    .map(VertexId)
+            })
+            .collect::<Vec<_>>();
+
+        debug_assert_eq!(
+            self.top_tree
+                .forest()
+                .incident_edge_indices(tree_vertex)
+                .count(),
+            0,
+            "FindBridge::remove_vertex requires no incident forest edges"
+        );
+
+        let edges = self
+            .top_tree
+            .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
+
+        for edge in edges.edges() {
+            let Some(Edge::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge) else {
+                panic!("FindBridge::remove_vertex found a tree edge in vertex labels")
+            };
+
+            // `detach` took this vertex's own `VertexLabels` away, so only the
+            // other endpoint of a non-self record still needs cleaning. A
+            // self-edge label (u == v) lives only in the removed vertex.
+            let survivors = [u, v].into_iter().filter(|c| *c != cluster);
+            self.remove_edge_labels(edge, level, survivors);
+        }
+
+        let _ = self
+            .top_tree
+            .remove_vertex(tree_vertex)
+            .expect("the live vertex was validated before removal");
+
+        bridge_vertices
+    }
+
     /// Removes an isolated-in-the-forest vertex, its structural label leaf,
     /// and all user labels attached to it.
     ///
@@ -1047,7 +1154,8 @@ impl FindBridge {
     ///
     /// Panics if a live vertex has any incident forest edge. Graph-level
     /// callers should first delete its incident graph edges.
-    pub fn remove_vertex(&mut self, vertex: VertexId) -> bool {
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn remove_isolated_vertex(&mut self, vertex: VertexId) -> bool {
         let cluster = vertex.0;
         let vertex = self
             .cluster_vertex(cluster)
@@ -1211,6 +1319,39 @@ impl FindBridge {
         };
 
         level == -1
+    }
+
+    fn remove_tree_edge(
+        &mut self,
+        cluster_id: top_tree::ClusterId,
+    ) -> Option<(top_tree::VertexId, top_tree::VertexId)> {
+        let (u, v) = self
+            .top_tree
+            .edge_endpoints(cluster_id)
+            .expect("the tree edge must exist");
+
+        let edge_id = *self
+            .top_tree
+            .edge_weight(cluster_id)
+            .expect("the tree edge must exist");
+
+        if self.cover_level_between_internal(u, v) == -1 {
+            // The tree edge is a bridge, so it can be cut without finding a replacement.
+            self.top_tree.cut(u, v);
+            self.edges.remove(edge_id);
+
+            return Some((u, v));
+        }
+
+        let (_, level) = self.swap_edge_for_delete(cluster_id);
+        _ = self.edges.remove(edge_id);
+
+        self.with_vertex_id_path_tag(u, v, CoverTag::uncover(level));
+        for level in (0..=level.0).rev() {
+            self.recover(u, v, Level(level));
+        }
+
+        None
     }
 
     /// Applies Appendix A's `Delete` reduction to a live edge record.

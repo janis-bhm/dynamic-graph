@@ -762,7 +762,7 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     let moved_before_internal = internal(&fb, moved_before);
     let removed_internal = internal(&fb, removed);
 
-    assert!(fb.remove_vertex(removed));
+    assert!(fb.remove_isolated_vertex(removed));
     naive.remove_isolated_vertex(0);
     vertices[0] = None;
 
@@ -801,7 +801,7 @@ fn remove_isolated_vertex_cleans_labels_and_preserves_forest_aggregates() {
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 
     let last_vertex = vertices[3].take().unwrap();
-    assert!(fb.remove_vertex(last_vertex));
+    assert!(fb.remove_isolated_vertex(last_vertex));
     naive.remove_isolated_vertex(3);
     check_sparse_forest_against_naive(&mut fb, &naive, &vertices);
 }
@@ -813,7 +813,7 @@ fn remove_vertex_requires_no_forest_edges() {
     let a = fb.add_vertex();
     let b = fb.add_vertex();
     fb.link(a, b);
-    fb.remove_vertex(a);
+    fb.remove_isolated_vertex(a);
 }
 
 #[test]
