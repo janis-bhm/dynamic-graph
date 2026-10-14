@@ -571,9 +571,12 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    pub fn add_boundary_vertex<A: Allocator>(&mut self, tree: &TopTree<W, A>, v: VertexId) {
-        let resolved = tree.resolve_vertex(v);
-
+    pub fn add_boundary_vertex<A: Allocator>(
+        &mut self,
+        tree: &TopTree<W, A>,
+        v: VertexId,
+        resolved: tree::VertexId,
+    ) {
         match self.force() {
             LeafOrInternal::Edge(edge) => {
                 let Endpoints([left, right]) = tree.tree.edge_endpoints(edge.edge());

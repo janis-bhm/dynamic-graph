@@ -348,8 +348,12 @@ impl<V, E, L> Tree<V, E, L> {
         match self.vertices.get_mut(id) {
             None => (vertex.weight, SwapResult::None),
             Some(swapped) => {
+                #[cfg(debug_assertions)]
                 let generation = mem::replace(&mut swapped.generation, self.generation);
+                #[cfg(debug_assertions)]
                 let prev = VertexId::new_from_usize(last_index, generation);
+                #[cfg(not(debug_assertions))]
+                let prev = VertexId::new_from_usize(last_index, self.generation);
                 let next = VertexId::new_from_usize(id, self.generation);
 
                 if let Some(first) = swapped.next_edge {
@@ -422,9 +426,13 @@ impl<V, E, L> Tree<V, E, L> {
                 // current generation. The caller of this function must ensure
                 // that the generation was incremented before calling this
                 // function.
+                #[cfg(debug_assertions)]
                 let generation = mem::replace(&mut swapped.generation, self.generation);
 
+                #[cfg(debug_assertions)]
                 let prev = EdgeId::new_from_usize(self.edges.len(), generation);
+                #[cfg(not(debug_assertions))]
+                let prev = EdgeId::new_from_usize(self.edges.len(), self.generation);
                 let next = EdgeId::new_from_usize(id, self.generation);
 
                 self.fix_edge_links(
@@ -478,9 +486,13 @@ impl<V, E, L> Tree<V, E, L> {
             None => (label.weight, SwapResult::None),
             Some(swapped) => {
                 let vertex = swapped.vertex;
+                #[cfg(debug_assertions)]
                 let generation = mem::replace(&mut swapped.generation, self.generation);
 
+                #[cfg(debug_assertions)]
                 let prev = LabelId::new_from_usize(self.labels.len(), generation);
+                #[cfg(not(debug_assertions))]
+                let prev = LabelId::new_from_usize(self.labels.len(), self.generation);
                 let next = LabelId::new_from_usize(id, self.generation);
 
                 self.fix_label_links(vertex, self.labels.len(), Some(next));

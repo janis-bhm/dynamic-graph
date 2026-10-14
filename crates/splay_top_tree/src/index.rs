@@ -5,6 +5,7 @@ use slotvec::Indexing;
 pub struct Generation(u32);
 
 impl Generation {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self(0)
     }
@@ -17,6 +18,7 @@ impl Generation {
         *self
     }
 
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub fn get(&self) -> u32 {
         self.0
     }
@@ -55,7 +57,11 @@ macro_rules! impl_id {
                 }
             }
 
-            fn new_from_usize(index: usize, generation: $crate::index::Generation) -> Self {
+            fn new_from_usize(
+                index: usize,
+                #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+                generation: $crate::index::Generation,
+            ) -> Self {
                 Self {
                     index: $crate::non_max::NonMaxUsize::new(index).expect("Index must be non-zero"),
                     #[cfg(debug_assertions)]
@@ -75,11 +81,10 @@ macro_rules! impl_id {
 
         impl core::fmt::Display for $name {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                if cfg!(debug_assertions) {
-                    write!(f, "{}{}.{}", $crate::name_or_short!($name, $($short)*), self.index.get(), self.generation.get())
-                } else {
-                    write!(f, "{}{}", $crate::name_or_short!($name, $($short)*), self.index.get())
-                }
+                #[cfg(debug_assertions)]
+                return write!(f, "{}{}.{}", $crate::name_or_short!($name, $($short)*), self.index.get(), self.generation.get());
+                #[cfg(not(debug_assertions))]
+                return write!(f, "{}{}", $crate::name_or_short!($name, $($short)*), self.index.get());
             }
         }
     };

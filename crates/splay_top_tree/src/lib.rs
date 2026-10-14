@@ -14,7 +14,6 @@ use std::{
 
 use crate::{
     boundary::BoundaryVertices,
-    index::Generation,
     node::{Handle, LabelNode, LeafNode, Node, marker},
     tree::{Endpoints, SwapResult},
 };
@@ -126,6 +125,7 @@ where
         mut node: Handle<W, marker::Either>,
         tree: &mut TopTree<W, A>,
         v: VertexId,
+        resolved: tree::VertexId,
     ) -> Handle<W, marker::Either>
     where
         W: Summary,
@@ -134,7 +134,7 @@ where
         let mut right = false;
 
         loop {
-            node.add_boundary_vertex(tree, v);
+            node.add_boundary_vertex(tree, v, resolved);
 
             let Some(parent) = node.parent() else {
                 if let LeafOrInternal::Internal(mut internal) = node.force() {
@@ -272,7 +272,7 @@ where
         Some(consuming_node) => {
             let consuming_node = prepare_expose(consuming_node);
 
-            let node = expose_prepared(consuming_node, root, v);
+            let node = expose_prepared(consuming_node, root, v, resolved);
             root.set_exposed(resolved, true);
 
             Some(node)
@@ -364,10 +364,7 @@ where
             BoundaryVertices::from_left_and_right(ru.as_ref().map(|_| u), rv.as_ref().map(|_| v)),
         );
 
-        (
-            WithGeneration::new(edge, tree.generation),
-            leaf.forget_type(),
-        )
+        (edge, leaf.forget_type())
     });
 
     if let Some(ru) = ru {
@@ -424,7 +421,7 @@ where
     if let SwapResult::Swapped { prev, next } = swap {
         _ = (prev, next);
         let id = tree.tree.edge_weight(next).id;
-        tree.edge_ids[id].tree_id = next;
+        tree.edge_ids[id] = next;
         unsafe { tree.tree.edge_weight_mut(next).node.as_mut().edge = next };
         // translate tree::EdgeId -> index::EdgeId
         // swap in self.edge_ids
@@ -464,7 +461,6 @@ where
             resolved,
             LabelInfo {
                 node: leaf.cast(),
-                vertex: v,
                 id,
             },
         );
@@ -475,10 +471,7 @@ where
             BoundaryVertices::from_option(rv.as_ref().map(|_| v)),
         );
 
-        (
-            WithGeneration::new(label, tree.generation),
-            leaf.forget_type(),
-        )
+        (label, leaf.forget_type())
     });
 
     if let Some(rv) = rv {
@@ -499,9 +492,8 @@ where
     // labels are never path components, so removing them can never disconnect the tree.
     // instead, we want to replace the label's parent with the label's sibling, then delete the label and parent.
     let resolved = tree.resolve_label(l);
-    let &LabelInfo {
-        node, vertex: v, ..
-    } = tree.tree.label_weight(resolved);
+    let node = tree.tree.label_weight(resolved).node;
+    let v = *tree.tree.vertex_weight(tree.tree.label_vertex(resolved));
     let label = Handle::<W, _>::new_label(node.cast());
 
     let _ = expose(v, tree);
@@ -525,7 +517,7 @@ where
     if let SwapResult::Swapped { prev, next } = swap {
         _ = (prev, next);
         let id = tree.tree.label_weight(next).id;
-        tree.label_ids[id].tree_id = next;
+        tree.label_ids[id] = next;
         unsafe { tree.tree.label_weight_mut(next).node.as_mut().label = next };
     }
 
@@ -568,28 +560,8 @@ struct EdgeInfo<W> {
 struct LabelInfo<W> {
     /// The leaf node in the top tree structure corresponding to this label
     node: NonNull<LabelNode<W>>,
-    // TODO: this is redundant with the vertex's weight.
-    /// the attached-at vertex
-    vertex: index::VertexId,
     /// The label id in the top tree structure
     id: index::LabelId,
-}
-
-// Instead of just storing the `tree::VertexId` or `tree::EdgeId` in the slot vec, we also store a generation in debug builds to ensure that ABA-style usage bug of TopTree indices are caught.
-struct WithGeneration<Id> {
-    tree_id: Id,
-    #[cfg(debug_assertions)]
-    generation: Generation,
-}
-
-impl<Id> WithGeneration<Id> {
-    fn new(tree_id: Id, generation: Generation) -> Self {
-        Self {
-            tree_id,
-            #[cfg(debug_assertions)]
-            generation,
-        }
-    }
 }
 
 pub struct TopTree<W, A: Allocator = Global> {
@@ -600,10 +572,9 @@ pub struct TopTree<W, A: Allocator = Global> {
     exposed: slotvec::BitVec,
     // stable mapping of `tree::VertexId`s
     // the `tree::VertexId` is the index in the `tree::Tree` structure, which change when edges are removed.
-    vertex_ids: SlotVec<WithGeneration<tree::VertexId>, VertexId>,
-    edge_ids: SlotVec<WithGeneration<tree::EdgeId>, EdgeId>,
-    label_ids: SlotVec<WithGeneration<tree::LabelId>, LabelId>,
-    generation: Generation,
+    vertex_ids: SlotVec<tree::VertexId, VertexId>,
+    edge_ids: SlotVec<tree::EdgeId, EdgeId>,
+    label_ids: SlotVec<tree::LabelId, LabelId>,
     allocator: A,
 }
 
@@ -675,36 +646,18 @@ impl<W, A: Allocator> TopTree<W, A> {
     }
 
     fn resolve_vertex(&self, v: VertexId) -> tree::VertexId {
-        let slot = self
+        *self
             .vertex_ids
             .get(v)
-            .expect("vertex must exist in the tree");
-        #[cfg(debug_assertions)]
-        assert_eq!(
-            slot.generation, self.generation,
-            "vertex id is from a different generation"
-        );
-        slot.tree_id
+            .expect("vertex must exist in the tree")
     }
 
     fn resolve_edge(&self, e: EdgeId) -> tree::EdgeId {
-        let slot = self.edge_ids.get(e).expect("edge must exist in the tree");
-        #[cfg(debug_assertions)]
-        assert_eq!(
-            slot.generation, self.generation,
-            "edge id is from a different generation"
-        );
-        slot.tree_id
+        *self.edge_ids.get(e).expect("edge must exist in the tree")
     }
 
     fn resolve_label(&self, l: LabelId) -> tree::LabelId {
-        let slot = self.label_ids.get(l).expect("label must exist in the tree");
-        #[cfg(debug_assertions)]
-        assert_eq!(
-            slot.generation, self.generation,
-            "label id is from a different generation"
-        );
-        slot.tree_id
+        *self.label_ids.get(l).expect("label must exist in the tree")
     }
 
     fn set_exposed(&mut self, v: tree::VertexId, exposed: bool) {
@@ -733,7 +686,6 @@ impl<W, A: Allocator> TopTree<W, A> {
             vertex_ids: SlotVec::new(),
             edge_ids: SlotVec::new(),
             label_ids: SlotVec::new(),
-            generation: Generation::new(),
             allocator,
         }
     }
@@ -759,7 +711,9 @@ impl<W, A: Allocator> TopTree<W, A> {
                     vertices.insert(*self.tree.vertex_weight(right));
                 }
                 LeafOrInternal::Label(label) => {
-                    let vertex = self.tree.label_weight(label.label()).vertex;
+                    let vertex = *self
+                        .tree
+                        .vertex_weight(self.tree.label_vertex(label.label()));
                     vertices.insert(vertex);
                 }
                 LeafOrInternal::Internal(_) => unreachable!("leaf cannot be internal"),
@@ -813,7 +767,7 @@ impl<W, A: Allocator> TopTree<W, A> {
 
     pub fn label_vertex(&self, l: LabelId) -> VertexId {
         let ll = self.resolve_label(l);
-        self.tree.label_weight(ll).vertex
+        *self.tree.vertex_weight(self.tree.label_vertex(ll))
     }
 
     pub fn first_label(&self, v: VertexId) -> Option<LabelId> {
@@ -907,7 +861,7 @@ impl<W, A: Allocator> TopTree<W, A> {
         let (id, vertex) = self.vertex_ids.push_with(|id| {
             let vertex = self.tree.add_vertex(id);
 
-            (WithGeneration::new(vertex, self.generation), vertex)
+            (vertex, vertex)
         });
 
         self.exposed.grow_to(vertex.index() + 1);
@@ -940,21 +894,21 @@ impl<W, A: Allocator> TopTree<W, A> {
             match x {
                 Edge(SwapResult::Swapped { next, prev }) => {
                     let id = self.tree.edge_weight(next).id;
-                    let old = mem::replace(&mut self.edge_ids[id].tree_id, next);
+                    let old = mem::replace(&mut self.edge_ids[id], next);
                     assert_eq!(old, prev, "tree::EdgeId should match the previous tree id");
 
                     unsafe { self.tree.edge_weight_mut(next).node.as_mut().edge = next };
                 }
                 Label(SwapResult::Swapped { prev, next }) => {
                     let id = self.tree.label_weight(next).id;
-                    let old = mem::replace(&mut self.label_ids[id].tree_id, next);
+                    let old = mem::replace(&mut self.label_ids[id], next);
                     assert_eq!(old, prev, "tree::LabelId should match the previous tree id");
 
                     unsafe { self.tree.label_weight_mut(next).node.as_mut().label = next };
                 }
                 Vertex(SwapResult::Swapped { prev, next }) => {
                     let id = *self.tree.vertex_weight(next);
-                    let old = mem::replace(&mut self.vertex_ids[id].tree_id, next);
+                    let old = mem::replace(&mut self.vertex_ids[id], next);
 
                     self.exposed
                         .set(next.index(), self.exposed.get(prev.index()));

@@ -158,7 +158,7 @@ impl Harness {
 
     fn edge_leaves_of<'a>(&'a self, v: VertexId) -> impl Iterator<Item = NN> + 'a {
         self.tree.incident_edges(v).map(|e| {
-            let edge = self.tree.edge_ids[e].tree_id;
+            let edge = self.tree.edge_ids[e];
             let leaf = self.tree.tree.edge_weight(edge).node;
             leaf.cast()
         })
@@ -307,7 +307,7 @@ fn count_leaves_with<W>(h: &TopTree<W>, node: NonNull<Node<W>>, v: VertexId) -> 
         }
         LeafOrInternal::Label(label) => {
             let label = unsafe { label.as_ref().label };
-            let label = h.tree.label_weight(label).vertex;
+            let label = *h.tree.vertex_weight(h.tree.label_vertex(label));
             usize::from(label == v)
         }
         LeafOrInternal::Internal(internal) => {
@@ -345,7 +345,7 @@ pub(crate) fn check_node<W>(at: At, h: &TopTree<W>, node: NonNull<Node<W>>, pari
         }
         LeafOrInternal::Label(label) => {
             let node = unsafe { label.as_ref() };
-            let label = h.tree.label_weight(node.label).vertex;
+            let label = *h.tree.vertex_weight(h.tree.label_vertex(node.label));
 
             let mut c = Cii::default();
             if h.is_boundary_vertex(label) {
@@ -457,7 +457,7 @@ fn all_roots(h: &Harness) -> Vec<NN> {
         .tree
         .edge_ids
         .iter()
-        .map(|(_, WithGeneration { tree_id, .. })| {
+        .map(|(_, tree_id)| {
             let node = h.tree.tree.edge_weight(*tree_id).node;
             climb(node.cast())
         })
@@ -494,11 +494,11 @@ fn assert_invariants(h: &Harness) {
     let mut total_leaves = 0usize;
 
     for (key, edge) in tree.edge_ids.iter() {
-        let leaf_nn = tree.tree.edge_weight(edge.tree_id).node;
+        let leaf_nn = tree.tree.edge_weight(*edge).node;
         let node = unsafe { &*leaf_nn.cast::<LeafNode<Xor>>().as_ptr() };
         assert!(node.is_edge(), "{at} edge must map to a leaf node");
         assert_eq!(
-            node.edge, edge.tree_id,
+            node.edge, *edge,
             "{at} leaf edge key must match its map entry"
         );
         let stored = node.weight.0;
