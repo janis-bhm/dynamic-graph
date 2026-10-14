@@ -6,8 +6,9 @@
 
 use core::fmt;
 use std::{
+    alloc::{Allocator, Global, Layout, handle_alloc_error},
     collections::BTreeSet,
-    mem,
+    mem::{self, MaybeUninit},
     ptr::{self, NonNull},
 };
 
@@ -33,8 +34,8 @@ mod tests;
 mod tree;
 mod util;
 
-fn incident_leaves<W>(
-    root: &TopTree<W>,
+fn incident_leaves<W, A: Allocator>(
+    root: &TopTree<W, A>,
     v: tree::VertexId,
 ) -> impl Iterator<Item = Handle<W, marker::Leaf>> + '_ {
     root.tree
@@ -49,8 +50,8 @@ fn incident_leaves<W>(
 
 /// Finds the least common ancestor of all leaves incident to `v` in the tree rooted at `root`.
 /// if `v` has no incident leaves, returns `None`.
-pub(crate) fn find_consuming_node<W>(
-    root: &TopTree<W>,
+pub(crate) fn find_consuming_node<W, A: Allocator>(
+    root: &TopTree<W, A>,
     v: tree::VertexId,
 ) -> Option<Handle<W, marker::Either>>
 where
@@ -114,13 +115,16 @@ where
 
 /// Exposes the vertex `v` in the top tree rooted at `root`, returning a handle to the consuming node of `v` if it exists.
 /// If `v` has no incident edges, then `None` is returned.
-pub(crate) fn expose<W>(v: VertexId, root: &mut TopTree<W>) -> Option<Handle<W, marker::Either>>
+pub(crate) fn expose<W, A: Allocator>(
+    v: VertexId,
+    root: &mut TopTree<W, A>,
+) -> Option<Handle<W, marker::Either>>
 where
     W: Summary,
 {
-    fn expose_prepared<W>(
+    fn expose_prepared<W, A: Allocator>(
         mut node: Handle<W, marker::Either>,
-        tree: &mut TopTree<W>,
+        tree: &mut TopTree<W, A>,
         v: VertexId,
     ) -> Handle<W, marker::Either>
     where
@@ -280,7 +284,10 @@ where
     }
 }
 
-pub(crate) fn deexpose<W>(v: VertexId, tree: &mut TopTree<W>) -> Option<Handle<W, marker::Either>>
+pub(crate) fn deexpose<W, A: Allocator>(
+    v: VertexId,
+    tree: &mut TopTree<W, A>,
+) -> Option<Handle<W, marker::Either>>
 where
     W: Summary,
 {
@@ -306,11 +313,11 @@ where
     root
 }
 
-pub(crate) fn link<W>(
+pub(crate) fn link<W, A: Allocator>(
     u: VertexId,
     v: VertexId,
     weight: impl FnOnce(EdgeId) -> W,
-    tree: &mut TopTree<W>,
+    tree: &mut TopTree<W, A>,
 ) -> EdgeId
 where
     W: Summary,
@@ -338,7 +345,9 @@ where
     }
     tree.set_exposed(vv, false);
 
-    let leaf = Box::into_non_null(Box::new_uninit());
+    let (leaf, _) =
+        Box::into_non_null_with_allocator(Box::new_in(MaybeUninit::uninit(), &tree.allocator));
+
     let (edge, mut node) = tree.edge_ids.push_with(|id| {
         let edge = tree.tree.add_edge(
             uu,
@@ -365,14 +374,15 @@ where
         let left = ru;
         let right = node;
         let rv_boundary = BoundaryVertices::from_option(rv.as_ref().map(|_| v));
-        node = Handle::alloc_internal(left, right, rv_boundary).forget_type();
+        node = Handle::alloc_internal(left, right, rv_boundary, &tree.allocator).forget_type();
     }
 
     if let Some(rv) = rv {
         let left = node;
         let right = rv;
 
-        node = Handle::alloc_internal(left, right, BoundaryVertices::None).forget_type();
+        node = Handle::alloc_internal(left, right, BoundaryVertices::None, &tree.allocator)
+            .forget_type();
     }
 
     _ = node;
@@ -381,10 +391,10 @@ where
 }
 
 #[expect(clippy::type_complexity)]
-pub(crate) fn cut<W>(
+pub(crate) fn cut<W, A: Allocator>(
     u: VertexId,
     v: VertexId,
-    tree: &mut TopTree<W>,
+    tree: &mut TopTree<W, A>,
 ) -> (
     Option<Handle<W, marker::Either>>,
     Option<Handle<W, marker::Either>>,
@@ -406,7 +416,7 @@ where
     let edge_handle = Handle::new_edge(edge.weight.node.cast::<Node<W>>());
 
     unsafe { ptr::read(&edge_handle) }.full_splay();
-    edge_handle.delete_all_ancestors();
+    edge_handle.delete_all_ancestors(&tree.allocator);
 
     let (weight, swap) = tree.tree.remove_edge(id);
     tree.edge_ids.remove(weight.id);
@@ -429,10 +439,10 @@ where
     (ru, rv)
 }
 
-pub(crate) fn attach<W>(
+pub(crate) fn attach<W, A: Allocator>(
     v: VertexId,
     weight: impl FnOnce(LabelId) -> W,
-    tree: &mut TopTree<W>,
+    tree: &mut TopTree<W, A>,
 ) -> (LabelId, NonNull<Node<W>>)
 where
     W: Summary,
@@ -447,7 +457,9 @@ where
     tree.set_exposed(resolved, false);
 
     let (label, mut node) = tree.label_ids.push_with(|id| {
-        let leaf = Box::into_non_null(Box::new_uninit());
+        let (leaf, _) =
+            Box::into_non_null_with_allocator(Box::new_in(MaybeUninit::uninit(), &tree.allocator));
+
         let label = tree.tree.add_label(
             resolved,
             LabelInfo {
@@ -473,13 +485,14 @@ where
         let left = rv;
         let right = node;
 
-        node = Handle::alloc_internal(left, right, BoundaryVertices::None).forget_type();
+        node = Handle::alloc_internal(left, right, BoundaryVertices::None, &tree.allocator)
+            .forget_type();
     }
 
     (label, node.node)
 }
 
-pub(crate) fn detach<W>(l: LabelId, tree: &mut TopTree<W>)
+pub(crate) fn detach<W, A: Allocator>(l: LabelId, tree: &mut TopTree<W, A>)
 where
     W: Summary,
 {
@@ -501,8 +514,8 @@ where
         sibling.set_parent(None);
 
         unsafe {
-            Node::dealloc(label.node);
-            Node::dealloc(parent.node);
+            Node::dealloc(label.node, &tree.allocator);
+            Node::dealloc(parent.node, &tree.allocator);
         }
     }
 
@@ -579,7 +592,7 @@ impl<Id> WithGeneration<Id> {
     }
 }
 
-pub struct TopTree<W> {
+pub struct TopTree<W, A: Allocator = Global> {
     // the underlying forest stores the edges and per-edge/per-label information.
     // we keep the top-tree node pointers here, as well as the TopTree edge id for edges so that there is a O(1) mapping from tree::EdgeId -> index::EdgeId and vice versa.
     tree: tree::Tree<index::VertexId, EdgeInfo<W>, LabelInfo<W>>,
@@ -591,19 +604,20 @@ pub struct TopTree<W> {
     edge_ids: SlotVec<WithGeneration<tree::EdgeId>, EdgeId>,
     label_ids: SlotVec<WithGeneration<tree::LabelId>, LabelId>,
     generation: Generation,
+    allocator: A,
 }
 
-unsafe impl<W> Send for TopTree<W> where W: Send {}
-unsafe impl<W> Sync for TopTree<W> where W: Sync {}
+unsafe impl<W, A: Allocator + Send> Send for TopTree<W, A> where W: Send {}
+unsafe impl<W, A: Allocator + Sync> Sync for TopTree<W, A> where W: Sync {}
 
 /// A [`TopTree`] with currently-exposed vertices, which does not allow the
 /// removal of vertices or adding and removing edges or labels.
 #[repr(transparent)]
-pub struct ExposedTopTree<W> {
-    inner: TopTree<W>,
+pub struct ExposedTopTree<W, A: Allocator = Global> {
+    inner: TopTree<W, A>,
 }
 
-impl<W> ExposedTopTree<W> {
+impl<W, A: Allocator> ExposedTopTree<W, A> {
     /// Returns the set of vertices in the connected component containing `v`.
     pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
         self.inner.component_of(v)
@@ -650,14 +664,14 @@ impl<W> ExposedTopTree<W> {
     }
 }
 
-impl<W> TopTree<W> {
+impl<W, A: Allocator> TopTree<W, A> {
     #[expect(dead_code)]
-    fn as_exposed(&self) -> &ExposedTopTree<W> {
-        unsafe { mem::transmute::<&Self, &ExposedTopTree<W>>(self) }
+    fn as_exposed(&self) -> &ExposedTopTree<W, A> {
+        unsafe { mem::transmute::<&Self, &ExposedTopTree<W, A>>(self) }
     }
 
-    fn as_exposed_mut(&mut self) -> &mut ExposedTopTree<W> {
-        unsafe { mem::transmute::<&mut Self, &mut ExposedTopTree<W>>(self) }
+    fn as_exposed_mut(&mut self) -> &mut ExposedTopTree<W, A> {
+        unsafe { mem::transmute::<&mut Self, &mut ExposedTopTree<W, A>>(self) }
     }
 
     fn resolve_vertex(&self, v: VertexId) -> tree::VertexId {
@@ -711,8 +725,8 @@ impl<W> TopTree<W> {
     }
 }
 
-impl<W> TopTree<W> {
-    pub fn new() -> Self {
+impl<W, A: Allocator> TopTree<W, A> {
+    pub fn new_in(allocator: A) -> Self {
         Self {
             tree: tree::Tree::new(),
             exposed: slotvec::BitVec::new(),
@@ -720,6 +734,7 @@ impl<W> TopTree<W> {
             edge_ids: SlotVec::new(),
             label_ids: SlotVec::new(),
             generation: Generation::new(),
+            allocator,
         }
     }
 
@@ -816,7 +831,7 @@ impl<W> TopTree<W> {
     pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
     where
         W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
@@ -835,7 +850,7 @@ impl<W> TopTree<W> {
     pub fn try_with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> Option<R>
     where
         W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
@@ -856,7 +871,7 @@ impl<W> TopTree<W> {
     pub fn with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> R
     where
         W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
     {
         let v = v.into_vertex_id(self);
         let handle = expose(v, self).expect("vertex must have a consuming node");
@@ -872,7 +887,7 @@ impl<W> TopTree<W> {
     pub fn try_with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> Option<R>
     where
         W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W>, W) -> R,
+        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
     {
         let v = v.into_vertex_id(self);
         let result = if let Some(handle) = expose(v, self) {
@@ -1036,38 +1051,45 @@ impl<W> TopTree<W> {
 }
 
 pub trait IntoVertexId {
-    fn into_vertex_id<W>(self, tree: &TopTree<W>) -> VertexId;
+    fn into_vertex_id<W, A: Allocator>(self, tree: &TopTree<W, A>) -> VertexId;
 }
 
 impl IntoVertexId for VertexId {
-    fn into_vertex_id<W>(self, _: &TopTree<W>) -> VertexId {
+    fn into_vertex_id<W, A: Allocator>(self, _: &TopTree<W, A>) -> VertexId {
         self
     }
 }
 
 impl IntoVertexId for LabelId {
-    fn into_vertex_id<W>(self, tree: &TopTree<W>) -> VertexId {
+    fn into_vertex_id<W, A: Allocator>(self, tree: &TopTree<W, A>) -> VertexId {
         tree.label_vertex(self)
     }
 }
 
-impl<W> Default for TopTree<W> {
+impl<W> TopTree<W, Global> {
+    pub fn new() -> Self {
+        Self::new_in(Global)
+    }
+}
+
+impl<W> Default for TopTree<W, Global> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<W> Drop for TopTree<W> {
+impl<W, A: Allocator> Drop for TopTree<W, A> {
     fn drop(&mut self) {
+        let allocator = &self.allocator;
         self.tree.edges.retain(|edge| {
-            Handle::new_edge(edge.weight.node.cast::<Node<W>>()).delete_all_ancestors();
+            Handle::new_edge(edge.weight.node.cast::<Node<W>>()).delete_all_ancestors(allocator);
 
             true
         });
     }
 }
 
-impl<W> fmt::Debug for TopTree<W> {
+impl<W, A: Allocator> fmt::Debug for TopTree<W, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let edges = self
             .edge_ids

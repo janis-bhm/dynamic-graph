@@ -1,5 +1,6 @@
 use core::fmt;
 use std::{
+    alloc::{Allocator, Layout, handle_alloc_error},
     mem,
     ptr::{self, NonNull},
 };
@@ -78,13 +79,17 @@ impl<W> fmt::Debug for Node<W> {
 }
 
 impl<W> Node<W> {
-    pub unsafe fn dealloc(this: NonNull<Node<W>>) {
-        let leaf = unsafe { this.as_ref() }.is_edge();
-        let ptr = this.as_ptr();
-        if leaf {
-            drop(unsafe { Box::from_raw(ptr as *mut LeafNode<W>) });
-        } else {
-            drop(unsafe { Box::from_raw(ptr as *mut InternalNode<W>) });
+    pub unsafe fn dealloc<A: Allocator>(this: NonNull<Node<W>>, allocator: &A) {
+        match unsafe { this.as_ref() }.flags().kind() {
+            NodeKind::EdgeLeaf => unsafe {
+                _ = Box::from_raw_in(this.cast::<LeafNode<W>>().as_ptr(), allocator);
+            },
+            NodeKind::LabelLeaf => unsafe {
+                _ = Box::from_raw_in(this.cast::<LabelNode<W>>().as_ptr(), allocator);
+            },
+            NodeKind::Cluster => unsafe {
+                _ = Box::from_raw_in(this.cast::<InternalNode<W>>().as_ptr(), allocator);
+            },
         }
     }
 }
@@ -248,22 +253,26 @@ impl<W> fmt::Debug for InternalNode<W> {
 }
 
 impl<W> InternalNode<W> {
-    fn alloc(
+    fn alloc<A: Allocator>(
         weight: W,
         left: NonNull<Node<W>>,
         right: NonNull<Node<W>>,
         boundary: BoundaryVertices,
+        allocator: &A,
     ) -> NonNull<Self> {
-        let node = Box::new(InternalNode {
-            node: Node {
-                parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
-                boundary,
-                weight,
+        let node = Box::new_in(
+            InternalNode {
+                node: Node {
+                    parent: TaggedPtr::new(ptr::null_mut(), NodeFlags::empty()),
+                    boundary,
+                    weight,
+                },
+                children: Children { left, right },
             },
-            children: Children { left, right },
-        });
+            allocator,
+        );
 
-        let node = Box::into_non_null(node);
+        let (node, _) = Box::into_non_null_with_allocator(node);
 
         unsafe {
             (&mut *left.as_ptr()).set_parent(Some(node));
@@ -440,10 +449,11 @@ impl<W> Handle<W, marker::Internal>
 where
     W: Summary,
 {
-    pub fn alloc_internal(
+    pub fn alloc_internal<A: Allocator>(
         left: Handle<W, marker::Either>,
         right: Handle<W, marker::Either>,
         boundary: BoundaryVertices,
+        allocator: &A,
     ) -> Handle<W, marker::Internal> {
         let left_boundary = left.flipped_boundary().into_boundary();
         let right_boundary = right.flipped_boundary().into_boundary();
@@ -458,7 +468,7 @@ where
 
         let weight = W::combine(left.weight(), right.weight(), &ctx);
 
-        let node = InternalNode::alloc(weight, left.node, right.node, boundary);
+        let node = InternalNode::alloc(weight, left.node, right.node, boundary, allocator);
 
         unsafe { Self::new_internal(node) }
     }
@@ -561,7 +571,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    pub fn add_boundary_vertex(&mut self, tree: &TopTree<W>, v: VertexId) {
+    pub fn add_boundary_vertex<A: Allocator>(&mut self, tree: &TopTree<W, A>, v: VertexId) {
         let resolved = tree.resolve_vertex(v);
 
         match self.force() {
@@ -788,7 +798,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    pub fn has_left_boundary(&self, root: &TopTree<W>) -> bool {
+    pub fn has_left_boundary<A: Allocator>(&self, root: &TopTree<W, A>) -> bool {
         use crate::LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
@@ -801,7 +811,7 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
     }
 
-    pub fn has_right_boundary(&self, root: &TopTree<W>) -> bool {
+    pub fn has_right_boundary<A: Allocator>(&self, root: &TopTree<W, A>) -> bool {
         use crate::LeafOrInternal::*;
         match self.force() {
             Edge(leaf) => {
@@ -823,17 +833,17 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { Handle::new_internal(self.node.cast()) }
     }
 
-    pub fn delete_all_ancestors(self) {
+    pub fn delete_all_ancestors<A: Allocator>(self, allocator: &A) {
         if let Some(parent) = self.parent() {
             let mut sibling = self.sibling().expect("node must have a sibling");
-            parent.delete_all_ancestors();
+            parent.delete_all_ancestors(allocator);
             unsafe {
                 sibling.node.as_mut().set_parent(None);
             }
         }
 
         unsafe {
-            Node::dealloc(self.node);
+            Node::dealloc(self.node, allocator);
         }
     }
 

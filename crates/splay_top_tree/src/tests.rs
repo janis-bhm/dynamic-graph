@@ -1,6 +1,12 @@
 #![cfg(test)]
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    alloc::{AllocError, Allocator, Global, Layout},
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    ptr::NonNull,
+    rc::Rc,
+};
 
 use crate::node::Children;
 
@@ -9,6 +15,51 @@ use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Xor(u64);
+
+#[derive(Clone, Default)]
+struct CountingAlloc {
+    allocs: Rc<Cell<usize>>,
+    deallocs: Rc<Cell<usize>>,
+}
+
+unsafe impl Allocator for CountingAlloc {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.allocs.set(self.allocs.get() + 1);
+        Global.allocate(layout)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.deallocs.set(self.deallocs.get() + 1);
+        // SAFETY: forwarded unchanged from the allocation.
+        unsafe { Global.deallocate(ptr, layout) }
+    }
+}
+
+#[test]
+fn custom_allocator_allocates_and_deallocates_top_tree_nodes() {
+    let allocator = CountingAlloc::default();
+    let allocs = Rc::clone(&allocator.allocs);
+    let deallocs = Rc::clone(&allocator.deallocs);
+    let mut tree = TopTree::<Xor, _>::new_in(allocator);
+
+    let a = tree.add_vertex();
+    let b = tree.add_vertex();
+    let c = tree.add_vertex();
+    tree.link_with(a, b, |_| Xor(1));
+    tree.link_with(b, c, |_| Xor(2));
+    let label = tree.attach_with(b, |_| Xor(4));
+
+    tree.detach(label);
+    tree.cut(a, b);
+    tree.cut(b, c);
+
+    assert!(allocs.get() > 0);
+    assert_eq!(allocs.get(), deallocs.get());
+    assert_eq!(
+        std::mem::size_of::<node::LabelNode<Xor>>(),
+        std::mem::size_of::<node::InternalNode<Xor>>()
+    );
+}
 
 impl Summary for Xor {
     fn edge(_e: index::EdgeId) -> Self {
