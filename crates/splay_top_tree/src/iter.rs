@@ -1,6 +1,9 @@
 use std::ptr::NonNull;
 
-use crate::{Handle, InternalNode, Node, NodeKind, marker};
+use crate::{
+    Handle, marker,
+    node::{InternalNode, Node, NodeKind},
+};
 
 /// A range over all leaves below a node of a top tree.
 ///

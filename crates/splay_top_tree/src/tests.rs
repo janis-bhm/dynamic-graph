@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::node::Children;
+
 use super::tree::{self};
 use super::*;
 
