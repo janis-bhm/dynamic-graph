@@ -548,6 +548,10 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { &self.node.as_ref().weight }
     }
 
+    pub unsafe fn weight_mut(&mut self) -> &mut W {
+        unsafe { &mut self.node.as_mut().weight }
+    }
+
     fn boundary(&self) -> BoundaryVertices {
         unsafe { self.node.as_ref().boundary }
     }
@@ -857,6 +861,17 @@ impl<W, NodeType> Handle<W, NodeType> {
         }
         node
     }
+
+    pub fn recursively_recompute_weight_up(self)
+    where
+        W: Summary,
+    {
+        let mut node = self.forget_type();
+        while let Some(mut parent) = node.parent() {
+            parent.recompute_weight();
+            node = parent.forget_type();
+        }
+    }
 }
 
 impl<W> Handle<W, marker::Label> {
@@ -961,7 +976,7 @@ impl<W> Handle<W, marker::Internal> {
         }
     }
 
-    fn recompute_weight(&mut self)
+    pub fn recompute_weight(&mut self)
     where
         W: Summary,
     {

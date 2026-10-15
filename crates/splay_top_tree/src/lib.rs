@@ -978,6 +978,20 @@ impl<W, A: Allocator> TopTree<W, A> {
         label
     }
 
+    pub fn update_label(&mut self, l: LabelId, weight: W)
+    where
+        W: Summary,
+    {
+        let ll = self.resolve_label(l);
+        let mut handle = Handle::<W, _>::new_label(self.tree.label_weight(ll).node.cast());
+
+        unsafe {
+            *handle.weight_mut() = weight;
+        }
+
+        handle.recursively_recompute_weight_up();
+    }
+
     pub fn attach_new(&mut self) -> (VertexId, LabelId)
     where
         W: Default + Summary,
