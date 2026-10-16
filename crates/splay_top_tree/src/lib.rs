@@ -756,7 +756,10 @@ impl<W, A: Allocator> TopTree<W, A> {
         ])
     }
 
-    pub fn find_edge(&self, v: VertexId, w: VertexId) -> Option<EdgeId> {
+    pub fn find_edge(&self, v: impl IntoVertexId, w: impl IntoVertexId) -> Option<EdgeId> {
+        let v = v.into_vertex_id(self);
+        let w = w.into_vertex_id(self);
+
         let vv = self.resolve_vertex(v);
         let ww = self.resolve_vertex(w);
 
