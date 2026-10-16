@@ -1124,6 +1124,31 @@ impl FindBridge {
             .cluster_vertex(cluster)
             .expect("the vertex must be live");
 
+        loop {
+            let Some(edge) = self
+                .top_tree
+                .leaf_weight(cluster)
+                .into_label()
+                .expect("the vertex must be live")
+                .edges()
+                .next()
+            else {
+                break;
+            };
+
+            let Some(EdgeSlot::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge)
+            else {
+                eprintln!("FindBridge::remove_vertex found a tree edge in vertex labels");
+                break;
+            };
+
+            // `detach` took this vertex's own `VertexLabels` away, so only the
+            // other endpoint of a non-self record still needs cleaning. A
+            // self-edge label (u == v) lives only in the removed vertex.
+            let survivors = [u, v].into_iter().filter(|c| *c != cluster);
+            self.remove_edge_labels(edge, level, survivors);
+        }
+
         let tree_edges = self
             .top_tree
             .forest()
@@ -1152,22 +1177,8 @@ impl FindBridge {
             "FindBridge::remove_vertex requires no incident forest edges"
         );
 
-        let edges = self
-            .top_tree
+        self.top_tree
             .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
-
-        for edge in edges.edges() {
-            let Some(EdgeSlot::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge)
-            else {
-                panic!("FindBridge::remove_vertex found a tree edge in vertex labels")
-            };
-
-            // `detach` took this vertex's own `VertexLabels` away, so only the
-            // other endpoint of a non-self record still needs cleaning. A
-            // self-edge label (u == v) lives only in the removed vertex.
-            let survivors = [u, v].into_iter().filter(|c| *c != cluster);
-            self.remove_edge_labels(edge, level, survivors);
-        }
 
         let _ = self
             .top_tree
