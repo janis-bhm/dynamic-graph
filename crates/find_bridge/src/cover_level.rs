@@ -1084,6 +1084,10 @@ impl FindBridge {
             .edges()
     }
 
+    pub fn edges(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edges.iter().map(|(id, _)| id)
+    }
+
     /// Removes a vertex and all its incident edges from the graph, returning the other endpoints of any bridge edges that were removed.
     pub fn remove_vertex(&mut self, vertex: VertexId) -> Vec<VertexId> {
         let cluster = vertex.0;
