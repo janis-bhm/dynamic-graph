@@ -1016,6 +1016,10 @@ impl<W, A: Allocator> TopTree<W, A> {
     {
         detach(l, self);
     }
+
+    pub fn edge_indices(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edge_ids.iter().map(|(id, _)| id)
+    }
 }
 
 pub trait IntoVertexId {
