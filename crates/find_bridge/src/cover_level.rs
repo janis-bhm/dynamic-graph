@@ -1268,9 +1268,36 @@ impl FindBridge {
                 self.cluster_vertex(v.0).expect("the v cluster must exist"),
             )
         };
-        self.top_tree
+
+        if let Some(edge) = self
+            .top_tree
             .find_edge(u, v)
             .and_then(|edge| self.cluster_edge(edge))
+        {
+            return Some(edge);
+        }
+
+        let uc = self.vertex_cluster(u).unwrap();
+        let vc = self.vertex_cluster(v).unwrap();
+
+        let u_labels = self
+            .top_tree
+            .leaf_weight(uc)
+            .into_label()
+            .expect("the u cluster must be a label");
+
+        u_labels.edges().find(|&edge| {
+            if let Some(EdgeSlot::NonTree(NonTreeEdge {
+                u: edge_u,
+                v: edge_v,
+                ..
+            })) = self.edges.get(edge)
+            {
+                (*edge_u == uc && *edge_v == vc) || (*edge_u == vc && *edge_v == uc)
+            } else {
+                false
+            }
+        })
     }
 
     #[cfg(test)]
