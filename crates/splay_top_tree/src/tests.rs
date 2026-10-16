@@ -302,7 +302,7 @@ fn count_leaves_with<W>(h: &TopTree<W>, node: NonNull<Node<W>>, v: VertexId) -> 
         LeafOrInternal::Edge(leaf) => {
             let leaf = unsafe { leaf.as_ref() };
             let edge = h.tree.edge_weight(leaf.edge).id;
-            let [left, right] = h.edge_endpoints(edge);
+            let [left, right] = h.edge_endpoints(edge).unwrap();
             usize::from(left == v || right == v)
         }
         LeafOrInternal::Label(label) => {
@@ -330,7 +330,7 @@ pub(crate) fn check_node<W>(at: At, h: &TopTree<W>, node: NonNull<Node<W>>, pari
         LeafOrInternal::Edge(leaf) => {
             let node = unsafe { leaf.as_ref() };
             let edge = h.tree.edge_weight(node.edge).id;
-            let [left, right] = h.edge_endpoints(edge);
+            let [left, right] = h.edge_endpoints(edge).unwrap();
 
             let (left, right) = if flip { (right, left) } else { (left, right) };
 
@@ -502,7 +502,7 @@ fn assert_invariants(h: &Harness) {
             "{at} leaf edge key must match its map entry"
         );
         let stored = node.weight.0;
-        let [v, w] = h.tree.edge_endpoints(key);
+        let [v, w] = h.tree.edge_endpoints(key).unwrap();
         let expected = h.adj[&v].get(&w).copied();
         match expected {
             Some(w) => assert_eq!(
@@ -580,7 +580,7 @@ fn assert_invariants(h: &Harness) {
             .edge_ids
             .iter()
             .filter(|(e, _)| {
-                let [a, b] = tree.edge_endpoints(*e);
+                let [a, b] = tree.edge_endpoints(*e).unwrap();
                 comp.contains(&a) || comp.contains(&b)
             })
             .map(|(e, _)| e)

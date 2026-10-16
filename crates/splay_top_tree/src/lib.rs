@@ -602,7 +602,7 @@ impl<W, A: Allocator> ExposedTopTree<W, A> {
         self.inner.degree(v)
     }
 
-    pub fn edge_endpoints(&self, e: EdgeId) -> [VertexId; 2] {
+    pub fn edge_endpoints(&self, e: EdgeId) -> Option<[VertexId; 2]> {
         self.inner.edge_endpoints(e)
     }
 
@@ -652,8 +652,8 @@ impl<W, A: Allocator> TopTree<W, A> {
             .expect("vertex must exist in the tree")
     }
 
-    fn resolve_edge(&self, e: EdgeId) -> tree::EdgeId {
-        *self.edge_ids.get(e).expect("edge must exist in the tree")
+    fn try_resolve_edge(&self, e: EdgeId) -> Option<tree::EdgeId> {
+        self.edge_ids.get(e).copied()
     }
 
     fn resolve_label(&self, l: LabelId) -> tree::LabelId {
@@ -746,14 +746,14 @@ impl<W, A: Allocator> TopTree<W, A> {
         self.tree.degree(vv)
     }
 
-    pub fn edge_endpoints(&self, e: EdgeId) -> [VertexId; 2] {
-        let ee = self.resolve_edge(e);
+    pub fn edge_endpoints(&self, e: EdgeId) -> Option<[VertexId; 2]> {
+        let ee = self.try_resolve_edge(e)?;
         let Endpoints([left, right]) = self.tree.edge_endpoints(ee);
 
-        [
+        Some([
             *self.tree.vertex_weight(left),
             *self.tree.vertex_weight(right),
-        ]
+        ])
     }
 
     pub fn find_edge(&self, v: VertexId, w: VertexId) -> Option<EdgeId> {
@@ -871,6 +871,9 @@ impl<W, A: Allocator> TopTree<W, A> {
     }
 
     /// Removes the vertex `v` from the top tree, along with all incident edges and labels.
+    ///
+    /// # Panics
+    /// Panics if `v` is not a vertex in the top tree.
     pub fn remove_vertex(&mut self, v: impl IntoVertexId)
     where
         W: Summary,
@@ -879,7 +882,7 @@ impl<W, A: Allocator> TopTree<W, A> {
         let vv = self.resolve_vertex(v);
 
         while let Some(&EdgeInfo { id, .. }) = self.tree.incident_edge_weights(vv).next() {
-            let [v, w] = self.edge_endpoints(id);
+            let [v, w] = self.edge_endpoints(id).unwrap();
             self.cut(v, w);
         }
 
@@ -1066,7 +1069,7 @@ impl<W, A: Allocator> fmt::Debug for TopTree<W, A> {
         let edges = self
             .edge_ids
             .iter()
-            .map(|(id, _)| self.edge_endpoints(id))
+            .map(|(id, _)| self.edge_endpoints(id).unwrap())
             .map(|[u, v]| (u, v))
             .collect::<Vec<_>>();
 
