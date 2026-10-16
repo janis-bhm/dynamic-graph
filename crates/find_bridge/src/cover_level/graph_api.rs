@@ -950,7 +950,7 @@ fn assert_bookkeeping(graph: &Graph, context: &str) {
             .get(&edge)
             .unwrap_or_else(|| panic!("{context}: forest edge {edge:?} is not a live graph edge"));
         match kind {
-            Edge::Tree(_) => {
+            EdgeSlot::Tree(_) => {
                 tree_records += 1;
                 // Unordered, like the sibling assertion below: a tree edge's
                 // endpoints are resolved through `top_tree::edge_endpoints`,
@@ -962,7 +962,7 @@ fn assert_bookkeeping(graph: &Graph, context: &str) {
                     "{context}: tree edge {edge:?} endpoints disagree with its record"
                 );
             }
-            Edge::NonTree(NonTreeEdge { u, v, level }) => {
+            EdgeSlot::NonTree(NonTreeEdge { u, v, level }) => {
                 non_tree_records += 1;
                 let (u, v) = (VertexId(*u), VertexId(*v));
                 assert!(

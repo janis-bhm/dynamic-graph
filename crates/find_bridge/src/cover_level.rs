@@ -895,15 +895,21 @@ impl Summary for CoverLevel {
     }
 }
 
-enum Edge {
+pub struct Edge {
+    pub id: EdgeId,
+    pub u: VertexId,
+    pub v: VertexId,
+}
+
+enum EdgeSlot {
     NonTree(NonTreeEdge),
     Tree(top_tree::ClusterId),
 }
-impl Edge {
+impl EdgeSlot {
     fn set_level(&mut self, level: Level) {
         match self {
-            Edge::NonTree(edge) => edge.level = level,
-            Edge::Tree(_) => panic!("cannot set the level of a tree edge"),
+            EdgeSlot::NonTree(edge) => edge.level = level,
+            EdgeSlot::Tree(_) => panic!("cannot set the level of a tree edge"),
         }
     }
 }
@@ -993,7 +999,7 @@ impl VertexLabels {
 /// callers never manage cover levels themselves.
 pub struct FindBridge {
     top_tree: top_tree::TopTree<CoverLevel, VertexLabels, EdgeId>,
-    edges: SlotVec<Edge, EdgeId>,
+    edges: SlotVec<EdgeSlot, EdgeId>,
 }
 
 impl Default for FindBridge {
@@ -1059,10 +1065,10 @@ impl FindBridge {
     /// orientation the forest reports.
     pub fn endpoints(&self, edge_id: EdgeId) -> Option<(VertexId, VertexId)> {
         match self.edges.get(edge_id) {
-            Some(Edge::NonTree(non_tree_edge)) => {
+            Some(EdgeSlot::NonTree(non_tree_edge)) => {
                 Some((VertexId(non_tree_edge.u), VertexId(non_tree_edge.v)))
             }
-            Some(Edge::Tree(cluster_id)) => {
+            Some(EdgeSlot::Tree(cluster_id)) => {
                 let (u, v) = self.top_tree.edge_endpoints(*cluster_id)?;
                 let (u, v) = (
                     self.vertex_cluster(u).expect("the u cluster must exist"),
@@ -1084,8 +1090,31 @@ impl FindBridge {
             .edges()
     }
 
-    pub fn edges(&self) -> impl Iterator<Item = EdgeId> + '_ {
-        self.edges.iter().map(|(id, _)| id)
+    pub fn edges(&self) -> impl Iterator<Item = Edge> + '_ {
+        self.edges.iter().map(|(id, slot)| match slot {
+            &EdgeSlot::NonTree(NonTreeEdge { u, v, .. }) => Edge {
+                id,
+                u: VertexId(u),
+                v: VertexId(v),
+            },
+            EdgeSlot::Tree(cluster) => {
+                let (u, v) = self
+                    .top_tree
+                    .edge_endpoints(*cluster)
+                    .expect("the tree edge must be live");
+
+                let (u, v) = (
+                    self.vertex_cluster(u).expect("the u cluster must exist"),
+                    self.vertex_cluster(v).expect("the v cluster must exist"),
+                );
+
+                Edge {
+                    id,
+                    u: VertexId(u),
+                    v: VertexId(v),
+                }
+            }
+        })
     }
 
     /// Removes a vertex and all its incident edges from the graph, returning the other endpoints of any bridge edges that were removed.
@@ -1128,7 +1157,8 @@ impl FindBridge {
             .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
 
         for edge in edges.edges() {
-            let Some(Edge::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge) else {
+            let Some(EdgeSlot::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge)
+            else {
                 panic!("FindBridge::remove_vertex found a tree edge in vertex labels")
             };
 
@@ -1176,7 +1206,8 @@ impl FindBridge {
             .detach(self.top_tree.try_label_id_for_cluster(cluster).unwrap());
 
         for edge in edges.edges() {
-            let Some(Edge::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge) else {
+            let Some(EdgeSlot::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge)
+            else {
                 panic!("FindBridge::remove_vertex found a tree edge in vertex labels")
             };
 
@@ -1210,7 +1241,7 @@ impl FindBridge {
         if !self.top_tree.connected(u, v) {
             self.edges.push_with(|id| {
                 let cluster = self.top_tree.link(u, v, id);
-                Edge::Tree(cluster)
+                EdgeSlot::Tree(cluster)
             })
         } else {
             self.with_vertex_id_path_tag(u, v, CoverTag::cover(Level(0)));
@@ -1311,7 +1342,7 @@ impl FindBridge {
 
     pub fn is_bridge(&mut self, edge_id: EdgeId) -> bool {
         let level = match self.edges[edge_id] {
-            Edge::Tree(cluster_id) => {
+            EdgeSlot::Tree(cluster_id) => {
                 let (u, v) = self
                     .top_tree
                     .edge_endpoints(cluster_id)
@@ -1319,7 +1350,7 @@ impl FindBridge {
 
                 self.cover_level_between_internal(u, v)
             }
-            Edge::NonTree(NonTreeEdge { level, .. }) => level.0,
+            EdgeSlot::NonTree(NonTreeEdge { level, .. }) => level.0,
         };
 
         level == -1
@@ -1369,7 +1400,7 @@ impl FindBridge {
     /// Returns whether the removed edge was a bridge.
     pub fn remove_edge(&mut self, edge_id: EdgeId) -> bool {
         let ((u, v), level) = match self.edges[edge_id] {
-            Edge::Tree(cluster_id) => {
+            EdgeSlot::Tree(cluster_id) => {
                 let (u, v) = self
                     .top_tree
                     .edge_endpoints(cluster_id)
@@ -1388,7 +1419,7 @@ impl FindBridge {
 
                 (endpoints, level)
             }
-            Edge::NonTree(NonTreeEdge { u, v, level }) => {
+            EdgeSlot::NonTree(NonTreeEdge { u, v, level }) => {
                 self.remove_edge_labels(edge_id, level, [u, v]);
                 self.edges.remove(edge_id);
 
@@ -1473,7 +1504,7 @@ impl FindBridge {
             .find_repalcement(v, w, Level(alpha))
             .expect("edge was covered, and is now cut");
 
-        let Some(&Edge::NonTree(NonTreeEdge {
+        let Some(&EdgeSlot::NonTree(NonTreeEdge {
             u: cr,
             v: cq,
             level,
@@ -1492,7 +1523,7 @@ impl FindBridge {
         );
 
         let tree_edge = self.top_tree.link(r, q, replacement);
-        let Some(_) = self.edges.replace(replacement, Edge::Tree(tree_edge)) else {
+        let Some(_) = self.edges.replace(replacement, EdgeSlot::Tree(tree_edge)) else {
             panic!("replacement edge must exist in the edges slot vector")
         };
 
@@ -1503,7 +1534,7 @@ impl FindBridge {
 
         self.edges.replace(
             edge_id,
-            Edge::NonTree(NonTreeEdge {
+            EdgeSlot::NonTree(NonTreeEdge {
                 u: cv,
                 v: cw,
                 level: Level(alpha),
@@ -1561,7 +1592,7 @@ impl FindBridge {
     ) -> Option<EdgeId> {
         loop {
             let edge = self.find_first_label(v, w, level)?;
-            let &Edge::NonTree(NonTreeEdge { u: cr, v: cq, .. }) = self.edges.get(edge)? else {
+            let &EdgeSlot::NonTree(NonTreeEdge { u: cr, v: cq, .. }) = self.edges.get(edge)? else {
                 panic!("the edge must be a non-tree edge")
             };
 
@@ -1759,7 +1790,9 @@ impl FindBridge {
         v: top_tree::ClusterId,
         level: Level,
     ) -> EdgeId {
-        let id = self.edges.push(Edge::NonTree(NonTreeEdge { u, v, level }));
+        let id = self
+            .edges
+            .push(EdgeSlot::NonTree(NonTreeEdge { u, v, level }));
 
         self.add_edge_labels(id, level, u, v);
 

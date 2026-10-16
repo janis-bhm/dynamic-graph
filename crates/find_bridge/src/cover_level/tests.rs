@@ -43,7 +43,7 @@ fn internal_endpoints(
 /// endpoint clusters directly.
 fn edge_endpoints(fb: &FindBridge, edge: EdgeId) -> (VertexId, VertexId) {
     match fb.edges[edge] {
-        Edge::Tree(cluster) => {
+        EdgeSlot::Tree(cluster) => {
             let (u, v) = fb
                 .top_tree
                 .edge_endpoints(cluster)
@@ -53,7 +53,7 @@ fn edge_endpoints(fb: &FindBridge, edge: EdgeId) -> (VertexId, VertexId) {
                 VertexId(fb.vertex_cluster(v).expect("a live endpoint has a cluster")),
             )
         }
-        Edge::NonTree(NonTreeEdge { u, v, .. }) => (VertexId(u), VertexId(v)),
+        EdgeSlot::NonTree(NonTreeEdge { u, v, .. }) => (VertexId(u), VertexId(v)),
     }
 }
 
@@ -79,7 +79,7 @@ fn add_label(fb: &mut FindBridge, v: VertexId, level: Level) -> EdgeId {
 /// it has no graph path to uncover or recover.
 fn remove_label(fb: &mut FindBridge, label: EdgeId) -> Option<Level> {
     match fb.edges.get(label) {
-        Some(Edge::NonTree(NonTreeEdge { level, .. })) => {
+        Some(EdgeSlot::NonTree(NonTreeEdge { level, .. })) => {
             let level = *level;
             fb.remove_edge(label);
             Some(level)
@@ -93,7 +93,7 @@ fn remove_label(fb: &mut FindBridge, label: EdgeId) -> Option<Level> {
 fn live_non_tree_edges(fb: &FindBridge) -> BTreeSet<EdgeId> {
     fb.edges
         .iter()
-        .filter(|(_, edge)| matches!(edge, Edge::NonTree(_)))
+        .filter(|(_, edge)| matches!(edge, EdgeSlot::NonTree(_)))
         .map(|(id, _)| id)
         .collect()
 }
@@ -1716,7 +1716,7 @@ fn link_on_disconnected_pair_is_a_tree_edge() {
     assert_eq!(fb.tree_edge_count(), 0);
     let ab = fb.link(a, b);
     assert_eq!(fb.tree_edge_count(), 1);
-    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
+    assert!(matches!(fb.edges[ab], EdgeSlot::Tree(_)));
 
     let cb = fb.link(c, b);
     assert_eq!(fb.tree_edge_count(), 2);
@@ -1733,16 +1733,16 @@ fn link_on_connected_pair_is_a_non_tree_edge() {
     let a = fb.add_vertex();
     let b = fb.add_vertex();
     let ab = fb.link(a, b);
-    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
+    assert!(matches!(fb.edges[ab], EdgeSlot::Tree(_)));
 
     let ba = fb.link(b, a);
-    assert!(matches!(fb.edges[ba], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ba], EdgeSlot::NonTree(_)));
     // The forest is untouched: no new tree edge, and the recorded graph edge
     // sits at level 0 at both endpoints.
     assert_eq!(fb.tree_edge_count(), 1);
     assert!(fb.connected(a, b));
     assert_eq!(live_non_tree_edges(&fb), [ba].into());
-    let Edge::NonTree(ref record) = fb.edges[ba] else {
+    let EdgeSlot::NonTree(ref record) = fb.edges[ba] else {
         panic!("link on a connected pair must record a non-tree edge");
     };
     assert_eq!(record.level, lvl(0));
@@ -1797,7 +1797,7 @@ fn two_edge_component_size_matches_component_size_on_a_triangle() {
     let _ab = fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
-    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ca], EdgeSlot::NonTree(_)));
 
     for v in &verts {
         assert_eq!(fb.component_size(*v), 3);
@@ -1864,7 +1864,7 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
     let ab = fb.link(verts[0], verts[1]);
     let bc = fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
-    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ca], EdgeSlot::NonTree(_)));
     let (a, c) = internal_endpoints(&fb, verts[0], verts[2]);
     assert_eq!(fb.find_first_label(a, c, lvl(0)), Some(ca));
 
@@ -1878,8 +1878,8 @@ fn remove_edge_on_non_tree_edge_uncovers_the_cycle() {
     assert_eq!(fb.tree_edge_count(), 2);
     assert_eq!(fb.component_size(verts[0]), 3);
     // The cycle is gone, so every path edge is a bridge once more.
-    assert!(matches!(fb.edges[ab], Edge::Tree(_)));
-    assert!(matches!(fb.edges[bc], Edge::Tree(_)));
+    assert!(matches!(fb.edges[ab], EdgeSlot::Tree(_)));
+    assert!(matches!(fb.edges[bc], EdgeSlot::Tree(_)));
     assert_eq!(fb.cover_level_between(verts[0], verts[2]), -1);
     assert_eq!(fb.cover_level(internal(&fb, verts[0])), -1);
     assert_eq!(fb.two_edge_component_size(verts[0]), 1);
@@ -1930,7 +1930,7 @@ fn remove_edge_on_self_record_does_not_promote_another_label() {
         "neither self-record starts at level 1"
     );
     let before_surviving_level = match fb.edges.get(survivor) {
-        Some(Edge::NonTree(edge)) => edge.level,
+        Some(EdgeSlot::NonTree(edge)) => edge.level,
         _ => panic!("the surviving self-record is live before deletion"),
     };
     assert_eq!(
@@ -1950,7 +1950,7 @@ fn remove_edge_on_self_record_does_not_promote_another_label() {
         "the target record is removed"
     );
     let after_surviving_level = match fb.edges.get(survivor) {
-        Some(Edge::NonTree(edge)) => edge.level,
+        Some(EdgeSlot::NonTree(edge)) => edge.level,
         _ => panic!("the surviving self-record remains live after deletion"),
     };
     assert_eq!(
@@ -2001,7 +2001,7 @@ fn remove_edge_on_covered_tree_edge_keeps_the_component_connected() {
     let ab = fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
-    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ca], EdgeSlot::NonTree(_)));
 
     fb.cover(verts[2], verts[0], lvl(0));
     assert_eq!(fb.cover_level_between(verts[0], verts[1]), 0);
@@ -2026,7 +2026,7 @@ fn remove_edge_on_covered_tree_edge_frees_deleted_edge_id() {
     let ab = fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
-    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ca], EdgeSlot::NonTree(_)));
 
     fb.cover(verts[2], verts[0], lvl(0));
     fb.remove_edge(ab);
@@ -2044,7 +2044,7 @@ fn remove_edge_on_covered_tree_edge_restores_bridge_state() {
     let ab = fb.link(verts[0], verts[1]);
     fb.link(verts[1], verts[2]);
     let ca = fb.link(verts[2], verts[0]);
-    assert!(matches!(fb.edges[ca], Edge::NonTree(_)));
+    assert!(matches!(fb.edges[ca], EdgeSlot::NonTree(_)));
 
     fb.cover(verts[2], verts[0], lvl(0));
     fb.remove_edge(ab);
@@ -2090,7 +2090,7 @@ fn recover_phase_promotion_covers_the_promoted_edge_path() {
 
     assert!(matches!(
         fb.edges[promoted],
-        Edge::NonTree(NonTreeEdge {
+        EdgeSlot::NonTree(NonTreeEdge {
             level: Level(1),
             ..
         })

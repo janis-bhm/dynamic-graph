@@ -111,4 +111,4 @@
 
 mod cover_level;
 
-pub use cover_level::{CoverLevel, CoverTag, EdgeId, FindBridge, Level, NO_COVER, VertexId};
+pub use cover_level::{CoverLevel, CoverTag, Edge, EdgeId, FindBridge, Level, NO_COVER, VertexId};

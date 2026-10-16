@@ -722,6 +722,10 @@ where
         }
         Some(self.cl(node).sum.clone())
     }
+
+    pub fn cluster_summary(&self, cluster: ClusterId) -> &S {
+        &self.cl(cluster).sum
+    }
 }
 
 impl<S, N, E> Default for TopTree<S, N, E>

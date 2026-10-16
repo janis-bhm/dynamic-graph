@@ -330,7 +330,7 @@ impl Coverage {
     /// Folds the state after one step into the running counters.
     fn observe(&mut self, graph: &Graph) {
         for (_, edge) in graph.fb.edges.iter() {
-            if let Edge::NonTree(non_tree) = edge {
+            if let EdgeSlot::NonTree(non_tree) = edge {
                 self.max_non_tree_level = self.max_non_tree_level.max(i32::from(non_tree.level));
             }
         }
@@ -579,11 +579,11 @@ fn run_randomized_case(seed: u64, parallel_bias: u64, case: usize, expect_promot
                         let (a, b) = (graph.verts[&endpoints.0], graph.verts[&endpoints.1]);
                         let covered = graph.fb.cover_level_between(a, b) >= 0;
                         match graph.fb.edges.get(handle) {
-                            Some(Edge::Tree(_)) if covered => {
+                            Some(EdgeSlot::Tree(_)) if covered => {
                                 coverage.covered_tree_edge_deletions += 1
                             }
-                            Some(Edge::Tree(_)) => coverage.bridge_deletions += 1,
-                            Some(Edge::NonTree(_)) => coverage.non_tree_deletions += 1,
+                            Some(EdgeSlot::Tree(_)) => coverage.bridge_deletions += 1,
+                            Some(EdgeSlot::NonTree(_)) => coverage.non_tree_deletions += 1,
                             None => panic!("{context}: live handle {handle:?} has no edge record"),
                         }
 

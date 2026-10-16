@@ -1041,7 +1041,7 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
     let qr = fb.link(q, r);
     let closing = fb.link(r, p);
     assert!(
-        matches!(fb.edges[closing], Edge::NonTree(_)),
+        matches!(fb.edges[closing], EdgeSlot::NonTree(_)),
         "the edge closing the cycle starts out as a non-tree record"
     );
     fb.cover(r, p, lvl(0));
@@ -1070,7 +1070,7 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
     // private `fb.edges`, the way `cover_level::tests` does.
     assert_eq!(fb.endpoints(pq), None, "the deleted handle's slot is freed");
     assert!(
-        matches!(fb.edges[closing], Edge::Tree(_)),
+        matches!(fb.edges[closing], EdgeSlot::Tree(_)),
         "Swap promoted the record that crossed the cut to a tree edge"
     );
     assert_eq!(
@@ -1079,7 +1079,7 @@ fn remove_edge_on_a_covered_tree_edge_runs_the_swap_and_recover_reduction() {
         "and the promoted edge keeps its endpoints"
     );
     assert!(
-        matches!(fb.edges[qr], Edge::Tree(_)),
+        matches!(fb.edges[qr], EdgeSlot::Tree(_)),
         "the tree edge that did not cross the cut is untouched"
     );
 
@@ -1253,7 +1253,7 @@ fn remove_vertex_after_its_only_non_tree_record_was_removed() {
     let tree = fb.link(a, b);
     let parallel = fb.link(a, b);
     assert!(
-        matches!(fb.edges[parallel], Edge::NonTree(_)),
+        matches!(fb.edges[parallel], EdgeSlot::NonTree(_)),
         "the second link on a connected pair is a non-tree record"
     );
     assert_eq!(
@@ -1301,7 +1301,7 @@ fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     let tree = fb.link(a, b);
     let parallel = fb.link(a, b);
     assert!(
-        matches!(fb.edges[parallel], Edge::NonTree(_)),
+        matches!(fb.edges[parallel], EdgeSlot::NonTree(_)),
         "the second link on a connected pair is a non-tree record"
     );
 
@@ -1323,7 +1323,7 @@ fn remove_vertex_removes_a_non_tree_record_from_both_endpoints() {
     fb.remove_edge(tree);
     assert_eq!(fb.component_size(a), 1, "the plain cut separates a from b");
     assert!(
-        matches!(fb.edges[parallel], Edge::NonTree(_)),
+        matches!(fb.edges[parallel], EdgeSlot::NonTree(_)),
         "a plain cut must leave the non-tree record live for `remove_vertex` to clean up"
     );
     assert_eq!(
