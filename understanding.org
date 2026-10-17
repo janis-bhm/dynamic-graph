@@ -1,0 +1,376 @@
+* connectivity algo
+  we maintain a spanning forest $F$ over $G$, the graph
+  each edge e of G has a level $l(e) \leq l_{max}$
+  At each node level $l$, a Forest $F_{i}$ is the subtree of $F$ induced by edges at level $l$
+  the following invariants must hold:
+ 1) if $(v, w)$  is a non-tree edge, $v$ and $w$ are connected in $F_{l(v,w)}$
+ 2) $F_i$ may have at most $\lfloor{n/2^i}\rfloor$ vertices.
+
+    question: what is n here?
+
+   Increasing the level of a tree-edge cannot violate (1).
+
+   When inserting a new edge $e = (v,w)$:
+   the edge is given level 0.
+   to maintain (1), if $v$ and $w$ are not connected in $F$, we add $e$ to it.
+   (2) trivially holds, since $\lfloor{n/2^0}\rfloor = n / 1 = n$ where $n$ is the number of vertices in $G$.
+
+   When deleting an edge $e = (v,w)$:
+   if $e$ is a non-tree edge, we do nothing.
+   if $e$ is a tree edge, it is deleted and we have to look for a replacement edge at the highest possible level to reconnect $F$.
+  (1) is now violated for any replacement edge of $e$.
+  When deleting $e$, we split the tree $T$ containing $(v, w)$ into the two parts $T_v$ and $T_w$.
+  Let $|T_v| \leq |T_w|$ such that $|T_v|*2 \leq |T|$.
+  From this follows, that we can now make $T_v$ a tree in $F_{i+1}$ by taking the edges of $T_v$ with level $i$ and increasing their level to $i + 1$.
+
+  for all edges $f$ of level $i$ incident to $T_v$:
+   if $f$ does not connect $T_v$ and $T_w$ have their level increased to $i + 1$.
+  if $f$ does connect $T_v$ and $T_w$, it is used as a replacement edge, and the search is stopped.
+  if no replacement edge is found, we recurse at level $i - 1$ until $i = 0$, after which we can be sure that no replacement edge exists.
+  
+  question: this would leave $T_i=T_v \cup f \cup T_w$ containing edges from different levels up to $i$. how do we find a tree $T$ in some forest $F_i$?
+  
+
+* 2-edge connectivity 1998
+  Two vertices $v, w \in G$ are said to be 2-edge connected if they remain connected when removing any one edge from the graph $G$.
+  Let ${v}\cdots{w}$ be the path from $v$ to $w$ in $T$.
+  a tree edge $e$ is covered by a non-tree edge $(v, w)£$ if $e \in {v}\cdots{w}$.
+  $e$ is a bridge /iff/  it is a tree-edge and not covered by any non-tree edge.
+  two vertices $v$ and $w$ are 2-edge connected iff they are connected in $F$ and all edges in ${v}\cdots{w}$ are covered.
+  Trivially, any bridge is part of $F$.
+
+  Let C be a set containing non-tree edges covering a tree edge:
+  $\{e : e\in{G\F}, \exists f\in{F} e \mathbin{\text{covers}} f\}$
+  Two vertices $v$ and $w$ are 2-edge connected in $G$ iff they are in ${F}\cup{C}$.
+
+  again, we associate with each edge $e$ a level $l(e)\leq l_{max} = \lceil{log_2n}\rceil$ .
+
+  For each $i$, let $G_i$ be the subgraph of $G$ induced by edges of level at least $i$ and $F$:
+  $G = G_0 \supseteq G_1 \supseteq \cdots \supseteq G_{l} \supseteq F$
+
+  we maintain the following invariant:
+  1) the maximal number of vertices in a 2-edge connected component of $G_i$ is the ceiling of $n$ divided by the $i$th power of 2:  $|V(G)| \leq \lceil n/2^i \rceil$
+
+     to begin with, all non-tree edges have level $0$, and all tree-edges have level $\bot$.
+     an edge $e$ may be increased to level $j$ if $G_j \cup {e}$ has at most $\lceil n/2^j \rceil$ vertices.
+
+     for every tree edge $e \in F$, a cover level $c(e)$ is maintained, which is the maximum level of a covering edge.
+     from this follows that $c(e)$ is the maximal level for which $e$ is part of a 2-edge connected component.
+     if $e$ is a bridge, $c(e) = \bot$.
+     for some path $P$, the cover level is the minimum cover level of any edge $e \in P$:
+     $c(P) = min_{e\in{P}} c(e)$
+    vertices $v$ and $w$ are c-2-edge connected on level $i$ if they are connected, and $c(v\cdots{w}) \geq i$.
+
+    to maintain the cover values, we use the following operations:
+
+    $\boldsymbol{Cover}(v, w, i)$:
+    for all $e \in v\cdots{w}$ if $c(e) < i$, set $c(e) := i$.
+
+    
+
+    $\boldsymbol{Insert}(v, w)$:
+    if $v$ and $w$ are not connected in $F$, add edge $(v, w)$ to $F$ with cover level $\bot$.
+    otherwise set $l(v, w) := 0$ and call $\boldsymbol{Cover}(v, w, 0)$.
+
+    When deleting a non-bridge tree edge $(v, w)$, if is swapped with a non-tree edge:
+    $\boldsymbol{Swap}(v, w)$:
+    ensure that $c(v, w) \geq 0$.
+    find some edge $(x, y)$ that covers $(v, w)$ at level $l(x, y) = c(v, w)$.
+    replace $(v, w)$ with $(x, y)$ in $F$ and call $\boldsymbol{Cover}(v, w, c(x, y))$.
+    > let $\alpha = c(v, w)$ and let $(x, y)$ be a non-tree edge covering $(v, w)$ with $l(x, y) = \alpha$.
+
+    $\boldsymbol{Delete}(v, w)$:
+    if $(v, w)$ is a bridge, delete it and return.
+    otherwise:
+    if $(v, w)$ is a tree-edge, we call $\boldsymbol{Swap}(v, w)$, turning it into a tree-edge.
+
+    we call $\boldsymbol{Uncover}(v, w, l(v, w))$ and then delete $(v, w)$, finally, for $i:=l(v, w), \dots, 0$, we call $\boldsymbol{Recover}(v, w, i)$.
+
+$\boldsymbol{Uncover}(v, w, i)$:
+ensure that $v$ and $w$ are connected.
+for all $e \in v\cdots{w}$, if $c(e) \leq i$, set $c(e) := \bot$.
+the original edge $(x, y)$ was covering edges on the original path $v\cdots{w}$ at level $i$, but some other edge may also have been covering it at level $l \leq i$.
+this means that the cover values on the path from $v$ to $w$ are now possibly too low.
+
+$v\cdots{w}$ is said to be /fine/ on level $i$ if all cover values in $F$ are correct, except that cover values < $i$ on $v\cdots{w}$ may be too low.
+after calling $\boldsymbol{Uncover}(v, w, l(v, w))$ in Delete, $v\cdots{w}$ is /fine/ on level $l(v, w) + 1$.
+$\boldsymbol{Recover}(v, w, i)$ assumes that $v\cdots{w}$ is /fine/ on level $i + 1$, and makes $v\cdots{w}$ fine on level $i$.
+a naive implementation of Recover would take all edges $(q, r)$ with level $i$ that cover edges in $v\cdots{w}$ and then calling $\boldsymbol{Cover}(q, r, i)$. (paper erroneously says to call cover with $(v, w, i)$).
+
+$\boldsymbol{Recover}(v, w, i)$:
+the goal is to make $v\cdots{w}$ /fine/ on level $i$. currently, it is /fine/ on level $i + 1$.
+
+
+step through the vertices of $v\cdots{w}$ starting with $v$.
+for each step, while there exists some level $i$ non-tree edge $(q, r)$ with $meet(q, v, w) = u$ where $c(u\cdots{q}) \geq i$ and $|C_{(q,r)}(G_{i+1} \cup \{e\})| \leq \lceil n/2^{i+1}\rceil$, call $\boldsymbol{Cover}(q, r, i + 1)$.
+otherwise, call $\boldsymbol{Cover}(q, r, i)$ and stop, then start stepping from $w$.
+note that outside of $u\cdots{w}$, cover levels are still valid.
+
+if we stopped, we have some $u_1$, $(q_1, r_1)$ and $u_2$, $(q_2, r_2)$ and want to prove that $c(u_1 \cdots u_2) \geq i$ 
+by (1), we know that the 2-edge connected component $C_k$ of $q_k$ in $G_{i+1} \cup (q, r)$, respectively, has $> \lceil n / 2^{i+1} \rceil$ vertices.
+but before $(v, w)$ was removed, both $C_1$ and $C_2$ belonged to the same 2-edge connected component $C$ of $G_i$ with at most $\lceil n/2^i \rceil$ vertices:
+$|C_k|*2 > |C_1 \cup C_2| \therefore C_1 \cap C_2 \neq \emptyset$
+
+
+
+from that follows, that
+
+
+* (Splay) Top Tree
+  a top tree $\mathbb{T}$ represents a forest of trees $F$.
+  the leaves of the top tree are edges (labeled vertices) of the underlying tree $T\in F$.
+  the internal nodes are clusters $C$, and are connected sets of edges in the underlying tree.
+  the boundary vertices $\partial{C}$ of a cluster $C$ are vertices of $C$ that are either external boundary vertices of $T$ (exposed vertices), or vertices incident to an edge in $T\setminus{C}$,  or vertices with a label $l$ in $T\setminus{C}$:
+  $\partial{C}=\{v \in C\cap{T} | v \in \partial{T} \wedge (\exists{e} \in T\setminus{C} \vee v \in e) \wedge (\exists{l} \in T\setminus{C} \vee l \in v)\}$
+
+  Clusters can either be /path clusters/ if $|\partial{C}| = 2$ or /point clusters/ if $|\partial{C} < 2|$.
+  The path of a path cluster $\pi{(C)}$ with boundary vertices $v, w$ is the path $v\cdots{w}$.
+  The /central vertex/ of a cluster is the vertex shared by its children.
+  Let $Ch(C)$ denote the children of $C$.
+  The set of boundary vertices of a cluster is equal to the union of the boundary vertices in its children and the external boundary vertices of the clusters tree:
+  $\boxed{
+  \partial C
+  =
+  \bigcup_{C' \in \operatorname{Ch}_{\Tau}(C)} \partial C'
+  \;\cup\;
+  \bigl(\partial T \cap V(C)\bigr)
+  }$
+
+  Orientation of boundary vertices:
+  each boundary vertex of a node can be described to be to the left, in the middle, or to the right.
+  for internal nodes, a boundary vertex is in the middle if it is the central vertex of the node.
+  otherwise a boundary vertex is /left/ if it comes from the leftmost child, or right if it comes from the rightmost child.
+  the /leftmost boundary vertex/ of a node is the vertex coming from the leftmost child if it exists, or else the middle vertex.
+  a node has a middle boundary vertex if it has boundary vertices unequal to path children:
+  $|\partial{C}| \neq |\{c \in Ch(C) : \texttt{ispath}(c)\}|$
+  If it has no path children, and one boundary vertex, the boundary vertex must be the middle vertex,
+  if it has 
+  for edge leaves, the left boundary vertex is the left endpoint of the edge.
+  for label leaves, the left and right boundary vertices are the labels vertex.
+  
+   invariants:
+   1) all clusters must be valid. clusters are valid if it has at most 2 boundary vertices: $|\partial{C}|\leq 2$.
+   2) the leftmost boundary vertex of the rightmost child and the rightmost boundary vertex of the leftmost child must exist and be equal to the central vertex.
+
+Higher order trees:
+For trees with cardinality > 2, we can differentiate between border and central children:
+central children must be path clusters, and their boundary vertex must be the central vertex.
+border children are leftmost or rightmost, and may be path clusters.
+     
+Rotations:
+rotations operate on some node $N$ and its parent, sibling(s), grandparent and uncle(s).
+Rotations are valid iff $\texttt{sibling(node)}\cup{\texttt{sibling(parent(node))}}$ is a valid node:
+$(P_{N}\setminus{N}) \cup (P_{P_N}\setminus{P_N})$ is a connected edge-set.
+
+for valid rotations, the tree will look one of two ways, barring reflections:
+We can rotate on (a) a path ~node-siblings-uncle~, or (b) a star where ~node~, ~sibling~ and ~uncle~ all share a common vertex.
+Because of (2), if ~sibling~ /and/ ~uncle~ are on the same side and ~sibling~ is a path, we are rotating on a path as in (a).
+otherwise, we are rotating on a star as in (b).
+
+
+when rotating-up a central child, the middle vertex of the parent must be a boundary vertex, and a boundary vertex of the grandparent: we can swap it with any point-uncle.
+
+
+
+node cases:
+child-edge/cluster: 1 or 2 boundary vertices, flip -> 2x2x2
+root-edge/cluster: 0, 1 or 2 boundary vertices, flip -> 1_flip, 2_boundry, 1_edgeOrCluster
+child-label: 0 or 1 boundary vertices, flip -> 2x2 1_flip, 1_boundry
+root -label: 0 or 1 boundary vertices, flip ->  2x2
+
+
+* dynamic bridge-finding by holm,rotenberg,thorup
+
+** CoverLevel
+   $C$ is a cluster in $T$.
+   Each cluster maintains a cover level $cover_C$, which is the minimal value of the cover levels of all path edges of $C$ and the maximum level of $T$:
+   $cover_C=min \{c(e) | e \in \pi(C)\} \cup \{l_{\texttt{max}}\}$
+
+   Each cluster maintains a cover level $globalcover_C$, which is the minimal value of the cover levels of all non-pathedges of $C$ and the maximum level of $T$:
+   $globalcover_C = \texttt{min}\{c(e) | e \in C\setminus{\pi(C)}\} \cup \{l_{\texttt{max}}\}$
+
+ Each cluster also maintains two edges, $minpathedge_C$, which is the path-edge with the minimal cover level or nil if no such edge exists,
+ and $minglobaledge_C$, which is the non-path edge with the minimal cover level if C is not equal to its path (contains point clusters), or nil if the conditions are not met.
+
+ Then, the =cover_level(v)= function returns $globalcover_C$ for $C=\texttt{Expose}(v)$,
+ =cover_level(v,w)= returns $cover_C$ for $C = \texttt{Expose}(v,w)$
+ =min_covered_edge(v)=   returns $minglobaledge_C$ for $C = \texttt{Expose}(v)$,
+ and =min_covered_edge(v,w)= returns $minpathedge_C$ for $C = \texttt{Expose}(v,w)$
+
+ #+begin_src rust
+ struct PerClusterCoverLevelInfo {
+     cover: CoverLevel,
+     global_cover: CoverLevel,
+     min_path_edge: Option<Edge>,
+     min_global_edge: Option<Edge>,
+ }
+ #+end_src
+
+ To avoid propagating this information into the leaves on calling Cover and Uncover, additional lazy information is stored:
+
+ #+begin_src rust
+ struct PerClusterCoverLevelInfo {
+     cover: CoverLevel,
+     global_cover: CoverLevel,
+     min_path_edge: Option<Edge>,
+     min_global_edge: Option<Edge>,
+
+     /// $cover_{C}^{-}$
+     pending_uncover: Option<CoverLevel>,
+     /// $cover_{C}^{+}$
+     pending_cover: Option<CoverLevel>,
+ }
+ #+end_src
+
+ we assert the invariant that $cover_C \geq cover_{C}^{+}$ and
+ if $cover_C \leq cover_{C}^{-}$ then $cover_{C} = cover_{C}^{+}$
+
+ a call to Cover(v,w,i) then updates for $C= \texttt{Expose}(v,w)$ $cover_C$ and $cover_{C}^{+}$ respectively with $i$.
+ a call to Uncover(v,w,i) sets for $C= \texttt{Expose}(v,w)$ $cover_C$ and $cover_{C}^{+}$ to $\bot$ and updates $cover_{C}^{-}$ using $i$.
+
+ When a path cluster $C$ is split into descendants $D$, we apply this lazy information:
+ if $\texttt{max}\{cover_D, cover_{D}^{-}\} \leq cover_{C}^{-}$ then $cover_{D}^{-}=cover_{C}^{-}$
+
+ if \(cover_D \leq \texttt{max}\{cover_{C}^{-}, cover_{C}^{+}\}\) then \(cover_D=cover_{C}^{+}\) and \(cover_{D}^{+}=cover_{C}^{+}\)
+
+ when merging clusters $A_1, \dots, A_k$, define temporary vectors:
+
+ \(globalcover\prime\), which is \(globalcover_{A_i}\) for each \(A_i\) whose boundary is part of the path of $C$ or where \(globalcover_{A}_i_ \leq cover_{A}_i_\), or else \(cover_{A_i}\):
+\begin{equation}
+  \boxed{
+  globalcover\prime_{A_i} =
+    \begin{cases}
+      globalcover_{A_i}, & \text{if} \partial{A_i} \subseteq \pi(C) \text{or} globalcover_{A_i} \leq cover_{A_i},\\
+      cover_{A_i}, & \text{otherwise}.
+\end{cases}
+  }
+\end{equation}
+
+
+ and \(minglobaledge\prime\), which is \(minglobaledge_{A_i}\) for each $A_i$ whose boundary is part of the path of $C$ or where \(globalcover_{A}_i_ \leq cover_{A}_i_\), or else \(minpathedge_{A_i}\).
+
+ these vectors are then reduced to yield the \(globalcover_C\) and \(minglobaledge_C\) values for the merged cluster:
+
+  \begin{equation}
+    \[
+        globalcover_C
+        =
+        \operatorname*{min}_{1 \le i < k} globalcover\prime_{A_i} 
+    \]
+  \end{equation}
+  
+ \begin{equation}
+    minglobaledge_C
+    =
+    minglobaledge\prime_{A_j} \text{where}
+\operatorname*{arg\,min}_{1 \le i < k} globalcover\prime_{A_i} 
+  \end{equation}
+
+ \begin{equation}
+    \begin{aligned}
+  cover_{C}^{-}= \bot \\
+  cover_{C}^{+}= \bot
+      \end{aligned}
+  \end{equation}
+
+ \begin{equation}
+  cover_C
+  =
+  l_{\texttt{max}} \text{if} |\partial{C}| < 2, \text{otherwise}
+  \operatorname*{min}_{1 \le i < k, \partial{A_i}\subseteq \pi(C)} cover_{A_i}
+  \end{equation}
+
+ \begin{equation}
+   minpathedge_C
+   =
+  \begin{cases}
+    \text{nil}, \tab \text{if} |\partial{C}| < 2, \\
+  minpathedge_{A_j} \text{where}
+    \operatorname*{arg\,min}_{1 \le i < k, \partial{A_i}\subseteq \pi(C)} cover_{A_i}
+     \tab \text{otherwise}
+ \end{cases}
+ \end{equation}
+
+
+
+
+* FindSize
+
+  let $C$ be a cluster in $T$ and let $v$ be a vertex in $C$, and let \(0 \le i < l_{\texttt{max}}\)
+
+  then the pointsize of $v$ in $C$ at level $i$ is the number of paths from vertices in $C$ to $v$ for which the cover level is greater or equal to $i$:
+  \begin{equation}
+    pointsize_{C,v,i}
+    =
+    |\{
+    u \in C | \operatorname{CoverLevel}(u,v) \ge i
+    \}|
+  \end{equation}
+
+  let \(pointsize_{C,v}\) be the vector of poinsizes of all \(\operatorname*{log}n\) levels
+
+  define \(size_C\) to be the sum of the pointsizes for all pointclusters incident to the path of $C$.
+
+  \begin{equation}
+    \boxed{
+      \begin{aligned}
+        size_C
+        =
+        \sum_{m\in{\pi(C)}} pointsize_{C_m,m}\\
+        \operatorname{FindSize}(v,w,i) = size_{C,i}
+        \tab \text{where} \tab
+        C
+        =
+        \operatorname{Expose}(v,w)
+      \end{aligned}
+    }
+  \end{equation}
+
+
+ 
+* asdf
+  non-tree edges cover tree-edges, where the non-tree edge (r,q) covers the tree-path r…q with their level.
+  when non-tree edges are added, the start at level 0
+  tree edges start with a level -1.
+  when a non-tree edge (r,q) is added to a graph with only tree-edges, it increases any tree-edges on the path r…q to level 0.
+  CoverLevel(v,w) is then the least level of each edge e on the path v…w where the cover level of e is the greatest level of any non-tree edge (r,q) covering it, meaning that e is on the tree-path r…q?
+
+  The matrix M, which is used to calculate the diagonal, is a matrix where the diagonal values are one where i is greater or equal to j. In this case, i is the level for which the matrix has been calculated and j is the rank of the row column pair diagonal cell.
+
+  So, for i=3 and j=8, it would be the following:
+  #+begin_src
+  1 0 0 0 0 0 0 0 
+  0 1 0 0 0 0 0 0 
+  0 0 1 0 0 0 0 0 
+  0 0 0 0 0 0 0 0 
+  0 0 0 0 0 0 0 0 
+  0 0 0 0 0 0 0 0 
+  0 0 0 0 0 0 0 0 
+  0 0 0 0 0 0 0 0 
+  #+end_src
+
+  I want to understand exactly how the size vector of some cluster C is calculated:
+Freestanding edges start off at a size which is zero for all levels.
+Labels which exist for each vertex start out with a size 1 at all levels.
+
+the pointsize of a vertex v in cluster C at level i is the number of vertices in C for which CoverLevel(u,v) \ge i
+
+the size of cluster C is said to be the sum of the pointsizes for all point clusters and their boundary vertices that “hang off of” the path of C.
+
+partsize_C,v,i is the sum of pointsizes of the point clusters hanging off of the path of C where CoverLevel(v,m) = i
+
+partsize is maintained in an augmented bst keyed by level. this lets us quickly get the sum of some range of levels, like -1..=\ell in the case of diagsize. so this takes the first \ell partsizes and multiplies the resulting vector with the diagonal matrix, which only keeps levels j \le i for diagsize’_C,v,i 
+
+In the case that two clusters come together to form a path, the new size is just the sum of the two parts.
+In the case that a path and a point cluster come together to form a point cluster the new size is calculated using the sum of all diagsize’ levels plus the size of the pointcluster multiplied with the diagonal matrix of the path cluster cover level
+
+
+
+
+in the heterogeneous point cluster case the parent forms a cluster relevant for the CoverLevel(u, meet(u,v,w)) query.
+let C be such a cluster with boundary \(\partial{C} = \{s\}\) made up of the path child \(A\) with boundary \(\partial{A} = \{s,t\}\)  and the point child \(B\) with boundary \(\partial{B} = \{s\}\).
+here we want `size` to reflect the number of vertices \(u\) in the subtree reachable from \(s\) where each edge in the path \(s\dots{u}\) has a cover level \(i\).
+
+because each path \(t\dots{u}\) must go through the edge \((s,t)\) which has level \(cover_A\), we take only the levels \(-1..cover_A\)  from \(size_B\) as the contribution to this count from B.
+
+for A, 
