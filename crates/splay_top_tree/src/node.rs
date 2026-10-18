@@ -886,7 +886,10 @@ impl<W> Handle<W, marker::Edge> {
     }
 }
 
-impl<W> Handle<W, marker::Internal> {
+impl<W> Handle<W, marker::Internal>
+where
+    W: Summary,
+{
     pub fn push_flip(&self) {
         if self.is_flipped() {
             unsafe {
@@ -897,12 +900,16 @@ impl<W> Handle<W, marker::Internal> {
                 node.children.flip();
 
                 for mut child in &node.children {
-                    child.as_mut().toggle_flipped();
+                    let child = child.as_mut();
+                    child.toggle_flipped();
+                    <W as Summary>::flip(&mut child.weight);
                 }
             }
         }
     }
+}
 
+impl<W> Handle<W, marker::Internal> {
     fn num_path_children(&self) -> usize {
         self.children()
             .iter()

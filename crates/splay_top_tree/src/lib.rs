@@ -135,10 +135,11 @@ where
         loop {
             node.add_boundary_vertex(tree, v, resolved);
 
+            if let LeafOrInternal::Internal(mut internal) = node.force() {
+                internal.recompute_weight();
+            }
+
             let Some(parent) = node.parent() else {
-                if let LeafOrInternal::Internal(mut internal) = node.force() {
-                    internal.recompute_weight();
-                }
                 return node;
             };
 
@@ -147,10 +148,6 @@ where
 
             if (is_left_child && right) || (is_right_child && left) {
                 node.toggle_flipped();
-            }
-
-            if let LeafOrInternal::Internal(mut internal) = node.force() {
-                internal.recompute_weight();
             }
 
             left = is_left_child != parent.is_flipped();
