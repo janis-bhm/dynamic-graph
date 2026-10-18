@@ -125,8 +125,8 @@ impl MergeContext {
 }
 
 pub trait Summary: Sized {
-    fn edge(e: index::EdgeId) -> Self;
-    fn label(l: index::LabelId) -> Self;
-    fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
+    fn create_edge(e: index::EdgeId) -> Self;
+    fn create_label(l: index::LabelId) -> Self;
+    fn merge(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
     fn flip(&mut self) {}
 }

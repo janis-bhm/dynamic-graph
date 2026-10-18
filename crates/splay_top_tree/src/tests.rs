@@ -62,15 +62,15 @@ fn custom_allocator_allocates_and_deallocates_top_tree_nodes() {
 }
 
 impl Summary for Xor {
-    fn edge(_e: index::EdgeId) -> Self {
+    fn create_edge(_e: index::EdgeId) -> Self {
         todo!()
     }
 
-    fn label(_l: index::LabelId) -> Self {
+    fn create_label(_l: index::LabelId) -> Self {
         todo!()
     }
 
-    fn combine(left: &Self, right: &Self, _ctx: &summary::MergeContext) -> Self {
+    fn merge(left: &Self, right: &Self, _ctx: &summary::MergeContext) -> Self {
         Self(left.0 ^ right.0)
     }
 }

@@ -175,15 +175,15 @@ mod tests {
     struct TestSummary(u64);
 
     impl Summary for TestSummary {
-        fn edge(_e: crate::index::EdgeId) -> Self {
+        fn create_edge(_e: crate::index::EdgeId) -> Self {
             todo!()
         }
 
-        fn label(_l: crate::index::LabelId) -> Self {
+        fn create_label(_l: crate::index::LabelId) -> Self {
             todo!()
         }
 
-        fn combine(left: &Self, right: &Self, _ctx: &crate::summary::MergeContext) -> Self {
+        fn merge(left: &Self, right: &Self, _ctx: &crate::summary::MergeContext) -> Self {
             Self(left.0 + right.0)
         }
     }

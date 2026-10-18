@@ -466,7 +466,7 @@ where
             central,
         };
 
-        let weight = W::combine(left.weight(), right.weight(), &ctx);
+        let weight = W::merge(left.weight(), right.weight(), &ctx);
 
         let node = InternalNode::alloc(weight, left.node, right.node, boundary, allocator);
 
@@ -971,7 +971,7 @@ impl<W> Handle<W, marker::Internal> {
         unsafe {
             let lw = &left.weight();
             let rw = &right.weight();
-            let new_weight = W::combine(lw, rw, &ctx);
+            let new_weight = W::merge(lw, rw, &ctx);
             self.node.as_mut().weight = new_weight;
         }
     }
