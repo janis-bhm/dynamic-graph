@@ -26,6 +26,8 @@ mod index;
 mod iter;
 mod node;
 mod non_max;
+#[cfg(test)]
+mod oracle;
 mod summary;
 #[cfg(test)]
 mod tests;
@@ -726,6 +728,8 @@ impl<W, A: Allocator> TopTree<W, A> {
         self.is_boundary_vertex_internal(vv)
     }
 
+    /// Two distinct vertices with no incident leaves or labels are reported as
+    /// disconnected. A leafless vertex is connected only to itself.
     pub fn is_connected(&self, v: impl IntoVertexId, w: impl IntoVertexId) -> bool {
         let v = v.into_vertex_id(self);
         let w = w.into_vertex_id(self);
@@ -736,7 +740,14 @@ impl<W, A: Allocator> TopTree<W, A> {
         let rv = incident_leaves(self, vv).next().map(Handle::root);
         let rw = incident_leaves(self, ww).next().map(Handle::root);
 
-        rv == rw
+        match (rv, rw) {
+            (Some(a), Some(b)) => a == b,
+            // Neither vertex has a consuming node, so no shared root can be
+            // established. A vertex is still trivially connected to itself: it is
+            // the sole member of its own component.
+            (None, None) => v == w,
+            _ => false,
+        }
     }
 
     pub fn degree(&self, v: VertexId) -> usize {

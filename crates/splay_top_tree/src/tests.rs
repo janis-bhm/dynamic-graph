@@ -14,7 +14,7 @@ use super::tree::{self};
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Xor(u64);
+pub(crate) struct Xor(pub(crate) u64);
 
 #[derive(Clone, Default)]
 struct CountingAlloc {
@@ -735,10 +735,10 @@ fn link_cut_then_expose_both_ends_of_a_path() {
     }
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6364136223846793005)
