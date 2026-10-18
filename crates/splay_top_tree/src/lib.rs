@@ -265,7 +265,9 @@ where
     );
 
     match find_consuming_node(root, resolved) {
-        Some(consuming_node) => {
+        Some(mut consuming_node) => {
+            consuming_node.recursively_split_down();
+
             let consuming_node = prepare_expose(consuming_node);
 
             let node = expose_prepared(consuming_node, root, v, resolved);
@@ -807,6 +809,7 @@ impl<W, A: Allocator> TopTree<W, A> {
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
+
         let result = if let Some(meet) = expose(w, self) {
             let aggregate = meet.weight().clone();
 

@@ -862,6 +862,35 @@ impl<W, NodeType> Handle<W, NodeType> {
         node
     }
 
+    /// Recursively calls `Summary::split` for all nodes on the root path of
+    /// `self`
+    pub fn recursively_split_down(&mut self)
+    where
+        W: Summary,
+    {
+        if let Some(mut parent) = self.parent() {
+            parent.recursively_split_down();
+        }
+
+        if let LeafOrInternal::Internal(mut internal) = self.force() {
+            let [mut left, mut right] = internal.flipped_children();
+            let left_boundary = left.flipped_boundary().into_boundary();
+            let right_boundary = right.flipped_boundary().into_boundary();
+            let parent_boundary = self.flipped_boundary().into_boundary();
+            let ctx = summary::MergeContext {
+                left_boundary,
+                right_boundary,
+                parent_boundary,
+                central: left_boundary.shared(&right_boundary).unwrap(),
+            };
+            unsafe {
+                let l = left.weight_mut();
+                let r = right.weight_mut();
+                internal.weight_mut().split(l, r, &ctx);
+            }
+        }
+    }
+
     pub fn recursively_recompute_weight_up(self)
     where
         W: Summary,

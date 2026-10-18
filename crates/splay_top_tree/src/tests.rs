@@ -73,6 +73,12 @@ impl Summary for Xor {
     fn merge(left: &Self, right: &Self, _ctx: &summary::MergeContext) -> Self {
         Self(left.0 ^ right.0)
     }
+
+    fn split(&self, left: &mut Self, right: &mut Self, _ctx: &summary::MergeContext) {
+        let l = left.0;
+        let r = right.0;
+        assert_eq!(l ^ r, self.0);
+    }
 }
 
 type NN = std::ptr::NonNull<Node<Xor>>;

@@ -128,5 +128,8 @@ pub trait Summary: Sized {
     fn create_edge(e: index::EdgeId) -> Self;
     fn create_label(l: index::LabelId) -> Self;
     fn merge(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
+    fn split(&self, left: &mut Self, right: &mut Self, ctx: &MergeContext) {
+        _ = (left, right, ctx);
+    }
     fn flip(&mut self) {}
 }
