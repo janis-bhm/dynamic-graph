@@ -1,6 +1,6 @@
 use core::fmt;
 use std::{
-    alloc::{Allocator, Layout, handle_alloc_error},
+    alloc::Allocator,
     mem,
     ptr::{self, NonNull},
 };
@@ -951,28 +951,6 @@ impl<W> Handle<W, marker::Internal> {
             child
                 .as_mut()
                 .set_parent(Some(self.node.cast::<InternalNode<W>>()));
-        }
-    }
-
-    pub fn recompute_boundary(&mut self)
-    where
-        W: Summary,
-    {
-        let [left, right] = self.flipped_children();
-        let left_boundary = left.flipped_boundary().into_boundary();
-        let right_boundary = right.flipped_boundary().into_boundary();
-        let parent_boundary = self.flipped_boundary().into_boundary();
-        let ctx = summary::MergeContext {
-            left_boundary,
-            right_boundary,
-            parent_boundary,
-            central: left_boundary.shared(&right_boundary).unwrap(),
-        };
-        unsafe {
-            self.node
-                .as_mut()
-                .weight
-                .update_boundary(left.weight(), right.weight(), &ctx);
         }
     }
 

@@ -128,8 +128,5 @@ pub trait Summary: Sized {
     fn edge(e: index::EdgeId) -> Self;
     fn label(l: index::LabelId) -> Self;
     fn combine(left: &Self, right: &Self, ctx: &MergeContext) -> Self;
-    fn update_boundary(&mut self, left: &Self, right: &Self, ctx: &MergeContext) {
-        *self = Self::combine(left, right, ctx);
-    }
     fn flip(&mut self) {}
 }

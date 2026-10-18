@@ -2,11 +2,10 @@
 //!
 #![expect(internal_features)]
 #![feature(pattern_types, pattern_type_macro, structural_match)]
-#![cfg_attr(test, feature(debug_closure_helpers))]
 
 use core::fmt;
 use std::{
-    alloc::{Allocator, Global, Layout, handle_alloc_error},
+    alloc::{Allocator, Global},
     collections::BTreeSet,
     mem::{self, MaybeUninit},
     ptr::{self, NonNull},
@@ -138,7 +137,7 @@ where
 
             let Some(parent) = node.parent() else {
                 if let LeafOrInternal::Internal(mut internal) = node.force() {
-                    internal.recompute_boundary();
+                    internal.recompute_weight();
                 }
                 return node;
             };
@@ -151,7 +150,7 @@ where
             }
 
             if let LeafOrInternal::Internal(mut internal) = node.force() {
-                internal.recompute_boundary();
+                internal.recompute_weight();
             }
 
             left = is_left_child != parent.is_flipped();
@@ -302,7 +301,7 @@ where
         node = some_node.parent().map(Handle::forget_type);
 
         if let LeafOrInternal::Internal(mut internal) = some_node.force() {
-            internal.recompute_boundary();
+            internal.recompute_weight();
         }
 
         root = Some(some_node);
