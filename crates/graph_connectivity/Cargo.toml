@@ -1,0 +1,7 @@
+[package]
+name = "graph_connectivity"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+splay_top_tree = { version = "0.1.0", path = "../splay_top_tree" }
