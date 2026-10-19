@@ -588,6 +588,40 @@ pub struct ExposedTopTree<W, A: Allocator = Global> {
     inner: TopTree<W, A>,
 }
 
+/// The weight of a currently-exposed cluster, together with a dormant handle
+/// to the [`TopTree`] it lives in.
+///
+/// While the weight is borrowed the tree is inaccessible; calling
+/// [`DormantTopTreeWeightMut::awaken`] consumes the dormant value and hands
+/// back the tree, so the weight borrow and a tree borrow can never overlap.
+pub struct DormantTopTreeWeightMut<'a, W, A: Allocator> {
+    inner: NonNull<TopTree<W, A>>,
+    weight: &'a mut W,
+}
+
+impl<'a, W, A: Allocator> DormantTopTreeWeightMut<'a, W, A> {
+    fn new(tree: &'a mut TopTree<W, A>, handle: &Handle<W, marker::Either>) -> Self {
+        // SAFETY: `handle` points into `tree`, and `tree` is borrowed for `'a`,
+        // so no other reference to the weight is reachable for `'a`.
+        let weight = unsafe { &mut (*handle.node.as_ptr()).weight };
+
+        DormantTopTreeWeightMut {
+            inner: NonNull::from(tree),
+            weight,
+        }
+    }
+
+    pub fn weight(&mut self) -> &mut W {
+        self.weight
+    }
+
+    /// Ends the weight borrow and returns the tree, which still has the same
+    /// vertices exposed.
+    pub fn awaken(self) -> &'a mut ExposedTopTree<W, A> {
+        unsafe { (&mut *self.inner.as_ptr()).as_exposed_mut() }
+    }
+}
+
 impl<W, A: Allocator> ExposedTopTree<W, A> {
     /// Returns the set of vertices in the connected component containing `v`.
     pub fn component_of(&self, v: VertexId) -> BTreeSet<VertexId> {
@@ -794,18 +828,19 @@ impl<W, A: Allocator> TopTree<W, A> {
         self.tree.incident_edge_weights(vv).map(|e| e.id)
     }
 
+    /// Exposes `v` and `w`, calls `f` with the weight of their combined
+    /// cluster and a dormant handle to the tree, and de-exposes both vertices.
     pub fn with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> R
     where
-        W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
+        W: Summary,
+        F: for<'a> FnOnce(DormantTopTreeWeightMut<'a, W, A>) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
         let meet =
             expose(w, self).expect("vertices are connected, so w must have a consuming node");
-        let aggregate = meet.weight().clone();
 
-        let result = f(self.as_exposed_mut(), aggregate);
+        let result = f(DormantTopTreeWeightMut::new(self, &meet));
 
         deexpose(w, self);
         deexpose(v, self);
@@ -813,21 +848,17 @@ impl<W, A: Allocator> TopTree<W, A> {
         result
     }
 
+    /// Like [`TopTree::with_exposed_path`], but returns `None` without
+    /// calling `f` when `w` has no incident leaves.
     pub fn try_with_exposed_path<R, F>(&mut self, v: VertexId, w: VertexId, f: F) -> Option<R>
     where
-        W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
+        W: Summary,
+        F: for<'a> FnOnce(DormantTopTreeWeightMut<'a, W, A>) -> R,
     {
         assert!(self.is_connected(v, w), "vertices must be connected");
         expose(v, self);
 
-        let result = if let Some(meet) = expose(w, self) {
-            let aggregate = meet.weight().clone();
-
-            Some(f(self.as_exposed_mut(), aggregate))
-        } else {
-            None
-        };
+        let result = expose(w, self).map(|meet| f(DormantTopTreeWeightMut::new(self, &meet)));
 
         deexpose(w, self);
         deexpose(v, self);
@@ -835,34 +866,35 @@ impl<W, A: Allocator> TopTree<W, A> {
         result
     }
 
+    /// Exposes `v`, calls `f` with the weight of `v`'s cluster and a dormant
+    /// handle to the tree, and de-exposes `v`.
+    ///
+    /// # Panics
+    /// Panics if `v` has no incident leaves.
     pub fn with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> R
     where
-        W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
+        W: Summary,
+        F: for<'a> FnOnce(DormantTopTreeWeightMut<'a, W, A>) -> R,
     {
         let v = v.into_vertex_id(self);
         let handle = expose(v, self).expect("vertex must have a consuming node");
-        let aggregate = handle.weight().clone();
 
-        let result = f(self.as_exposed_mut(), aggregate);
+        let result = f(DormantTopTreeWeightMut::new(self, &handle));
 
         deexpose(v, self);
 
         result
     }
 
+    /// Like [`TopTree::with_exposed_vertex`], but returns `None` without
+    /// calling `f` when `v` has no incident leaves.
     pub fn try_with_exposed_vertex<R, F>(&mut self, v: impl IntoVertexId, f: F) -> Option<R>
     where
-        W: Summary + Clone,
-        F: FnOnce(&mut ExposedTopTree<W, A>, W) -> R,
+        W: Summary,
+        F: for<'a> FnOnce(DormantTopTreeWeightMut<'a, W, A>) -> R,
     {
         let v = v.into_vertex_id(self);
-        let result = if let Some(handle) = expose(v, self) {
-            let aggregate = handle.weight().clone();
-            Some(f(self.as_exposed_mut(), aggregate))
-        } else {
-            None
-        };
+        let result = expose(v, self).map(|handle| f(DormantTopTreeWeightMut::new(self, &handle)));
 
         deexpose(v, self);
 

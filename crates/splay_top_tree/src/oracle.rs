@@ -161,12 +161,14 @@ impl<W: Summary + Clone + OracleAgg> Oracle<W> {
 
     /// What the top tree actually returns for an exposed path v..w.
     pub(crate) fn exposed_path(&mut self, v: VertexId, w: VertexId) -> W {
-        self.tree.with_exposed_path(v, w, |_, weight| weight)
+        self.tree
+            .with_exposed_path(v, w, |mut dormant| *dormant.weight())
     }
 
     /// What the top tree actually returns for an exposed vertex (None if v has no leaves).
     pub(crate) fn exposed_vertex(&mut self, v: VertexId) -> Option<W> {
-        self.tree.try_with_exposed_vertex(v, |_, weight| weight)
+        self.tree
+            .try_with_exposed_vertex(v, |mut dormant| *dormant.weight())
     }
 
     /// Layer-1 check via the vertex query form.
@@ -451,7 +453,7 @@ fn oracle_reports_missing_consuming_node() {
     let mut oracle = Oracle::<Xor>::new(1);
     let vertex = oracle.vertices()[0];
     assert_eq!(oracle.exposed_vertex(vertex), None);
-    oracle.tree_mut().with_exposed_vertex(vertex, |_, _| ());
+    oracle.tree_mut().with_exposed_vertex(vertex, |_| ());
 }
 
 // Layer 2: summaries that distinguish compresses (path + path) from rakes
