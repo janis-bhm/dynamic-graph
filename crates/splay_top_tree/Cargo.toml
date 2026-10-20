@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 bitflags = "2.13.1"
 slotvec = { version = "0.1.0", path = "../slotvec" }
+tagged_ptr = { version = "0.1.0", path = "../tagged_ptr" }

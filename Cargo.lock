@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "augmented_tree"
 version = "0.1.0"
+dependencies = [
+ "tagged_ptr",
+]
 
 [[package]]
 name = "bitflags"
@@ -52,7 +55,12 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "slotvec",
+ "tagged_ptr",
 ]
+
+[[package]]
+name = "tagged_ptr"
+version = "0.1.0"
 
 [[package]]
 name = "top_tree"

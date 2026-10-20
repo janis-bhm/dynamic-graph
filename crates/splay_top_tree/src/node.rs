@@ -7,8 +7,9 @@ use std::{
 
 use crate::{
     LeafOrInternal, Summary, TopTree, VertexId, boundary::BoundaryVertices, summary, tree,
-    tree::Endpoints, util::TaggedPtr,
+    tree::Endpoints,
 };
+use tagged_ptr::TaggedPtr;
 
 #[repr(u8)]
 pub enum NodeKind {
@@ -50,7 +51,7 @@ impl NodeFlags {
     }
 }
 
-unsafe impl crate::util::Tag for NodeFlags {
+unsafe impl tagged_ptr::Tag for NodeFlags {
     const BITS: u32 = 4;
 
     fn into_usize(self) -> usize {
