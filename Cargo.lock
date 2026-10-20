@@ -33,6 +33,7 @@ dependencies = [
 name = "graph_connectivity"
 version = "0.1.0"
 dependencies = [
+ "augmented_tree",
  "splay_top_tree",
 ]
 

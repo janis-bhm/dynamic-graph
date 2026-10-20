@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+augmented_tree = { version = "0.1.0", path = "../augmented_tree" }
 splay_top_tree = { version = "0.1.0", path = "../splay_top_tree" }
