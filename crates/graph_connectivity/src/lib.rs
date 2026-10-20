@@ -333,10 +333,20 @@ impl core::ops::BitAnd<Level> for &Size {
     }
 }
 
+impl core::ops::BitAnd<Level> for Incident {
+    type Output = Incident;
+
+    fn bitand(self, rhs: Level) -> Self::Output {
+        let mask = (1u64 << rhs.as_bitmask()) - 1;
+        Incident {
+            bits: self.bits & mask,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PartEntry {
     part: Size,
-    diag: Size,
     incident: Incident,
 }
 
@@ -344,7 +354,6 @@ impl Default for PartEntry {
     fn default() -> Self {
         Self {
             part: Size::empty(),
-            diag: Size::empty(),
             incident: Incident::empty(),
         }
     }
@@ -354,7 +363,6 @@ impl Aggregate for PartEntry {
     fn reduce(&self, other: &Self) -> Self {
         Self {
             part: &self.part + &other.part,
-            diag: &self.diag + &other.diag,
             incident: self.incident + other.incident,
         }
     }
@@ -362,7 +370,6 @@ impl Aggregate for PartEntry {
     fn identity() -> Self {
         Self {
             part: Size::empty(),
-            diag: Size::empty(),
             incident: Incident::empty(),
         }
     }
@@ -448,7 +455,7 @@ impl Summary for ClusterData {
                 .into_iter()
                 .filter(|(_, b)| *b)
                 .min_by_key(|(c, _)| c.cover)
-                .expect("at least one child must be a path child")
+                .expect("at least one chfild must be a path child")
         });
 
         let cover = min_cover_path_child
@@ -477,192 +484,189 @@ impl Summary for ClusterData {
 
         // FS.Merge
 
-        struct ChildData<'a> {
-            v: VertexId,
-            b: Boundary,
-            cl: &'a ClusterData,
-            part: [PartTree; 2],
-            undo: [Option<PartTree>; 2],
-        }
+        let (size, part, num_vertices, incident) =
+            match ((left, ctx.left_boundary), (right, ctx.right_boundary)) {
+                (
+                    (path, path_boundary @ Boundary::Two { left: a, .. }),
+                    (point, Boundary::One(_)),
+                )
+                | (
+                    (point, Boundary::One(_)),
+                    (path, path_boundary @ Boundary::Two { right: a, .. }),
+                ) if !ctx.parent_boundary.is_path() => {
+                    // heterogeneous point cluster
 
-        match ((left, ctx.left_boundary), (right, ctx.right_boundary)) {
-            (
-                (path, path_boundary @ Boundary::Two { .. }),
-                (point, point_boundary @ Boundary::One(_)),
-            )
-            | (
-                (point, point_boundary @ Boundary::One(_)),
-                (path, path_boundary @ Boundary::Two { .. }),
-            ) if !ctx.parent_boundary.is_path() => {
-                // heterogeneous point cluster
-                _ = (path, path_boundary, point, point_boundary);
-            }
-            ((l, lb), (r, rb)) => {
-                let size = &l.size + &r.size;
+                    let a_tree = &path.part[path_boundary.index_of(a).unwrap()];
 
-                let c = lb.shared(&rb).expect("children must share a vertex");
+                    let l = path.pending_cover.max(path.pending_uncover);
+                    let diag = a_tree
+                        .range(l.increment()..)
+                        .map(|(k, v)| PartEntry {
+                            part: &v.part & *k,
+                            incident: v.incident & *k,
+                        })
+                        .reduce(|acc, x| PartEntry {
+                            part: &acc.part + &x.part,
+                            incident: acc.incident + x.incident,
+                        })
+                        .unwrap_or_default();
 
-                let (vl, vr) = match ctx.parent_boundary {
-                    Boundary::Two { left, right } => {
-                        assert!(lb.contains(left) && rb.contains(right));
-                        (left, right)
+                    let prefix = a_tree.range_aggregate(..=l);
+
+                    let size = &diag.part + &(&prefix.part & l);
+
+                    let incident =
+                        diag.incident + (prefix.incident & l) + (point.incident & path.cover);
+
+                    let parts = [
+                        PartTree::from_iter([(
+                            path.cover,
+                            PartEntry {
+                                part: size.clone(),
+                                incident,
+                            },
+                        )]),
+                        PartTree::new(),
+                    ];
+
+                    (size, parts, ctx.parent_boundary.count() as u32, incident)
+                }
+                ((l, lb), (r, rb)) => {
+                    let size = &l.size + &r.size;
+
+                    let c = lb.shared(&rb).expect("children must share a vertex");
+
+                    let (vl, vr) = match ctx.parent_boundary {
+                        Boundary::Two { left, right } => {
+                            assert!(lb.contains(left) && rb.contains(right));
+                            (left, right)
+                        }
+                        _ => (c, c),
+                    };
+
+                    let step1 = |b: Boundary, child: &Self| {
+                        let l = child.pending_cover.max(child.pending_uncover);
+
+                        match b {
+                            Boundary::Two { left, right } => [left, right].map(|v| {
+                                let tree = &child.part[b.index_of(v).unwrap()];
+
+                                let sum = &tree.range_aggregate(..=l);
+
+                                let mut gt_tree: PartTree = tree
+                                    .range(l.increment()..)
+                                    .map(|(k, v)| (*k, v.clone()))
+                                    .collect();
+
+                                gt_tree.entry(child.pending_cover).update_or_insert_with(
+                                    |entry| {
+                                        entry.part += &sum.part;
+                                        entry.incident += sum.incident;
+                                    },
+                                    || sum.clone(),
+                                );
+
+                                gt_tree
+                            }),
+                            Boundary::One(_) => child.part.clone(),
+                            Boundary::None => {
+                                unreachable!("must have boundary")
+                            }
+                        }
+                    };
+
+                    struct ChildData<'a> {
+                        part: [PartTree; 2],
+                        b: Boundary,
+                        v: VertexId,
+                        cl: &'a ClusterData,
                     }
-                    _ => (c, c),
-                };
 
-                let mut left = ChildData {
-                    v: vl,
-                    b: lb,
-                    cl: l,
-                    part: [PartTree::new(), PartTree::new()],
-                    undo: [None, None],
-                };
-                let mut right = ChildData {
-                    v: vr,
-                    b: rb,
-                    cl: r,
-                    part: [PartTree::new(), PartTree::new()],
-                    undo: [None, None],
-                };
+                    let l = ChildData {
+                        part: step1(ctx.left_boundary, left),
+                        b: ctx.left_boundary,
+                        v: vl,
+                        cl: left,
+                    };
 
-                let mut parts = [PartTree::new(), PartTree::new()];
+                    let r = ChildData {
+                        part: step1(ctx.right_boundary, right),
+                        b: ctx.right_boundary,
+                        v: vr,
+                        cl: right,
+                    };
 
-                for child @ &mut ChildData { v, b, cl, .. } in [&mut left, &mut right] {
-                    let l = cl.pending_cover.max(cl.pending_uncover);
+                    let step2 = |x: &ChildData, y: &ChildData| {
+                        let cover = x.cl.cover;
 
-                    if v != c {
-                        for v in [v, c] {
-                            let tree = &cl.part[b.index_of(v).unwrap()];
-                            let sum = &tree.aggregate().part;
-                            let diag = sum & cl.pending_cover;
+                        let x_tree = &x.part[x.b.index_of(x.v).unwrap()];
+                        let y_tree = &y.part[y.b.index_of(c).unwrap()];
+                        let suffix = y_tree.range_aggregate(x.cl.cover..);
 
-                            let leq_tree: PartTree =
-                                tree.range(..=l).map(|(k, v)| (*k, v.clone())).collect();
+                        let x_at_cover = x_tree.get(&x.cl.cover).cloned().unwrap_or_default();
 
-                            let mut gt_tree: PartTree =
-                                tree.range(l..).map(|(k, v)| (*k, v.clone())).collect();
+                        let part_at_cover = &x_at_cover.part + &suffix.part;
+                        let inc_at_cover = x_at_cover.incident + suffix.incident;
 
-                            gt_tree.entry(cl.pending_cover).update_or_insert_with(
+                        let _diag_at_cover =
+                            &(&x_at_cover.part & x.cl.cover) + &(&suffix.part & x.cl.cover);
+
+                        let mut result = if x.v == c {
+                            PartTree::from_iter([(
+                                cover,
+                                PartEntry {
+                                    part: part_at_cover,
+                                    incident: inc_at_cover,
+                                },
+                            )])
+                        } else {
+                            let mut tree = x_tree
+                                .range(cover.increment()..)
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect::<PartTree>();
+
+                            tree.entry(cover).update_or_insert_with(
                                 |entry| {
-                                    entry.part += sum;
-                                    entry.diag += &diag;
+                                    entry.part += &part_at_cover;
+                                    entry.incident += inc_at_cover;
                                 },
                                 || PartEntry {
-                                    part: sum.clone(),
-                                    diag: diag.clone(),
-                                    incident: Incident::empty(),
+                                    part: part_at_cover.clone(),
+                                    incident: inc_at_cover,
                                 },
                             );
 
-                            child.undo[b.index_of(v).unwrap()] = Some(leq_tree);
-                            child.part[b.index_of(v).unwrap()] = gt_tree;
+                            tree
+                        };
+
+                        if y.v != c {
+                            let prefix = y_tree
+                                .range(..cover)
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect::<PartTree>();
+
+                            result.extend(&prefix);
                         }
-                    } else {
-                        let tree = cl.part[b.index_of(v).unwrap()].clone();
-                        child.part[b.index_of(c).unwrap()] = tree;
-                        child.undo = [None, None];
+
+                        result
                     };
+
+                    let parts = match ctx.parent_boundary {
+                        Boundary::Two { .. } => [step2(&l, &r), step2(&r, &l)],
+                        Boundary::One(_) => [step2(&l, &r), PartTree::new()],
+                        Boundary::None => [PartTree::new(), PartTree::new()],
+                    };
+
+                    let num_vertices = match (left_is_path, right_is_path) {
+                        (true, true) => left.num_vertices + right.num_vertices - 1,
+                        (true, false) => left.num_vertices,
+                        (false, true) => right.num_vertices,
+                        (false, false) => 0,
+                    };
+
+                    (size, parts, num_vertices, left.incident + right.incident)
                 }
-
-                let mut asdf = |x: &mut ChildData, y: &mut ChildData| {
-                    let x_tree = &x.part[x.b.index_of(x.v).unwrap()];
-                    let y_tree = &y.part[y.b.index_of(c).unwrap()];
-                    //asd
-                    let suffix = y_tree.range_aggregate(x.cl.cover..);
-
-                    let x_at_cover = x_tree.get(&x.cl.cover).cloned().unwrap_or_default();
-
-                    let part = &x_at_cover.part + &suffix.part;
-                    let diag = &x_at_cover.diag + &(&suffix.part & x.cl.cover);
-
-                    let (xtree2, xundo2) = if c == x.v {
-                        (
-                            PartTree::from_iter([(
-                                Level::MAX,
-                                PartEntry {
-                                    part: x.cl.size.clone(),
-                                    diag: x.cl.size.clone(),
-                                    incident: Incident::empty(),
-                                },
-                            )]),
-                            None,
-                        )
-                    } else {
-                        (
-                            x_tree
-                                .range(x.cl.cover.increment()..)
-                                .map(|(k, v)| (*k, v.clone()))
-                                .collect::<PartTree>(),
-                            Some(
-                                x_tree
-                                    .range(..=x.cl.cover)
-                                    .map(|(k, v)| (*k, v.clone()))
-                                    .collect::<PartTree>(),
-                            ),
-                        )
-                    };
-
-                    let (ytree3, yundo3) = if c == y.v {
-                        (
-                            None,
-                            PartTree::from_iter([(
-                                Level::MAX,
-                                PartEntry {
-                                    part: y.cl.size.clone(),
-                                    diag: y.cl.size.clone(),
-                                    incident: Incident::empty(),
-                                },
-                            )]),
-                        )
-                    } else {
-                        (
-                            Some(
-                                y_tree
-                                    .range(..x.cl.cover)
-                                    .map(|(k, v)| (*k, v.clone()))
-                                    .collect::<PartTree>(),
-                            ),
-                            y_tree
-                                .range(x.cl.cover..)
-                                .map(|(k, v)| (*k, v.clone()))
-                                .collect::<PartTree>(),
-                        )
-                    };
-
-                    let mut tree = xtree2.clone();
-                    tree.insert(
-                        x.cl.cover,
-                        PartEntry {
-                            part,
-                            diag,
-                            incident: Incident::empty(),
-                        },
-                    );
-                    tree.extend(&ytree3.unwrap_or_default());
-
-                    parts[ctx.parent_boundary.index_of(x.v).unwrap()] = tree;
-
-                    let _ = (xtree2, xundo2, ytree3, yundo3, tree);
-                };
-
-                asdf(&mut left, &mut right);
-                asdf(&mut right, &mut left);
-
-                _ = (l, r, c);
-            }
-        }
-
-        if parent_is_path {
-            let size = &left.size + &right.size;
-        } else if let Some((path, point)) = match ((left, left_is_path), (right, right_is_path)) {
-            ((l, true), (r, false)) => Some((l, r)),
-            ((l, false), (r, true)) => Some((r, l)),
-            _ => None,
-        } {
-            // heterogeneous point cluster
-        } else {
-            // both children are point clusters
-        }
+            };
 
         Self {
             cover,
@@ -671,7 +675,10 @@ impl Summary for ClusterData {
             pending_uncover: Level::Uncovered,
             min_path_edge,
             min_global_edge,
-            ..todo!()
+            size,
+            incident,
+            num_vertices,
+            part,
         }
     }
 }
