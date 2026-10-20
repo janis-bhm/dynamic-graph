@@ -12,7 +12,7 @@ pub enum Boundary {
 }
 
 impl Boundary {
-    pub(crate) fn shared(&self, other: &Self) -> Option<VertexId> {
+    pub fn shared(&self, other: &Self) -> Option<VertexId> {
         match (self, other) {
             (Boundary::None, _) | (_, Boundary::None) => None,
             (Boundary::One(v1), Boundary::One(v2)) => {
@@ -63,6 +63,36 @@ impl Boundary {
     /// Returns whether the cluster is a path cluster.
     pub fn is_path(self) -> bool {
         matches!(self, Boundary::Two { .. })
+    }
+
+    pub fn contains(self, v: VertexId) -> bool {
+        match self {
+            Boundary::None => false,
+            Boundary::One(u) => u == v,
+            Boundary::Two { left, right } => left == v || right == v,
+        }
+    }
+
+    pub fn index_of(self, v: VertexId) -> Option<usize> {
+        match self {
+            Boundary::None => None,
+            Boundary::One(u) => {
+                if u == v {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+            Boundary::Two { left, right } => {
+                if left == v {
+                    Some(0)
+                } else if right == v {
+                    Some(1)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Returns the boundary vertices in left-to-right slots.

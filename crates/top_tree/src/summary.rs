@@ -42,6 +42,14 @@ impl Boundary {
         }
     }
 
+    pub fn contains(self, v: VertexId) -> bool {
+        match self {
+            Boundary::None => false,
+            Boundary::One(u) => u == v,
+            Boundary::Two { left, right } => left == v || right == v,
+        }
+    }
+
     /// Returns whether the cluster is a path cluster.
     pub fn is_path(self) -> bool {
         matches!(self, Boundary::Two { .. })

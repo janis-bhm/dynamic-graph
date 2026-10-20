@@ -19,7 +19,7 @@ use crate::{
 
 pub use index::{EdgeId, LabelId, VertexId};
 use slotvec::SlotVec;
-pub use summary::{MergeContext, Summary};
+pub use summary::{Boundary, MergeContext, Summary};
 
 mod boundary;
 mod index;
