@@ -38,6 +38,40 @@ fn empty_tree() {
 }
 
 #[test]
+fn from_iter_matches_std_btreemap() {
+    let input = (0..64)
+        .rev()
+        .map(|key| (key, key as i64 + 100))
+        .chain((0..64).map(|key| (key, key as i64 + 1000)));
+    let tree: BTree<i32, Sum> = input
+        .clone()
+        .map(|(key, value)| (key, Sum(value)))
+        .collect();
+    let reference: BTreeMap<i32, i64> = input.collect();
+
+    assert_eq!(tree.len(), reference.len());
+    assert_eq!(
+        tree.iter()
+            .map(|(&key, value)| (key, value.0))
+            .collect::<Vec<_>>(),
+        reference
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(tree.aggregate().0, reference.values().copied().sum::<i64>());
+}
+
+#[test]
+fn from_iter_empty() {
+    let tree = BTree::<i32, Sum>::from_iter(std::iter::empty());
+
+    assert!(tree.is_empty());
+    assert_eq!(tree.len(), 0);
+    assert_eq!(tree.aggregate(), &Sum(0));
+}
+
+#[test]
 fn simple_insert_get_remove() {
     let mut tree = BTree::new();
     assert_eq!(tree.insert(1, Sum(10)), None);
@@ -377,6 +411,190 @@ fn double_ended_iteration() {
     }
     assert_eq!(seen.len(), n as usize);
     assert_eq!(iter.len(), 0);
+}
+
+#[test]
+fn range_matches_std_btreemap() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    let mut reference: BTreeMap<i32, i64> = BTreeMap::new();
+    for key in 0..40 {
+        let value = key as i64 * 2;
+        tree.insert(key, Sum(value));
+        reference.insert(key, value);
+    }
+
+    for lo in -5..45 {
+        for hi in lo..45 {
+            assert_eq!(
+                tree.range(lo..=hi)
+                    .map(|(&k, v)| (k, v.0))
+                    .collect::<Vec<_>>(),
+                reference
+                    .range(lo..=hi)
+                    .map(|(&k, &v)| (k, v))
+                    .collect::<Vec<_>>(),
+                "inclusive {lo}..={hi}"
+            );
+
+            // Equal excluded bounds intentionally panic, as they do in std.
+            if lo < hi {
+                let bounds = (Bound::Excluded(lo), Bound::Excluded(hi));
+                assert_eq!(
+                    tree.range(bounds)
+                        .map(|(&k, v)| (k, v.0))
+                        .collect::<Vec<_>>(),
+                    reference
+                        .range(bounds)
+                        .map(|(&k, &v)| (k, v))
+                        .collect::<Vec<_>>(),
+                    "exclusive ({lo}, {hi})"
+                );
+            }
+        }
+    }
+
+    let cases = [
+        (Bound::Unbounded, Bound::Unbounded),
+        (Bound::Unbounded, Bound::Excluded(10)),
+        (Bound::Unbounded, Bound::Included(10)),
+        (Bound::Included(10), Bound::Unbounded),
+        (Bound::Included(5), Bound::Excluded(10)),
+        (Bound::Unbounded, Bound::Excluded(10)),
+        (Bound::Excluded(5), Bound::Unbounded),
+    ];
+    for bounds in cases {
+        assert_eq!(
+            tree.range(bounds)
+                .map(|(&k, v)| (k, v.0))
+                .collect::<Vec<_>>(),
+            reference
+                .range(bounds)
+                .map(|(&k, &v)| (k, v))
+                .collect::<Vec<_>>(),
+            "bounds {bounds:?}"
+        );
+    }
+
+    assert_eq!(
+        tree.range(..).map(|(&k, v)| (k, v.0)).collect::<Vec<_>>(),
+        reference.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        tree.range(..10).map(|(&k, v)| (k, v.0)).collect::<Vec<_>>(),
+        reference
+            .range(..10)
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        tree.range(..=10)
+            .map(|(&k, v)| (k, v.0))
+            .collect::<Vec<_>>(),
+        reference
+            .range(..=10)
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        tree.range(10..).map(|(&k, v)| (k, v.0)).collect::<Vec<_>>(),
+        reference
+            .range(10..)
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn range_double_ended_iteration() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    for key in 0..40 {
+        tree.insert(key, Sum(key as i64));
+    }
+
+    for bounds in [
+        (Bound::Included(3), Bound::Excluded(17)),
+        (Bound::Excluded(12), Bound::Included(31)),
+        (Bound::Unbounded, Bound::Included(8)),
+    ] {
+        let forward = tree
+            .range(bounds)
+            .map(|(&k, v)| (k, v.0))
+            .collect::<Vec<_>>();
+        let backward = tree
+            .range(bounds)
+            .rev()
+            .map(|(&k, v)| (k, v.0))
+            .collect::<Vec<_>>();
+        assert_eq!(backward, forward.iter().rev().copied().collect::<Vec<_>>());
+    }
+
+    let mut iter = tree.range(5..=24);
+    let mut seen = Vec::new();
+    while let Some((key, _)) = iter.next() {
+        seen.push(*key);
+        if let Some((key, _)) = iter.next_back() {
+            seen.push(*key);
+        }
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, (5..=24).collect::<Vec<_>>());
+    assert_eq!(iter.count(), 0);
+}
+
+#[test]
+fn range_empty_tree_does_not_validate_bounds() {
+    let tree: BTree<i32, Sum> = BTree::new();
+    assert_eq!(tree.range(..).count(), 0);
+    assert_eq!(tree.range(3..=7).count(), 0);
+    assert_eq!(
+        tree.range((Bound::Excluded(3), Bound::Excluded(3))).count(),
+        0
+    );
+
+    let reference: BTreeMap<i32, i64> = BTreeMap::new();
+    assert_eq!(
+        reference
+            .range((Bound::Excluded(3), Bound::Excluded(3)))
+            .count(),
+        0
+    );
+}
+
+#[test]
+#[should_panic(expected = "range start is greater than range end in BTreeMap")]
+fn range_panics_on_reversed_bounds() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    tree.insert(1, Sum(1));
+    tree.range((Bound::Included(3), Bound::Excluded(2))).count();
+}
+
+#[test]
+#[should_panic(expected = "range start and end are equal and excluded in BTreeMap")]
+fn range_panics_on_equal_excluded_bounds() {
+    let mut tree: BTree<i32, Sum> = BTree::new();
+    tree.insert(1, Sum(1));
+    tree.range((Bound::Excluded(3), Bound::Excluded(3))).count();
+}
+
+#[test]
+fn range_accepts_borrowed_bound_types() {
+    let mut tree: BTree<String, Sum> = BTree::new();
+    for (i, key) in ["ant", "bee", "cat"].into_iter().enumerate() {
+        tree.insert(key.to_owned(), Sum(i as i64));
+    }
+
+    assert_eq!(
+        tree.range::<str, _>((Bound::Included("b"), Bound::Excluded("d")))
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        ["bee", "cat"]
+    );
+    assert_eq!(
+        tree.range::<str, _>((Bound::Included("a"), Bound::Unbounded))
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        ["ant", "bee", "cat"]
+    );
 }
 
 /// A key that counts how many keys have been created and dropped.

@@ -24,6 +24,7 @@ use std::{
     borrow::Borrow,
     cmp::Ordering,
     fmt,
+    iter::FusedIterator,
     marker::PhantomData,
     mem::{self, MaybeUninit},
     ops::{Bound, RangeBounds},
@@ -167,6 +168,24 @@ enum SearchResult<BorrowType, K, V, FoundType, GoDownType> {
 enum IndexResult {
     KV(usize),
     Edge(usize),
+}
+
+#[derive(Clone, Copy)]
+enum SearchBound<T> {
+    Included(T),
+    Excluded(T),
+    AllIncluded,
+    AllExcluded,
+}
+
+impl<T> SearchBound<T> {
+    fn from_range(range_bound: Bound<T>) -> Self {
+        match range_bound {
+            Bound::Included(t) => SearchBound::Included(t),
+            Bound::Excluded(t) => SearchBound::Excluded(t),
+            Bound::Unbounded => SearchBound::AllIncluded,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1092,67 @@ impl<BorrowType, K, V, NodeType> NodeRef<BorrowType, K, V, NodeType> {
         }
         IndexResult::Edge(keys.len())
     }
+
+    fn find_lower_bound_index<'r, Q>(
+        &self,
+        bound: SearchBound<&'r Q>,
+    ) -> (usize, SearchBound<&'r Q>)
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q>,
+    {
+        match bound {
+            SearchBound::Included(key) => match
+                // SAFETY: The start index 0 is always a valid edge index because it is <= `self.len()`.
+                unsafe { self.find_key_index(key, 0) }
+            {
+                IndexResult::KV(idx) => (idx, SearchBound::AllExcluded),
+                IndexResult::Edge(idx) => (idx, bound),
+            },
+            SearchBound::Excluded(key) => match
+                // SAFETY: The start index 0 is always a valid edge index because it is <= `self.len()`.
+                unsafe { self.find_key_index(key, 0) }
+            {
+                IndexResult::KV(idx) => (idx + 1, SearchBound::AllIncluded),
+                IndexResult::Edge(idx) => (idx, bound),
+            },
+            SearchBound::AllIncluded => (0, SearchBound::AllIncluded),
+            SearchBound::AllExcluded => (self.len(), SearchBound::AllExcluded),
+        }
+    }
+
+    /// # Safety
+    /// `start_index` must be a valid edge index for the node.
+    unsafe fn find_upper_bound_index<'r, Q>(
+        &self,
+        bound: SearchBound<&'r Q>,
+        start_index: usize,
+    ) -> (usize, SearchBound<&'r Q>)
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q>,
+    {
+        debug_assert!(start_index <= self.len());
+
+        match bound {
+            SearchBound::Included(key) => match
+                // SAFETY: The caller guarantees `start_index` is a valid edge index (<= `self.len()`), per this function's `# Safety` doc.
+                unsafe { self.find_key_index(key, start_index) }
+            {
+                IndexResult::KV(idx) => (idx + 1, SearchBound::AllExcluded),
+                IndexResult::Edge(idx) => (idx, bound),
+            },
+            SearchBound::Excluded(key) => match
+                // SAFETY: The caller guarantees `start_index` is a valid edge index (<= `self.len()`), per this function's `# Safety` doc.
+                unsafe { self.find_key_index(key, start_index) }
+            {
+                IndexResult::KV(idx) => (idx, SearchBound::AllIncluded),
+                IndexResult::Edge(idx) => (idx, bound),
+            },
+            SearchBound::AllIncluded => (self.len(), SearchBound::AllIncluded),
+            SearchBound::AllExcluded => (start_index, SearchBound::AllExcluded),
+        }
+    }
 }
 
 impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Either> {
@@ -1092,6 +1172,141 @@ impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Eit
                     Force::Internal(internal) => internal.descend(),
                 },
             };
+        }
+    }
+}
+
+impl<BorrowType: marker::BorrowType, K, V> NodeRef<BorrowType, K, V, marker::Either> {
+    fn search_tree_for_bifurcation<Q, R>(
+        mut self,
+        range: &R,
+    ) -> Result<
+        (
+            NodeRef<BorrowType, K, V, marker::Either>,
+            usize,
+            usize,
+            SearchBound<&Q>,
+            SearchBound<&Q>,
+        ),
+        Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>,
+    >
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q>,
+        R: RangeBounds<Q>,
+    {
+        let (start, end) = (range.start_bound(), range.end_bound());
+        match (start, end) {
+            (Bound::Excluded(s), Bound::Excluded(e)) if s == e => {
+                panic!("range start and end are equal and excluded in BTreeMap")
+            }
+            (Bound::Included(s) | Bound::Excluded(s), Bound::Included(e) | Bound::Excluded(e))
+                if s > e =>
+            {
+                panic!("range start is greater than range end in BTreeMap")
+            }
+            _ => {}
+        }
+        let mut lower_bound = SearchBound::from_range(start);
+        let mut upper_bound = SearchBound::from_range(end);
+        loop {
+            let (lower_edge_idx, lower_child_bound) = self.find_lower_bound_index(lower_bound);
+            // SAFETY: `find_lower_bound_index` returns an edge index in `0..=self.len()`, which is the precondition of `find_upper_bound_index`.
+            let (upper_edge_idx, upper_child_bound) =
+                unsafe { self.find_upper_bound_index(upper_bound, lower_edge_idx) };
+            if lower_edge_idx < upper_edge_idx {
+                return Ok((
+                    self,
+                    lower_edge_idx,
+                    upper_edge_idx,
+                    lower_child_bound,
+                    upper_child_bound,
+                ));
+            }
+            debug_assert_eq!(lower_edge_idx, upper_edge_idx);
+            // SAFETY: `lower_edge_idx` is a valid edge index (<= `self.len()`) returned by the bound search, and here it equals the upper edge index.
+            let common_edge = unsafe { Handle::new_edge(self, lower_edge_idx) };
+            match common_edge.force() {
+                Force::Leaf(common_edge) => return Err(common_edge),
+                Force::Internal(common_edge) => {
+                    self = common_edge.descend();
+                    lower_bound = lower_child_bound;
+                    upper_bound = upper_child_bound;
+                }
+            }
+        }
+    }
+
+    fn find_lower_bound_edge<Q>(
+        self,
+        bound: SearchBound<&Q>,
+    ) -> (Handle<Self, marker::Edge>, SearchBound<&Q>)
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q>,
+    {
+        let (edge_idx, bound) = self.find_lower_bound_index(bound);
+        // SAFETY: `find_lower_bound_index` returns an index in `0..=self.len()`.
+        let edge = unsafe { Handle::new_edge(self, edge_idx) };
+        (edge, bound)
+    }
+
+    fn find_upper_bound_edge<Q>(
+        self,
+        bound: SearchBound<&Q>,
+    ) -> (Handle<Self, marker::Edge>, SearchBound<&Q>)
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q>,
+    {
+        // SAFETY: The start index 0 is always a valid edge index because it is <= `self.len()`.
+        let (edge_idx, bound) = unsafe { self.find_upper_bound_index(bound, 0) };
+        // SAFETY: `find_upper_bound_index` returns an index in `0..=self.len()`.
+        let edge = unsafe { Handle::new_edge(self, edge_idx) };
+        (edge, bound)
+    }
+}
+
+impl<'a, K: 'a, V: 'a> NodeRef<marker::Immut<'a>, K, V, marker::Either> {
+    fn range_search<Q, R>(self, range: R) -> Range<'a, K, V>
+    where
+        Q: ?Sized + Ord,
+        K: Borrow<Q> + Ord,
+        R: RangeBounds<Q>,
+    {
+        match self.search_tree_for_bifurcation(&range) {
+            Err(_) => Range {
+                front: None,
+                back: None,
+            },
+            Ok((
+                node,
+                lower_edge_idx,
+                upper_edge_idx,
+                mut lower_child_bound,
+                mut upper_child_bound,
+            )) => {
+                // SAFETY: `search_tree_for_bifurcation` returns edge indices with `lower_edge_idx < upper_edge_idx <= node.len()`.
+                let mut lower_edge = unsafe { Handle::new_edge(node, lower_edge_idx) };
+                let mut upper_edge = unsafe { Handle::new_edge(node, upper_edge_idx) };
+                loop {
+                    match (lower_edge.force(), upper_edge.force()) {
+                        (Force::Leaf(front), Force::Leaf(back)) => {
+                            return Range {
+                                front: Some(front),
+                                back: Some(back),
+                            };
+                        }
+                        (Force::Internal(lower), Force::Internal(upper)) => {
+                            (lower_edge, lower_child_bound) =
+                                lower.descend().find_lower_bound_edge(lower_child_bound);
+                            (upper_edge, upper_child_bound) =
+                                upper.descend().find_upper_bound_edge(upper_child_bound);
+                        }
+                        _ => unreachable!("BTree has different depths"),
+                    }
+                }
+            }
         }
     }
 }
@@ -2145,6 +2360,102 @@ impl<'a, K: 'a, V: 'a> DoubleEndedIterator for Iter<'a, K, V> {
 
 impl<'a, K: 'a, V: 'a> ExactSizeIterator for Iter<'a, K, V> {}
 
+/// An iterator over a sub-range of the entries of a [`BTree`], in ascending
+/// key order.
+///
+/// Created by [`BTree::range`].
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct Range<'a, K, V> {
+    front: Option<Handle<NodeRef<marker::Immut<'a>, K, V, marker::Leaf>, marker::Edge>>,
+    back: Option<Handle<NodeRef<marker::Immut<'a>, K, V, marker::Leaf>, marker::Edge>>,
+}
+
+impl<'a, K: 'a, V: 'a> Iterator for Range<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let front = self.front?;
+        if Some(front) == self.back {
+            return None;
+        }
+        match front.next_kv() {
+            Ok(kv) => {
+                self.front = Some(kv.next_leaf_edge());
+                Some(kv.into_kv())
+            }
+            Err(_) => {
+                self.front = None;
+                self.back = None;
+                None
+            }
+        }
+    }
+
+    fn last(mut self) -> Option<Self::Item> {
+        self.next_back()
+    }
+
+    fn min(mut self) -> Option<Self::Item>
+    where
+        Self::Item: Ord,
+    {
+        self.next()
+    }
+
+    fn max(mut self) -> Option<Self::Item>
+    where
+        Self::Item: Ord,
+    {
+        self.next_back()
+    }
+}
+
+impl<'a, K: 'a, V: 'a> DoubleEndedIterator for Range<'a, K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let back = self.back?;
+        if Some(back) == self.front {
+            return None;
+        }
+        match back.next_back_kv() {
+            Ok(kv) => {
+                self.back = Some(kv.next_back_leaf_edge());
+                Some(kv.into_kv())
+            }
+            Err(_) => {
+                self.front = None;
+                self.back = None;
+                None
+            }
+        }
+    }
+}
+
+impl<'a, K: 'a, V: 'a> FusedIterator for Range<'a, K, V> {}
+
+impl<'a, K: 'a, V: 'a> Clone for Range<'a, K, V> {
+    fn clone(&self) -> Self {
+        Range {
+            front: self.front,
+            back: self.back,
+        }
+    }
+}
+
+impl<'a, K: 'a, V: 'a> Default for Range<'a, K, V> {
+    fn default() -> Self {
+        Range {
+            front: None,
+            back: None,
+        }
+    }
+}
+
+impl<'a, K: fmt::Debug + 'a, V: fmt::Debug + 'a> fmt::Debug for Range<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The public tree
 // ---------------------------------------------------------------------------
@@ -2420,6 +2731,24 @@ impl<K, V: Aggregate> BTree<K, V> {
         }
     }
 
+    /// Constructs a double-ended iterator over a sub-range of entries.
+    ///
+    /// Accepts the same bounds as [`std::collections::BTreeMap::range`]. Panics if
+    /// `start > end`, or if `start == end` and both bounds are excluded.
+    pub fn range<T, R>(&self, range: R) -> Range<'_, K, V>
+    where
+        T: ?Sized + Ord,
+        K: Borrow<T> + Ord,
+        R: RangeBounds<T>,
+    {
+        if self.is_empty() {
+            // std's BTreeMap has no root when empty, so it does not validate bounds.
+            Range::default()
+        } else {
+            self.root.reborrow().range_search(range)
+        }
+    }
+
     /// An iterator over the keys in ascending order.
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.iter().map(|(k, _)| k)
@@ -2540,6 +2869,16 @@ fn key_at_or_above<K: Ord>(k: &K, upper: Bound<&K>) -> bool {
 impl<K, V: Aggregate> Default for BTree<K, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K: Ord, V: Aggregate> FromIterator<(K, V)> for BTree<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut tree = Self::new();
+        for (key, value) in iter {
+            tree.insert(key, value);
+        }
+        tree
     }
 }
 
