@@ -1,6 +1,8 @@
 #![expect(internal_features)]
 #![feature(pattern_type_macro, pattern_types, step_trait)]
 
+use core::ops::{Add, AddAssign, BitAnd, Sub, SubAssign};
+
 use augmented_tree::Aggregate;
 use splay_top_tree::{Boundary, EdgeId, LabelId, Summary, VertexId};
 
@@ -189,7 +191,7 @@ impl Incident {
     }
 }
 
-impl core::ops::Add for Incident {
+impl Add for Incident {
     type Output = Self;
 
     #[expect(clippy::suspicious_arithmetic_impl)]
@@ -200,14 +202,14 @@ impl core::ops::Add for Incident {
     }
 }
 
-impl core::ops::AddAssign for Incident {
+impl AddAssign for Incident {
     #[expect(clippy::suspicious_op_assign_impl)]
     fn add_assign(&mut self, rhs: Self) {
         self.bits |= rhs.bits;
     }
 }
 
-impl core::ops::Sub for Incident {
+impl Sub for Incident {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
@@ -217,9 +219,31 @@ impl core::ops::Sub for Incident {
     }
 }
 
-impl core::ops::SubAssign for Incident {
+impl SubAssign for Incident {
     fn sub_assign(&mut self, rhs: Self) {
         self.bits &= !rhs.bits;
+    }
+}
+
+impl BitAnd<Level> for Incident {
+    type Output = Incident;
+
+    fn bitand(self, rhs: Level) -> Self::Output {
+        let mask = (1u64 << rhs.as_bitmask()) - 1;
+        Incident {
+            bits: self.bits & mask,
+        }
+    }
+}
+
+impl BitAnd<Level> for &Incident {
+    type Output = Incident;
+
+    fn bitand(self, rhs: Level) -> Self::Output {
+        let mask = (1u64 << rhs.as_bitmask()) - 1;
+        Incident {
+            bits: self.bits & mask,
+        }
     }
 }
 
@@ -285,7 +309,7 @@ impl Size {
             .unwrap_or(0)
     }
 
-    fn add(&self, other: &Self) -> Self {
+    fn add_impl(&self, other: &Self) -> Self {
         let new_len = self.0.len().max(other.0.len());
         let mut out = Self::zeroed(new_len);
         for slot in Level::MIN
@@ -296,9 +320,9 @@ impl Size {
         out
     }
 
-    fn add_assign(&mut self, other: &Self) {
+    fn add_assign_impl(&mut self, other: &Self) {
         if self.0.len() < other.0.len() {
-            *self = self.add(other);
+            *self = self.add_impl(other);
         } else {
             for slot in 0..other.0.len() {
                 self.0[slot] += other.0[slot];
@@ -307,21 +331,65 @@ impl Size {
     }
 }
 
-impl core::ops::Add for &Size {
+impl Add for &Size {
     type Output = Size;
 
     fn add(self, rhs: Self) -> Self::Output {
-        self.add(rhs)
+        self.add_impl(rhs)
     }
 }
 
-impl core::ops::AddAssign<&Size> for Size {
+impl Add<Size> for &Size {
+    type Output = Size;
+
+    fn add(self, rhs: Size) -> Self::Output {
+        self.add_impl(&rhs)
+    }
+}
+
+impl Add for Size {
+    type Output = Size;
+
+    fn add(mut self, rhs: Self) -> Self::Output {
+        self.add_assign_impl(&rhs);
+        self
+    }
+}
+
+impl Add<&Size> for Size {
+    type Output = Size;
+
+    fn add(mut self, rhs: &Size) -> Self::Output {
+        self.add_assign_impl(rhs);
+        self
+    }
+}
+
+impl AddAssign<&Size> for Size {
     fn add_assign(&mut self, rhs: &Size) {
-        self.add_assign(rhs)
+        self.add_assign_impl(rhs)
     }
 }
 
-impl core::ops::BitAnd<Level> for &Size {
+impl AddAssign<Size> for Size {
+    fn add_assign(&mut self, rhs: Size) {
+        self.add_assign_impl(&rhs)
+    }
+}
+
+impl BitAnd<Level> for &Size {
+    type Output = Size;
+
+    fn bitand(self, rhs: Level) -> Self::Output {
+        let slots = rhs.as_bitmask() as usize;
+        let mut out = Size::zeroed(slots);
+        out.0.copy_from_slice(&self.0[..slots.min(self.0.len())]);
+
+        out
+    }
+}
+
+impl BitAnd<Level> for Size {
     type Output = Size;
 
     fn bitand(self, rhs: Level) -> Self::Output {
