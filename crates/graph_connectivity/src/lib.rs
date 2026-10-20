@@ -2,7 +2,7 @@
 #![feature(pattern_type_macro, pattern_types, step_trait)]
 
 use augmented_tree::Aggregate;
-use splay_top_tree::{Boundary, EdgeId, LabelId, Summary};
+use splay_top_tree::{Boundary, EdgeId, LabelId, Summary, VertexId};
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -335,21 +335,34 @@ impl core::ops::BitAnd<Level> for &Size {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PartEntry {
-    raw: Size,
+    part: Size,
+    diag: Size,
     incident: Incident,
+}
+
+impl Default for PartEntry {
+    fn default() -> Self {
+        Self {
+            part: Size::empty(),
+            diag: Size::empty(),
+            incident: Incident::empty(),
+        }
+    }
 }
 
 impl Aggregate for PartEntry {
     fn reduce(&self, other: &Self) -> Self {
         Self {
-            raw: &self.raw + &other.raw,
+            part: &self.part + &other.part,
+            diag: &self.diag + &other.diag,
             incident: self.incident + other.incident,
         }
     }
 
     fn identity() -> Self {
         Self {
-            raw: Size::empty(),
+            part: Size::empty(),
+            diag: Size::empty(),
             incident: Incident::empty(),
         }
     }
@@ -463,6 +476,15 @@ impl Summary for ClusterData {
             .expect("two children exist, reduction returns `Some`");
 
         // FS.Merge
+
+        struct ChildData<'a> {
+            v: VertexId,
+            b: Boundary,
+            cl: &'a ClusterData,
+            part: [PartTree; 2],
+            undo: [Option<PartTree>; 2],
+        }
+
         match ((left, ctx.left_boundary), (right, ctx.right_boundary)) {
             (
                 (path, path_boundary @ Boundary::Two { .. }),
@@ -475,34 +497,156 @@ impl Summary for ClusterData {
                 // heterogeneous point cluster
                 _ = (path, path_boundary, point, point_boundary);
             }
-            ((l, lb), (r, rb)) if matches!(ctx.parent_boundary, Boundary::None) => {
-                // both children are point clusters
-                _ = (l, lb, r, rb);
-            }
             ((l, lb), (r, rb)) => {
+                let size = &l.size + &r.size;
+
                 let c = lb.shared(&rb).expect("children must share a vertex");
 
                 let (vl, vr) = match ctx.parent_boundary {
-                    Boundary::One(vertex_id) => (c, c),
                     Boundary::Two { left, right } => {
                         assert!(lb.contains(left) && rb.contains(right));
                         (left, right)
                     }
-
-                    Boundary::None => panic!("parent boundary cannot be None"),
+                    _ => (c, c),
                 };
 
-                let size = &l.size + &r.size;
+                let mut left = ChildData {
+                    v: vl,
+                    b: lb,
+                    cl: l,
+                    part: [PartTree::new(), PartTree::new()],
+                    undo: [None, None],
+                };
+                let mut right = ChildData {
+                    v: vr,
+                    b: rb,
+                    cl: r,
+                    part: [PartTree::new(), PartTree::new()],
+                    undo: [None, None],
+                };
 
-                for (v, b, cl) in [(vl, lb, l), (vr, rb, r)] {
+                let mut parts = [PartTree::new(), PartTree::new()];
+
+                for child @ &mut ChildData { v, b, cl, .. } in [&mut left, &mut right] {
+                    let l = cl.pending_cover.max(cl.pending_uncover);
+
                     if v != c {
-                        let l = cl.pending_cover.max(cl.pending_uncover);
-                        let tree = &cl.part[b.index_of(v).unwrap()];
+                        for v in [v, c] {
+                            let tree = &cl.part[b.index_of(v).unwrap()];
+                            let sum = &tree.aggregate().part;
+                            let diag = sum & cl.pending_cover;
 
-                        //let leq_tree = tree.
+                            let leq_tree: PartTree =
+                                tree.range(..=l).map(|(k, v)| (*k, v.clone())).collect();
+
+                            let mut gt_tree: PartTree =
+                                tree.range(l..).map(|(k, v)| (*k, v.clone())).collect();
+
+                            gt_tree.entry(cl.pending_cover).update_or_insert_with(
+                                |entry| {
+                                    entry.part += sum;
+                                    entry.diag += &diag;
+                                },
+                                || PartEntry {
+                                    part: sum.clone(),
+                                    diag: diag.clone(),
+                                    incident: Incident::empty(),
+                                },
+                            );
+
+                            child.undo[b.index_of(v).unwrap()] = Some(leq_tree);
+                            child.part[b.index_of(v).unwrap()] = gt_tree;
+                        }
                     } else {
-                    }
+                        let tree = cl.part[b.index_of(v).unwrap()].clone();
+                        child.part[b.index_of(c).unwrap()] = tree;
+                        child.undo = [None, None];
+                    };
                 }
+
+                let mut asdf = |x: &mut ChildData, y: &mut ChildData| {
+                    let x_tree = &x.part[x.b.index_of(x.v).unwrap()];
+                    let y_tree = &y.part[y.b.index_of(c).unwrap()];
+                    //asd
+                    let suffix = y_tree.range_aggregate(x.cl.cover..);
+
+                    let x_at_cover = x_tree.get(&x.cl.cover).cloned().unwrap_or_default();
+
+                    let part = &x_at_cover.part + &suffix.part;
+                    let diag = &x_at_cover.diag + &(&suffix.part & x.cl.cover);
+
+                    let (xtree2, xundo2) = if c == x.v {
+                        (
+                            PartTree::from_iter([(
+                                Level::MAX,
+                                PartEntry {
+                                    part: x.cl.size.clone(),
+                                    diag: x.cl.size.clone(),
+                                    incident: Incident::empty(),
+                                },
+                            )]),
+                            None,
+                        )
+                    } else {
+                        (
+                            x_tree
+                                .range(x.cl.cover.increment()..)
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect::<PartTree>(),
+                            Some(
+                                x_tree
+                                    .range(..=x.cl.cover)
+                                    .map(|(k, v)| (*k, v.clone()))
+                                    .collect::<PartTree>(),
+                            ),
+                        )
+                    };
+
+                    let (ytree3, yundo3) = if c == y.v {
+                        (
+                            None,
+                            PartTree::from_iter([(
+                                Level::MAX,
+                                PartEntry {
+                                    part: y.cl.size.clone(),
+                                    diag: y.cl.size.clone(),
+                                    incident: Incident::empty(),
+                                },
+                            )]),
+                        )
+                    } else {
+                        (
+                            Some(
+                                y_tree
+                                    .range(..x.cl.cover)
+                                    .map(|(k, v)| (*k, v.clone()))
+                                    .collect::<PartTree>(),
+                            ),
+                            y_tree
+                                .range(x.cl.cover..)
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect::<PartTree>(),
+                        )
+                    };
+
+                    let mut tree = xtree2.clone();
+                    tree.insert(
+                        x.cl.cover,
+                        PartEntry {
+                            part,
+                            diag,
+                            incident: Incident::empty(),
+                        },
+                    );
+                    tree.extend(&ytree3.unwrap_or_default());
+
+                    parts[ctx.parent_boundary.index_of(x.v).unwrap()] = tree;
+
+                    let _ = (xtree2, xundo2, ytree3, yundo3, tree);
+                };
+
+                asdf(&mut left, &mut right);
+                asdf(&mut right, &mut left);
 
                 _ = (l, r, c);
             }
