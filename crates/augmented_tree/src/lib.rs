@@ -2494,6 +2494,7 @@ impl<K, V: Aggregate> BTree<K, V> {
     /// Creates a new, empty tree.
     pub fn new() -> Self {
         BTree {
+            // TODO: make this none on init
             root: Root::new(),
             length: 0,
         }
@@ -2746,6 +2747,21 @@ impl<K, V: Aggregate> BTree<K, V> {
             Range::default()
         } else {
             self.root.reborrow().range_search(range)
+        }
+    }
+
+    pub fn extend(&mut self, other: &Self)
+    where
+        K: Ord + Clone,
+        V: Aggregate + Clone,
+    {
+        for (k, v) in other.iter() {
+            self.entry(k.clone()).update_or_insert_with(
+                |entry| {
+                    *entry = entry.reduce(v);
+                },
+                || v.clone(),
+            );
         }
     }
 
