@@ -1124,49 +1124,23 @@ impl FindBridge {
             .cluster_vertex(cluster)
             .expect("the vertex must be live");
 
+        let mut bridge_vertices = Vec::new();
+
         loop {
-            let Some(edge) = self
-                .top_tree
-                .leaf_weight(cluster)
-                .into_label()
-                .expect("the vertex must be live")
-                .edges()
-                .next()
-            else {
+            let Some(edge) = self.incident_edges(vertex).next() else {
                 break;
             };
 
-            let Some(EdgeSlot::NonTree(NonTreeEdge { u, v, level })) = self.edges.remove(edge)
-            else {
-                eprintln!("FindBridge::remove_vertex found a tree edge in vertex labels");
-                break;
-            };
+            let (v, w) = self.endpoints(edge).unwrap();
 
-            // `detach` took this vertex's own `VertexLabels` away, so only the
-            // other endpoint of a non-self record still needs cleaning. A
-            // self-edge label (u == v) lives only in the removed vertex.
-            let survivors = [u, v].into_iter().filter(|c| *c != cluster);
-            self.remove_edge_labels(edge, level, survivors);
+            if self.remove_edge(edge) {
+                if v == vertex {
+                    bridge_vertices.push(w);
+                } else {
+                    bridge_vertices.push(v);
+                }
+            }
         }
-
-        let tree_edges = self
-            .top_tree
-            .forest()
-            .incident_edge_weights(tree_vertex)
-            .copied()
-            .collect::<Vec<_>>();
-
-        let bridge_vertices = tree_edges
-            .into_iter()
-            .filter_map(|edge| {
-                let endpoints = self.remove_tree_edge(edge);
-
-                endpoints
-                    .map(|(a, b)| if a == tree_vertex { b } else { a })
-                    .and_then(|v| self.vertex_cluster(v))
-                    .map(VertexId)
-            })
-            .collect::<Vec<_>>();
 
         debug_assert_eq!(
             self.top_tree
