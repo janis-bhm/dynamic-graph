@@ -1328,6 +1328,221 @@ fn remove_vertex_with_parallel_and_tree_incident_edges() {
     assert_internal_invariants(&mut graph, "vertex with a parallel incident edge removed");
 }
 
+/// Removing vertices in sequence must preserve the graph-level reduction across
+/// isolated vertices, covered/non-tree incident records, and plain bridge tree
+/// edges, including when the final vertex is removed from each component.
+///
+/// This starts with a triangle and a bridge tail, a separate tree, and an
+/// isolated vertex. Removing the triangle endpoint exercises incident
+/// non-tree-edge deletion and uncovering; the later removals cut only plain
+/// bridges. Draining all vertices must leave an empty forest that can still be
+/// used to add vertices and insert an edge.
+#[test]
+fn removing_vertices_in_sequence_keeps_the_graph_valid() {
+    let mut graph = Graph::new(8);
+    graph.insert(0, 1).expect("0-1 is a valid non-loop edge");
+    let tree_12 = graph.insert(1, 2).expect("1-2 is a valid non-loop edge");
+    graph.insert(2, 0).expect("2-0 closes the triangle");
+    let tail_23 = graph.insert(2, 3).expect("2-3 is a valid non-loop edge");
+    let tree_45 = graph.insert(4, 5).expect("4-5 is a valid non-loop edge");
+    let tree_56 = graph.insert(5, 6).expect("5-6 is a valid non-loop edge");
+
+    // There are six graph edges: the triangle contributes three, including one
+    // non-tree edge, and the tail and separate path contribute one and two.
+    assert_eq!(graph.vertex_count(), 8, "all initial vertices are live");
+    assert_eq!(graph.edge_count(), 6, "six edges were inserted");
+    assert_eq!(
+        graph.fb.tree_edge_count(),
+        5,
+        "all but the triangle-closing edge are tree edges"
+    );
+    assert_eq!(graph.find_bridge(3), Some(tail_23), "2-3 is a bridge");
+    assert_eq!(
+        graph.find_bridge_between(0, 2),
+        None,
+        "the triangle path has no separating bridge"
+    );
+    assert_eq!(
+        graph.two_edge_component_size(0),
+        3,
+        "the triangle is bridgeless"
+    );
+    for vertex in [3, 4, 5, 6] {
+        assert_eq!(
+            graph.two_edge_component_size(vertex),
+            1,
+            "two_edge_component_size({vertex})"
+        );
+    }
+    assert_eq!(graph.find_bridge(5), Some(tree_45), "4-5 is a bridge");
+    assert_eq!(
+        graph.find_bridge_between(4, 5),
+        Some(tree_45),
+        "4-5 separates 4 from 5"
+    );
+    assert_eq!(
+        graph.find_bridge_between(5, 6),
+        Some(tree_56),
+        "5-6 separates 5 from 6"
+    );
+    assert_internal_invariants(
+        &mut graph,
+        "initial triangle, tail, path, and isolated vertex",
+    );
+    graph.assert_matches("initial triangle, tail, path, and isolated vertex");
+
+    assert!(
+        graph.remove_vertex(7),
+        "removing the isolated vertex succeeds"
+    );
+    assert_eq!(graph.vertex_count(), 7, "one isolated vertex is gone");
+    assert_eq!(graph.edge_count(), 6, "no incident edge needed removal");
+    assert_eq!(
+        graph.component_size(0),
+        4,
+        "the triangle and tail stay joined"
+    );
+    assert_eq!(
+        graph.find_bridge(3),
+        Some(tail_23),
+        "the tail bridge remains"
+    );
+    assert_internal_invariants(&mut graph, "after removing isolated vertex 7");
+    graph.assert_matches("after removing isolated vertex 7");
+
+    assert!(
+        graph.remove_vertex(0),
+        "removing triangle vertex 0 succeeds"
+    );
+    assert_eq!(graph.vertex_count(), 6, "vertex 0 is gone");
+    assert_eq!(graph.edge_count(), 4, "four edges remain");
+    assert_eq!(
+        graph.fb.tree_edge_count(),
+        4,
+        "the remaining graph is a four-edge forest"
+    );
+    assert_eq!(graph.two_edge_component_size(1), 1, "the cycle is gone");
+    assert_eq!(
+        graph.find_bridge_between(1, 2),
+        Some(tree_12),
+        "1-2 is now a bridge"
+    );
+    assert_eq!(
+        graph.find_bridge_between(2, 3),
+        Some(tail_23),
+        "2-3 remains a bridge"
+    );
+    assert_eq!(graph.component_size(1), 3, "1-2-3 remains connected");
+    assert_internal_invariants(&mut graph, "after removing triangle vertex 0");
+    graph.assert_matches("after removing triangle vertex 0");
+
+    assert!(graph.remove_vertex(2), "removing path vertex 2 succeeds");
+    assert_eq!(graph.vertex_count(), 5, "vertex 2 is gone");
+    assert_eq!(graph.edge_count(), 2, "only the separate tree remains");
+    assert_eq!(
+        graph.fb.tree_edge_count(),
+        2,
+        "the separate tree is unchanged"
+    );
+    for vertex in [1, 3] {
+        assert_eq!(
+            graph.component_size(vertex),
+            1,
+            "vertex {vertex} is isolated"
+        );
+        assert_eq!(
+            graph.find_bridge(vertex),
+            None,
+            "vertex {vertex} has no bridge"
+        );
+    }
+    assert_eq!(
+        graph.find_bridge_between(4, 5),
+        Some(tree_45),
+        "4-5 remains a bridge"
+    );
+    assert_internal_invariants(&mut graph, "after removing path vertex 2");
+    graph.assert_matches("after removing path vertex 2");
+
+    assert!(
+        graph.remove_vertex(5),
+        "removing tree interior vertex 5 succeeds"
+    );
+    assert_eq!(graph.vertex_count(), 4, "vertex 5 is gone");
+    assert_eq!(graph.edge_count(), 0, "both incident bridges are removed");
+    assert_eq!(
+        graph.fb.tree_edge_count(),
+        0,
+        "the forest has no tree edges"
+    );
+    for vertex in [1, 3, 4, 6] {
+        assert_eq!(
+            graph.component_size(vertex),
+            1,
+            "vertex {vertex} is isolated"
+        );
+    }
+    assert_internal_invariants(&mut graph, "after removing tree interior vertex 5");
+    graph.assert_matches("after removing tree interior vertex 5");
+
+    for (vertex, remaining) in [(1, 3), (3, 2), (4, 1), (6, 0)] {
+        assert!(
+            graph.remove_vertex(vertex),
+            "removing remaining vertex {vertex} succeeds"
+        );
+        assert_eq!(graph.vertex_count(), remaining, "after removing {vertex}");
+        assert_eq!(
+            graph.edge_count(),
+            0,
+            "no edges remain after removing {vertex}"
+        );
+        assert_eq!(
+            graph.fb.tree_edge_count(),
+            0,
+            "the forest remains edge-free"
+        );
+        let context = format!("after draining vertex {vertex}");
+        assert_internal_invariants(&mut graph, &context);
+        graph.assert_matches(&context);
+    }
+    assert_eq!(graph.vertex_count(), 0, "all vertices have been removed");
+    assert_eq!(graph.edge_count(), 0, "the graph is empty");
+    assert_eq!(
+        graph.fb.tree_edge_count(),
+        0,
+        "the empty graph has no tree edges"
+    );
+    assert_eq!(
+        graph.fb.top_tree.forest().node_count(),
+        0,
+        "the forest is empty"
+    );
+
+    for removed in 0..=7 {
+        assert!(
+            !graph.remove_vertex(removed),
+            "tombstoned vertex {removed} cannot be removed again"
+        );
+    }
+    assert_eq!(
+        graph.insert(0, 1),
+        None,
+        "tombstones are not usable endpoints"
+    );
+
+    let fresh_left = graph.add_vertex();
+    assert_eq!(fresh_left, 8, "the first new index is never recycled");
+    let fresh_right = graph.add_vertex();
+    assert_eq!(fresh_right, 9, "the next fresh index follows it");
+    let fresh_edge = graph
+        .insert(fresh_left, fresh_right)
+        .expect("fresh vertices can be joined after draining");
+    assert_eq!(graph.find_bridge(fresh_left), Some(fresh_edge));
+    assert_eq!(graph.component_size(fresh_left), 2);
+    assert_internal_invariants(&mut graph, "fresh edge inserted after draining the graph");
+    graph.assert_matches("fresh edge inserted after draining the graph");
+}
+
 /// Linking two trees at interior vertices must produce a tree, and the join
 /// must be visible on the handle it was given.
 ///

@@ -18,7 +18,7 @@ The public API is therefore that module's worth of items re-exported from `lib.r
 - The test tree hangs off the two `#[cfg(test)]` modules:
   - `src/cover_level/tests.rs` — the original unit suite, **44 tests** (one of them `#[ignore]`d): `SizeVector`/`PartTree` internals, `link`, `cover`/`uncover`, `find_first_label`, `find_size_internal`, the level-cap edge cases, and the `remove_edge`/`recover_phase` cases. Its `Naive` oracle is a simple graph (`BTreeMap<usize, BTreeSet<usize>>`) with no multiplicities and no bridge analysis; it also defines a local `Rng`.
   - `src/cover_level/graph_api.rs` — the differential foundation, plus one smoke test (`graph_level_triangle_through_the_driver`): a `Naive` *multigraph* oracle with real bridge analysis (`is_bridge`, `bridges`, `bridge_pairs`, `two_edge_connected`, `two_edge_component_size`, `bridge_separating`, `bridge_in_component`, `component_labels`), a `Graph` driver that emulates Appendix A `Insert`/`Delete` on top of the `FindBridge` API, and the assertion helpers `assert_matches_naive`, `assert_internal_invariants`, `assert_bookkeeping`, `assert_endpoints_match`, `assert_returned_bridge_in_component`, `assert_returned_separating_bridge`, `pairs`. Its `insert` is a thin pass-through to `FindBridge::link`, because `link` completes both branches of Appendix A's `Insert`.
-  - `src/cover_level/graph_api/fixed.rs` — **19 tests**: deterministic hand-built shapes (triangle, parallel edges, trees, disconnected components, a K4 deletion, vertex removal) and a four-fixture oracle table. Ported from the crate's pre-existing graph-module suite.
+  - `src/cover_level/graph_api/fixed.rs` — **20 tests**: deterministic hand-built shapes (triangle, parallel edges, trees, disconnected components, a K4 deletion, vertex removal) and a four-fixture oracle table. Ported from the crate's pre-existing graph-module suite.
   - `src/cover_level/graph_api/randomized.rs` — **2 tests**: randomized differential runs, 6 seeds × 180 steps (three seeds per test), with a `Coverage` counter that fails a run that stops reaching `Swap`/`Recover`, plain cuts, non-tree deletion, parallel edges or bridgeless states.
   - `src/cover_level/graph_api/surface.rs` — **16 tests**: public-API contract tests, with the reach the public API lacks supplied by the crate-private `cover`/`uncover` — see *Tests*.
 - `top_tree` supplies the forest and summary callbacks; it needs nightly (`#![feature(pattern_types, pattern_type_macro, structural_match)]` in `crates/top_tree/src/lib.rs`).
@@ -53,10 +53,10 @@ Use those sections for the algorithmic invariants, but check the Rust before att
 
 ## Tests
 
-82 lib tests — 81 run by default and 1 `#[ignore]`d — plus 2 doctests, all passing:
+83 lib tests — 82 run by default and 1 `#[ignore]`d — plus 2 doctests, all passing:
 
-- `cargo test -p find_bridge --lib` — 82 tests: 44 in `cover_level::tests`, 1 in `cover_level::graph_api`, 19 in `cover_level::graph_api::fixed`, 2 in `cover_level::graph_api::randomized`, 16 in `cover_level::graph_api::surface`. `cover_level::tests::randomized_cover_uncover` carries `#[ignore = "this test is slow; run it manually"]`, so the default run reports 81 passed / 1 ignored; it does pass when asked for with `cargo test -p find_bridge --lib -- --ignored` (or `-- --include-ignored`).
-- `cargo test -p find_bridge` — the same 81 plus 1 ignored plus the 2 `lib.rs` doctests.
+- `cargo test -p find_bridge --lib` — 83 tests: 44 in `cover_level::tests`, 1 in `cover_level::graph_api`, 20 in `cover_level::graph_api::fixed`, 2 in `cover_level::graph_api::randomized`, 16 in `cover_level::graph_api::surface`. `cover_level::tests::randomized_cover_uncover` carries `#[ignore = "this test is slow; run it manually"]`, so the default run reports 82 passed / 1 ignored; it does pass when asked for with `cargo test -p find_bridge --lib -- --ignored` (or `-- --include-ignored`).
+- `cargo test -p find_bridge` — the same 82 plus 1 ignored plus the 2 `lib.rs` doctests.
 - `cargo test -p top_tree` — 24 tests plus 1 doctest.
 - One module at a time: `cargo test -p find_bridge --lib -- cover_level::tests`, `... -- cover_level::graph_api::fixed`, `... -- cover_level::graph_api::randomized`, `... -- cover_level::graph_api::surface`. The randomized suite prints its `Coverage` counters to stderr, so add `-- --nocapture` to see them.
 - `cargo test -p find_bridge --doc` — the 2 `lib.rs` doctests, which must compile against the public API alone, so they may not touch the private `cover`/`uncover`.
