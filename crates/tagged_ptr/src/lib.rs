@@ -3,7 +3,7 @@
 //! The pointer's alignment determines how many high address bits can be used
 //! for the tag while preserving the original pointer value.
 
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 
 /// # Safety
 /// `BITS` must not be less than the number of bits required to store the tag.
@@ -52,10 +52,37 @@ const fn bits_for_tags(mut tags: &[usize]) -> u32 {
     bits
 }
 
-#[derive(Debug, Clone, Copy)]
 pub struct TaggedPtr<P: Aligned + ?Sized, T> {
     packed: *mut P,
     _marker: core::marker::PhantomData<T>,
+}
+
+impl<P: Aligned + ?Sized, T: Tag + PartialEq> PartialEq for TaggedPtr<P, T> {
+    fn eq(&self, other: &Self) -> bool {
+        ptr::addr_eq(self.as_ptr(), other.as_ptr()) && self.tag() == other.tag()
+    }
+}
+
+impl<P: Aligned + ?Sized, T: Tag + Eq> Eq for TaggedPtr<P, T> {}
+
+impl<P: Aligned + ?Sized, T: Copy> Copy for TaggedPtr<P, T> {}
+
+impl<P: Aligned + ?Sized, T: Clone> Clone for TaggedPtr<P, T> {
+    fn clone(&self) -> Self {
+        Self {
+            packed: self.packed,
+            _marker: self._marker,
+        }
+    }
+}
+
+impl<P: Aligned + ?Sized, T: Tag + std::fmt::Debug> std::fmt::Debug for TaggedPtr<P, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaggedPtr")
+            .field("ptr", &self.as_ptr())
+            .field("tag", &self.tag())
+            .finish()
+    }
 }
 
 impl<P, T> TaggedPtr<P, T>
