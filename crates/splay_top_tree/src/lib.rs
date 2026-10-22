@@ -611,7 +611,11 @@ impl<'a, W, A: Allocator> DormantTopTreeWeightMut<'a, W, A> {
         }
     }
 
-    pub fn weight(&mut self) -> &mut W {
+    pub fn weight(&self) -> &W {
+        self.weight
+    }
+
+    pub fn weight_mut(&mut self) -> &mut W {
         self.weight
     }
 
