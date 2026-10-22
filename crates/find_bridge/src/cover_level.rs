@@ -1127,9 +1127,12 @@ impl FindBridge {
         let mut bridge_vertices = Vec::new();
 
         loop {
-            let Some(edge) = self.incident_edges(vertex).next() else {
+            let Some(edge) = self.top_tree.forest().incident_edge_ids(tree_vertex).next() else {
                 break;
             };
+            let &cluster = self.top_tree.forest().edge_weight(edge).unwrap();
+
+            let &edge = self.top_tree.edge_weight(cluster).unwrap();
 
             let (v, w) = self.endpoints(edge).unwrap();
 
