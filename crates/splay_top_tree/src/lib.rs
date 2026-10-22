@@ -935,9 +935,13 @@ impl<W, A: Allocator> TopTree<W, A> {
             self.cut(v, w);
         }
 
+        assert!(self.tree.incident_edge_weights(vv).next().is_none(),);
+
         while let Some(&LabelInfo { id, .. }) = self.tree.incident_label_weights(vv).next() {
             self.detach(id);
         }
+
+        assert!(self.tree.incident_label_weights(vv).next().is_none(),);
 
         let mut removal = self.tree.remove_vertex(vv);
 
