@@ -163,3 +163,9 @@ pub trait Summary: Sized {
     }
     fn flip(&mut self) {}
 }
+
+impl Summary for () {
+    fn create_edge(_e: index::EdgeId) -> Self {}
+    fn create_label(_l: index::LabelId) -> Self {}
+    fn merge(_left: &Self, _right: &Self, _ctx: &MergeContext) -> Self {}
+}
