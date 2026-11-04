@@ -5,6 +5,7 @@ use core::ops::{Add, AddAssign, BitAnd, Sub, SubAssign};
 
 use augmented_tree::Aggregate;
 use splay_top_tree::{Boundary, EdgeId, LabelId, Summary, VertexId};
+use trees::Monoid;
 
 #[expect(non_camel_case_types)]
 #[derive(Clone, Copy)]
@@ -418,15 +419,7 @@ impl Default for PartEntry {
     }
 }
 
-impl Aggregate for PartEntry {
-    fn reduce(&self, other: &Self) -> Self {
-        Self {
-            part: &self.part + &other.part,
-            diag: &self.diag + &other.diag,
-            incident: self.incident + other.incident,
-        }
-    }
-
+impl Monoid for PartEntry {
     fn identity() -> Self {
         Self {
             part: Size::empty(),
@@ -434,9 +427,17 @@ impl Aggregate for PartEntry {
             incident: Incident::empty(),
         }
     }
+
+    fn combine(&self, other: &Self) -> Self {
+        Self {
+            part: &self.part + &other.part,
+            diag: &self.diag + &other.diag,
+            incident: self.incident + other.incident,
+        }
+    }
 }
 
-type PartTree = augmented_tree::BTree<Level, PartEntry>;
+type PartTree = trees::AugmentedBTree<Level, PartEntry>;
 
 pub struct ClusterData {
     pub cover: Level,
@@ -601,7 +602,9 @@ impl Summary for ClusterData {
                     if v != c {
                         for v in [v, c] {
                             let tree = &cl.part[b.index_of(v).unwrap()];
-                            let sum = &tree.aggregate().part;
+                            let sum = &tree
+                                .sum()
+                                .map_or_else(|| Size::default(), |e| e.part.clone());
                             let diag = sum & cl.pending_cover;
 
                             let leq_tree: PartTree =
@@ -610,7 +613,7 @@ impl Summary for ClusterData {
                             let mut gt_tree: PartTree =
                                 tree.range(l..).map(|(k, v)| (*k, v.clone())).collect();
 
-                            gt_tree.entry(cl.pending_cover).update_or_insert_with(
+                            gt_tree.entry(cl.pending_cover).modify_or_insert_with(
                                 |entry| {
                                     entry.part += sum;
                                     entry.diag += &diag;
@@ -636,7 +639,7 @@ impl Summary for ClusterData {
                     let x_tree = &x.part[x.b.index_of(x.v).unwrap()];
                     let y_tree = &y.part[y.b.index_of(c).unwrap()];
                     //asd
-                    let suffix = y_tree.range_aggregate(x.cl.cover..);
+                    let suffix = y_tree.range_sum(x.cl.cover..);
 
                     let x_at_cover = x_tree.get(&x.cl.cover).cloned().unwrap_or_default();
 
@@ -706,9 +709,9 @@ impl Summary for ClusterData {
                             incident: Incident::empty(),
                         },
                     );
-                    tree.extend(&ytree3.unwrap_or_default());
+                    tree.merge(ytree3.clone().unwrap_or_default());
 
-                    parts[ctx.parent_boundary.index_of(x.v).unwrap()] = tree;
+                    parts[ctx.parent_boundary.index_of(x.v).unwrap()] = tree.clone();
 
                     let _ = (xtree2, xundo2, ytree3, yundo3, tree);
                 };
