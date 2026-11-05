@@ -841,10 +841,31 @@ impl<W, NodeType> Handle<W, NodeType> {
         unsafe { Handle::new_internal(self.node.cast()) }
     }
 
+    pub fn delete_all_ancestors_splitting<A: Allocator>(mut self, allocator: &A)
+    where
+        W: Summary,
+    {
+        if let Some(parent) = self.parent() {
+            let mut sibling = self.sibling().expect("node must have a sibling");
+            parent.delete_all_ancestors_splitting(allocator);
+
+            unsafe {
+                sibling.node.as_mut().set_parent(None);
+            }
+        }
+
+        self.split();
+
+        unsafe {
+            Node::dealloc(self.node, allocator);
+        }
+    }
+
     pub fn delete_all_ancestors<A: Allocator>(self, allocator: &A) {
         if let Some(parent) = self.parent() {
             let mut sibling = self.sibling().expect("node must have a sibling");
             parent.delete_all_ancestors(allocator);
+
             unsafe {
                 sibling.node.as_mut().set_parent(None);
             }
@@ -863,16 +884,10 @@ impl<W, NodeType> Handle<W, NodeType> {
         node
     }
 
-    /// Recursively calls `Summary::split` for all nodes on the root path of
-    /// `self`
-    pub fn recursively_split_down(&mut self)
+    pub fn split(&mut self)
     where
         W: Summary,
     {
-        if let Some(mut parent) = self.parent() {
-            parent.recursively_split_down();
-        }
-
         if let LeafOrInternal::Internal(mut internal) = self.force() {
             let [mut left, mut right] = internal.flipped_children();
             let left_boundary = left.flipped_boundary().into_boundary();
@@ -890,6 +905,19 @@ impl<W, NodeType> Handle<W, NodeType> {
                 internal.weight_mut().split(l, r, &ctx);
             }
         }
+    }
+
+    /// Recursively calls `Summary::split` for all nodes on the root path of
+    /// `self`
+    pub fn recursively_split_down(&mut self)
+    where
+        W: Summary,
+    {
+        if let Some(mut parent) = self.parent() {
+            parent.recursively_split_down();
+        }
+
+        self.split();
     }
 
     pub fn recursively_recompute_weight_up(self)
@@ -995,6 +1023,8 @@ impl<W> Handle<W, marker::Internal> {
     where
         W: Summary,
     {
+        self.split();
+
         let [left, right] = self.flipped_children();
         let left_boundary = left.flipped_boundary().into_boundary();
         let right_boundary = right.flipped_boundary().into_boundary();

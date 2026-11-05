@@ -293,8 +293,12 @@ where
 {
     let resolved = tree.resolve_vertex(v);
 
-    let consuming = find_consuming_node(tree, resolved);
+    let mut consuming = find_consuming_node(tree, resolved);
     let mut root = None;
+
+    if let Some(ref mut consuming_node) = consuming {
+        consuming_node.recursively_split_down();
+    }
 
     let mut node = consuming;
     while let Some(mut some_node) = node {
@@ -413,7 +417,7 @@ where
     let edge_handle = Handle::new_edge(edge.weight.node.cast::<Node<W>>());
 
     unsafe { ptr::read(&edge_handle) }.full_splay();
-    edge_handle.delete_all_ancestors(&tree.allocator);
+    edge_handle.delete_all_ancestors_splitting(&tree.allocator);
 
     let (weight, swap) = tree.tree.remove_edge(id);
     tree.edge_ids.remove(weight.id);

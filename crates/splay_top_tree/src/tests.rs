@@ -228,13 +228,13 @@ impl fmt::Display for Cii {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_struct("Cii");
         if let Some(v) = self.left {
-            f.field_with("left", |f| v.fmt(f));
+            f.field("left", &v);
         }
         if let Some(v) = self.mid {
-            f.field_with("mid", |f| v.fmt(f));
+            f.field("mid", &v);
         }
         if let Some(v) = self.right {
-            f.field_with("right", |f| v.fmt(f));
+            f.field("right", &v);
         }
         f.finish()
     }
@@ -278,7 +278,7 @@ impl fmt::Display for ClusterKeys {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_list();
         for key in &self.0 {
-            f.entry_with(|f| key.fmt(f));
+            f.entry(key);
         }
 
         f.finish()
